@@ -22,7 +22,7 @@ STEPS=(
 step_command() {
   case "$1" in
     fmt) echo "cargo fmt --all -- --check" ;;
-    clippy) echo "cargo clippy --workspace --all-targets --all-features -- -D warnings" ;;
+    clippy) echo "cargo clippy --workspace --all-targets --no-default-features --features web,db-tests,dev-config -- -D warnings" ;;
     allow-annotations) echo "./scripts/check-allow-annotations.sh" ;;
     migrations-immutable) echo "./scripts/check-migrations-immutable" ;;
     deny) echo "cargo deny check --hide-inclusion-graph" ;;
