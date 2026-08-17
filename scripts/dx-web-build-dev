@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+
+time dx build --web --release --debug-symbols=false --features dev-config

@@ -1,0 +1,115 @@
+#!/bin/zsh
+set -eu
+unsetopt BG_NICE 2>/dev/null || true
+
+SCRIPT_DIR=${0:A:h}
+ROOT_DIR=${SCRIPT_DIR:h:h}
+MODE="in-process"
+REUSE_DATASET=""
+SERVER_HOST=127.0.0.1
+SERVER_PORT=8081
+SERVER_BIN="${ROOT_DIR}/target/dx/bitgarth-app/release/web/server"
+SERVER_PID=""
+PROJECT_DIR=""
+FORWARDED_ARGS=()
+IFS='|' read -r PERF_RUN_TIMESTAMP PERF_RUN_TIMESTAMP_UTC <<< "$(date -u +"%Y-%m-%dT%H-%M-%SZ|%Y-%m-%dT%H:%M:%SZ")"
+PERF_RUN_DIR="${ROOT_DIR}/test-results/perf/${PERF_RUN_TIMESTAMP}"
+PERF_LOGS_DIR="${PERF_RUN_DIR}/logs"
+SERVER_LOG="${PERF_LOGS_DIR}/server.log"
+
+index=1
+while (( index <= $# )); do
+  arg="${argv[index]}"
+  case "${arg}" in
+    --mode)
+      if (( index == $# )); then
+        echo "missing value for --mode" >&2
+        exit 2
+      fi
+      MODE="${argv[index + 1]}"
+      FORWARDED_ARGS+=("${arg}" "${argv[index + 1]}")
+      (( index += 2 ))
+      ;;
+    --reuse-dataset)
+      if (( index == $# )); then
+        echo "missing value for --reuse-dataset" >&2
+        exit 2
+      fi
+      REUSE_DATASET="${argv[index + 1]:A}"
+      FORWARDED_ARGS+=("${arg}" "${argv[index + 1]}")
+      (( index += 2 ))
+      ;;
+    --server-port)
+      if (( index == $# )); then
+        echo "missing value for --server-port" >&2
+        exit 2
+      fi
+      server_port_value="${argv[index + 1]}"
+      if [[ "${server_port_value}" != <-> ]] \
+        || (( server_port_value < 1 || server_port_value > 65535 )); then
+        echo "--server-port must be an integer from 1 through 65535" >&2
+        exit 2
+      fi
+      SERVER_PORT="${server_port_value}"
+      (( index += 2 ))
+      ;;
+    *)
+      FORWARDED_ARGS+=("${arg}")
+      (( index += 1 ))
+      ;;
+  esac
+done
+
+mkdir -p "${PERF_LOGS_DIR}"
+cd "${ROOT_DIR}"
+
+cleanup() {
+  if [[ -n "${SERVER_PID}" ]]; then
+    kill "${SERVER_PID}" >/dev/null 2>&1 || true
+    wait "${SERVER_PID}" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+if [[ "${MODE}" == "real-server" || "${MODE}" == "real_server" ]]; then
+  if [[ -n "${REUSE_DATASET}" ]]; then
+    PROJECT_DIR="${REUSE_DATASET}"
+  else
+    PROJECT_DIR="${PERF_RUN_DIR}/data"
+    mkdir -p "${PROJECT_DIR}"
+  fi
+
+  export BITGARTH_PROJECT_DIR="${PROJECT_DIR}"
+  BASE_URL="http://${SERVER_HOST}:${SERVER_PORT}/"
+
+  ./scripts/dx-web-build
+
+  IP="${SERVER_HOST}" PORT="${SERVER_PORT}" BITGARTH_PROJECT_DIR="${PROJECT_DIR}" \
+    BITGARTH_SYNC_CONTROL=1 "${SERVER_BIN}" >"${SERVER_LOG}" 2>&1 &
+  SERVER_PID=$!
+
+  server_ready=false
+  for _ in {1..120}; do
+    if curl -fsS "${BASE_URL}health" >/dev/null 2>&1; then
+      server_ready=true
+      break
+    fi
+    if ! kill -0 "${SERVER_PID}" >/dev/null 2>&1; then
+      echo "Real server exited early; see ${SERVER_LOG}" >&2
+      exit 1
+    fi
+    sleep 0.5
+  done
+
+  if [[ "${server_ready}" != true ]]; then
+    echo "Timed out waiting for real server health on ${BASE_URL}; see ${SERVER_LOG}" >&2
+    exit 1
+  fi
+
+  FORWARDED_ARGS+=("--base-url" "${BASE_URL}")
+fi
+
+cargo run -p bitgarth-app --no-default-features --features server,dev-config -- perf run \
+  --timestamp "${PERF_RUN_TIMESTAMP_UTC}" \
+  --output-dir "${PERF_RUN_DIR}" \
+  "${FORWARDED_ARGS[@]}"

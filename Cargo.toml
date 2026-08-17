@@ -1,0 +1,96 @@
+[package]
+name = "bitgarth-app"
+version = "0.3.0"
+authors = ["BitGarth <dev@bitgarth.app>"]
+edition = "2024"
+publish = false
+
+[workspace]
+resolver = "3"
+members = ["crates/bitgarth-cli"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+dioxus = { version = "0.7.9", features = ["fullstack", "router"] }
+reqwest = { version = "0.12.26", optional = true, features = ["json", "blocking"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0", features = ["raw_value"] }
+semver = { version = "1", optional = true }
+url = { version = "2.5", features = ["serde"] }
+ulid = { version = "1.2.1", features = ["serde"] }
+iso4217-static = { version = "0.2.2", features = ["serde", "alloc"] }
+bs58 = { version = "0.5", features = ["check"] }
+rusqlite = { version = "0.32.1", optional = true, features = ["bundled-sqlcipher", "chrono"] }
+chrono = { version = "0.4", features = ["serde"] }
+rust_decimal = "1.36"
+chrono-tz = "0.10"
+iana-time-zone = { version = "0.1", optional = true }
+directories = { version = "6.0", optional = true }
+argon2 = { version = "0.5", optional = true }
+rand = { version = "0.8", optional = true }
+base64 = { version = "0.22", optional = true }
+ed25519-dalek = { version = "2", optional = true }
+refinery = { version = "0.8", features = ["rusqlite"], optional = true }
+flate2 = { version = "1", optional = true }
+getrandom = "0.3"
+once_cell = "1.19"
+
+tracing = "0.1.44"
+hex = { version = "0.4", optional = true }
+sha2 = { version = "0.10", optional = true }
+sha3 = { version = "0.10", optional = true }
+bitcoin = { version = "0.32.5", optional = true }
+aes-gcm = { version = "0.10", optional = true }
+hkdf = { version = "0.12", optional = true }
+zeroize = { version = "1.8", optional = true, features = ["derive"] }
+axum = { version = "0.8", optional = true }
+axum-extra = { version = "0.10.3", optional = true, features = ["cookie"] }
+cookie = { version = "0.18.1", optional = true }
+tokio = { version = "1", optional = true, features = ["rt", "rt-multi-thread", "sync", "time", "net"] }
+tokio-stream = { version = "0.1", optional = true }
+zip = { version = "8.5", optional = true, default-features = false, features = ["aes-crypto", "deflate-flate2"] }
+pulldown-cmark = { version = "0.13", optional = true, default-features = false, features = ["html"] }
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3.91", features = ["Document", "Window", "KeyboardEvent", "Location"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+serde-wasm-bindgen = "0.6"
+
+[dev-dependencies]
+axum-test = "17"
+tokio = { version = "1", features = ["rt", "macros"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt"] }
+dioxus-history = "0.7.9"
+dioxus-ssr = "0.7.9"
+syn = { version = "2", features = ["full", "visit"] }
+proptest = "1.6"
+
+[features]
+default = ["web"]
+web = ["dioxus/web"]
+desktop = ["dioxus/desktop", "dep:iana-time-zone", "server"]
+mobile = ["dioxus/mobile"]
+server = ["dioxus/server", "dep:rusqlite", "dep:reqwest", "dep:directories", "dep:refinery", "dep:flate2", "dep:argon2", "dep:rand", "dep:base64", "dep:ed25519-dalek", "dep:axum", "dep:axum-extra", "dep:cookie", "dep:sha2", "dep:sha3", "dep:hex", "dep:bitcoin", "dep:tokio", "dep:tokio-stream", "dep:aes-gcm", "dep:hkdf", "dep:zeroize", "dep:zip", "dep:pulldown-cmark", "dep:semver"]
+db-tests = ["server"]
+dev-config = []
+
+[lints.rust]
+warnings = "deny"
+future_incompatible = { level = "deny", priority = -1 }
+rust_2024_compatibility = { level = "deny", priority = -1 }
+unused = { level = "deny", priority = -1 }
+unreachable_pub = "deny"
+unsafe_code = "forbid"
+unused_crate_dependencies = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"

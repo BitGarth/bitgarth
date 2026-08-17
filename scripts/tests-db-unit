@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+RUSTFLAGS="--cfg bitgarth_db_unit_only -A dead_code -A unused-imports -A unused-variables -A unfulfilled-lint-expectations" \
+  "${SCRIPT_DIR}/test-results-record-cargo" \
+  db-unit \
+  rtk cargo test -p bitgarth-app --no-default-features --features db-tests -- --skip test::integration

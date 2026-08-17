@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+echo "$(date) e2e release web build ..."
+time ./scripts/dx-web-build-dev
+echo "$(date) e2e release web build done"

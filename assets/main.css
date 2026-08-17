@@ -1,0 +1,3796 @@
+/* ============================================================
+   BitGarth — Application Styles
+   Consumes the Botanical Ledger token set in assets/tokens.css
+   (loaded first). This file owns: layout / component CSS, base
+   element styling, and a compatibility alias layer that maps
+   the legacy --color-* / --font-* / --space-* / --text-* /
+   --radius-* / --shadow-* namespace onto the design-system
+   tokens. Per-page phases will migrate call sites off the
+   alias layer and onto the design-system tokens directly.
+   ============================================================ */
+
+/* ── 0. Web Fonts ─────────────────────────────────────────
+   @font-face declarations live in src/main.rs so font
+   files can be bundled with Dioxus asset hashing. */
+
+/* ── 1. Compatibility Aliases ──────────────────────────────
+   Existing classes (sidebar, navbar, modals, banners, payments,
+   wallets, ...) reference these legacy custom-property names.
+   Re-declaring them as aliases keeps component anatomy unchanged
+   while every value traces back to the design-system palette,
+   so per-page redesigns can swap call sites incrementally. */
+
+:root {
+  --text-xs:   0.75rem;   /* 12px */
+  --text-sm:   0.8125rem; /* 13px */
+  --text-base: 0.9375rem; /* 15px */
+  --text-lg:   1.125rem;  /* 18px */
+  --text-xl:   1.375rem;  /* 22px */
+  --text-2xl:  1.75rem;   /* 28px */
+
+  --leading-tight:   1.3;
+  --leading-normal:  1.6;
+  --leading-relaxed: 1.75;
+
+  --weight-normal:   400;
+  --weight-medium:   500;
+  --weight-semibold: 500;
+  --weight-bold:     500;
+
+  /* App-namespace spacing (the design-system --space-* scale uses
+     a different 4px-multiple progression; renaming preserves the
+     current layout pixel-for-pixel while leaving --space-* free
+     for design-system-aware code to consume). */
+  --app-space-1:  0.25rem;
+  --app-space-2:  0.5rem;
+  --app-space-3:  0.75rem;
+  --app-space-4:  1rem;
+  --app-space-5:  1.25rem;
+  --app-space-6:  1.5rem;
+  --app-space-8:  2rem;
+  --app-space-10: 2.5rem;
+  --app-space-12: 3rem;
+
+  /* Radii aliases — map onto the design-system radius ramp */
+  --radius-sm:   var(--radius-tag);
+  --radius-md:   var(--radius-input);
+  --radius-lg:   var(--radius-code);
+  --radius-xl:   var(--radius-code);
+  --radius-full: var(--radius-pill);
+
+  --shadow-sm: 0 1px 2px rgba(26, 31, 26, 0.05);
+  --shadow-md: var(--shadow-button);
+  --shadow-lg: var(--shadow-card);
+
+  --transition-fast: var(--dur-quick) var(--ease-default);
+  --transition-base: var(--dur-base)  var(--ease-default);
+  --transition-slow: var(--dur-soft)  var(--ease-default);
+
+  /* Layout */
+  --navbar-height: 52px;
+  --sidebar-width: 220px;
+  --content-max-width: 900px;
+  --mobile-bottom-bar-height: 56px;
+
+  /* Surface aliases — paper-on-paper layering */
+  --color-bg:           var(--paper);
+  --color-bg-surface:   var(--paper);
+  --color-bg-raised:    var(--paper-deep);
+  --color-bg-inset:     var(--paper-deep);
+  --color-bg-subtle:    var(--paper-deep);
+  --color-bg-elevated:  var(--paper-deep);
+  --color-bg-hover:     color-mix(in srgb, var(--ink) 5%, transparent);
+  --color-bg-active:    color-mix(in srgb, var(--ink) 8%, transparent);
+  --color-bg-overlay:   color-mix(in srgb, var(--ink) 55%, transparent);
+
+  --color-border:        color-mix(in srgb, var(--ink) 12%, transparent);
+  --color-border-light:  var(--paper-edge);
+  --color-border-strong: color-mix(in srgb, var(--ink) 25%, transparent);
+  --color-border-focus:  var(--moss);
+
+  --color-text:           var(--ink);
+  --color-text-secondary: var(--ink-soft);
+  --color-text-muted:     var(--sage);
+  --color-text-disabled:  color-mix(in srgb, var(--ink) 30%, transparent);
+  --color-text-inverse:   var(--paper-on-ink);
+
+  --color-primary:       var(--moss);
+  --color-primary-hover: var(--moss-bright);
+  --color-primary-text:  var(--paper);
+  --color-accent:        var(--moss);
+
+  --color-secondary:       transparent;
+  --color-secondary-hover: color-mix(in srgb, var(--ink) 5%, transparent);
+  --color-secondary-text:  var(--ink);
+
+  --color-danger:       var(--danger);
+  --color-danger-hover: color-mix(in srgb, var(--danger) 85%, var(--ink));
+  --color-danger-text:  var(--paper);
+
+  --color-success:  var(--positive);
+  --color-warning:  var(--copper);
+  --color-info:     var(--info);
+  --color-error:    var(--danger);
+
+  --color-success-bg: var(--positive-soft);
+  --color-warning-bg: var(--caution-soft);
+  --color-error-bg:   var(--danger-soft);
+  --color-info-bg:    color-mix(in srgb, var(--info) 12%, transparent);
+
+  --color-positive: var(--positive);
+  --color-negative: var(--danger);
+  --color-neutral:  var(--sage);
+
+  --color-link:       var(--moss);
+  --color-link-hover: var(--moss-bright);
+
+  --color-input-bg:     var(--paper);
+  --color-input-border: var(--paper-edge);
+
+  --color-navbar-bg:     color-mix(in srgb, var(--paper) 86%, transparent);
+  --color-navbar-border: color-mix(in srgb, var(--ink) 8%, transparent);
+  --color-sidebar-bg:    var(--paper-deep);
+  --color-sidebar-hover: color-mix(in srgb, var(--ink) 5%, transparent);
+}
+
+
+/* ── 4. Reset & Base ─────────────────────────────────────── */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+html, body {
+  background: var(--paper);
+}
+
+body {
+  font-family: var(--body);
+  font-size: 17px;
+  line-height: 1.55;
+  color: var(--ink);
+  font-feature-settings: "ss01", "kern";
+  min-height: 100vh;
+}
+
+/* Editorial link affordance — moss colour, 1px underline that
+   grows from 0 → 100% on hover/focus. The .wordmark and any
+   element explicitly opted out via .nolink keep their own bg. */
+a {
+  color: var(--moss);
+  text-decoration: none;
+  background-image: linear-gradient(currentColor, currentColor);
+  background-repeat: no-repeat;
+  background-position: 0 100%;
+  background-size: 0% 1px;
+  transition: background-size var(--dur-base) var(--ease-default),
+              color var(--dur-quick) var(--ease-default);
+  padding-bottom: 1px;
+}
+a:hover,
+a:focus-visible {
+  background-size: 100% 1px;
+  color: var(--moss-bright);
+}
+a:focus-visible {
+  outline: 2px solid var(--moss);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+/* Inline mono — a quiet ink wash, never a dark panel. */
+code {
+  font-family: var(--mono);
+  font-size: 0.92em;
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  color: var(--ink);
+  padding: 0.1em 0.4em;
+  border-radius: var(--radius-tag);
+}
+
+/* Default <pre> — lightweight paper-deep panel. The inverted
+   .code-card treatment is opt-in per the Phase-1 spec. */
+pre {
+  font-family: var(--mono);
+  font-size: var(--fs-mono-block);
+  line-height: 1.6;
+  background: var(--paper-deep);
+  color: var(--ink);
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-input);
+  padding: var(--app-space-3) var(--app-space-4);
+  overflow-x: auto;
+  margin: 0;
+}
+pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+}
+
+strong { font-weight: 500; }
+
+h1, h2, h3, h4 {
+  font-family: var(--display);
+  font-weight: 500;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+h1 { font-size: var(--text-2xl); }
+h2 { font-size: var(--text-xl); }
+h3 { font-size: var(--text-lg); }
+
+h1 em, h2 em, h3 em, h4 em {
+  font-style: italic;
+  font-weight: 400;
+  color: var(--moss);
+}
+
+p + p { margin-top: var(--app-space-3); }
+
+::selection {
+  background: color-mix(in srgb, var(--moss) 70%, transparent);
+  color: var(--paper);
+}
+
+
+/* ── 5. App Layout ───────────────────────────────────────── */
+
+.app-layout {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+
+/* ── 6. Navbar ───────────────────────────────────────────── */
+
+.navbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 40;
+  height: var(--navbar-height);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--app-space-4);
+  background: var(--color-navbar-bg);
+  border-bottom: 1px solid var(--color-navbar-border);
+}
+
+.navbar-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-3);
+}
+
+.navbar-brand {
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  font-size: 1.35rem;
+  color: var(--ink);
+  text-decoration: none;
+  letter-spacing: -0.005em;
+}
+.navbar-brand:hover { color: var(--ink); }
+
+.navbar-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  padding: var(--app-space-2) var(--app-space-3);
+  border-radius: var(--radius-md);
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.navbar-link:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.navbar-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: var(--app-space-1);
+  border-radius: var(--radius-full);
+  transition: background var(--transition-fast);
+}
+.navbar-icon-btn:hover {
+  background: var(--color-bg-hover);
+}
+
+.sidebar-toggle {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: var(--app-space-2);
+  border-radius: var(--radius-md);
+  transition: background var(--transition-fast);
+}
+.sidebar-toggle:hover { background: var(--color-bg-hover); }
+
+.sidebar-toggle-line {
+  display: block;
+  width: 18px;
+  height: 2px;
+  background: var(--color-text-secondary);
+  border-radius: 1px;
+  transition: background var(--transition-fast);
+}
+
+
+/* ── 7. User Menu ────────────────────────────────────────── */
+
+.user-menu {
+  position: relative;
+}
+
+.user-menu-trigger {
+  cursor: pointer;
+}
+
+.user-menu-dismiss-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 48;
+}
+
+.user-menu-dropdown {
+  position: absolute;
+  top: calc(100% + var(--app-space-2));
+  right: 0;
+  z-index: 49;
+  min-width: 248px;
+  max-width: calc(100vw - 16px);
+  background: var(--color-bg-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: 0;
+  overflow: hidden;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-4px);
+  transition: opacity var(--transition-base), transform var(--transition-base), visibility var(--transition-base);
+}
+
+.user-menu-dropdown.visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.user-menu-body {
+  padding: var(--app-space-2);
+}
+
+.user-menu-identity {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-3);
+  padding: var(--app-space-4);
+  background: var(--ink);
+  text-decoration: none;
+  transition: background var(--transition-fast);
+}
+.user-menu-identity:hover {
+  background: var(--ink-deeper);
+}
+
+.user-menu-identity-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-full);
+  overflow: hidden;
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, var(--paper-on-ink) 20%, transparent);
+}
+.user-menu-identity-avatar .user-identicon {
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 0;
+}
+
+.user-menu-identity-text {
+  min-width: 0;
+}
+.user-menu-identity-name {
+  display: block;
+  font-family: var(--display);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  color: var(--paper-on-ink);
+  line-height: 1.15;
+}
+.user-menu-identity-link {
+  display: block;
+  font-size: var(--text-xs);
+  color: var(--sage);
+  margin-top: 2px;
+}
+
+.user-menu-section-label {
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sage);
+  padding: var(--app-space-2) var(--app-space-3) var(--app-space-1);
+}
+
+.user-menu-divider {
+  height: 1px;
+  background: var(--color-border);
+  margin: var(--app-space-1);
+}
+
+.user-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  width: 100%;
+  padding: var(--app-space-2) var(--app-space-3);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  background: none;
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  text-decoration: none;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.user-menu-item:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+/* Navbar CoinGecko price control */
+.nav-price-control {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-2);
+}
+
+.nav-price-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  color: var(--ink-soft);
+}
+
+/* Visually-hidden native checkbox; .nav-price-track is the visible switch. */
+.nav-price-switch input[type="checkbox"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.nav-price-glyph {
+  display: none;
+  font-family: var(--mono);
+  font-weight: var(--weight-medium);
+  color: var(--moss);
+}
+
+.nav-price-track {
+  position: relative;
+  width: 34px;
+  height: 19px;
+  border-radius: var(--radius-pill);
+  background: var(--sage);
+  transition: background var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.nav-price-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--paper);
+  transition: transform var(--transition-fast);
+}
+
+.nav-price-switch input[type="checkbox"]:checked ~ .nav-price-track {
+  background: var(--moss);
+}
+
+.nav-price-switch input[type="checkbox"]:checked ~ .nav-price-track .nav-price-knob {
+  transform: translateX(15px);
+}
+
+.nav-price-switch input[type="checkbox"]:focus-visible ~ .nav-price-track {
+  outline: 2px solid var(--moss);
+  outline-offset: 3px;
+}
+
+.nav-price-currency {
+  border: 1px solid color-mix(in srgb, var(--moss) 45%, transparent);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--moss);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+@media (max-width: 760px) {
+  .nav-price-label { display: none; }
+  .nav-price-glyph { display: inline; }
+}
+
+
+/* ── 8. Sidebar ──────────────────────────────────────────── */
+
+.sidebar {
+  position: fixed;
+  top: var(--navbar-height);
+  left: 0;
+  bottom: 0;
+  width: var(--sidebar-width);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-sidebar-bg);
+  border-right: 1px solid var(--color-border-light);
+  padding: var(--app-space-4) 0;
+  overflow-y: auto;
+  transform: translateX(0);
+  transition: transform var(--transition-base);
+}
+
+.sidebar-overlay {
+  display: none;
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  flex: 1 0 auto;
+  gap: var(--app-space-1);
+}
+
+.sidebar-section {
+  padding: var(--app-space-2) var(--app-space-3);
+}
+
+.sidebar-section-title {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-muted);
+  padding: var(--app-space-1) var(--app-space-3);
+  margin-bottom: var(--app-space-1);
+}
+
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-3);
+  padding: var(--app-space-2) var(--app-space-3);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  border-radius: var(--radius-md);
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.sidebar-link:hover {
+  background: var(--color-sidebar-hover);
+  color: var(--color-text);
+}
+.sidebar-link.active {
+  color: var(--color-primary);
+  background: var(--color-bg-hover);
+  font-weight: var(--weight-semibold);
+}
+
+.sidebar-link-icon {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: inherit;
+}
+
+
+/* ── 9. Main Content ─────────────────────────────────────── */
+
+.main-content {
+  flex: 1;
+  margin-top: var(--navbar-height);
+  padding: var(--app-space-6) var(--app-space-4);
+  min-height: calc(100vh - var(--navbar-height));
+}
+
+.main-content.with-sidebar {
+  margin-left: var(--sidebar-width);
+}
+
+
+/* ── 10. Mobile Bottom Bar ───────────────────────────────── */
+
+.mobile-bottom-bar {
+  display: none;
+}
+
+.mobile-bottom-bar-nav {
+  display: flex;
+  justify-content: space-around;
+  align-items: center;
+  height: 100%;
+}
+
+.mobile-bottom-bar-link {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  text-decoration: none;
+  padding: var(--app-space-1);
+  transition: color var(--transition-fast);
+}
+.mobile-bottom-bar-link:hover,
+.mobile-bottom-bar-link.active {
+  color: var(--color-primary);
+}
+
+
+/* ── 11. Page Structure ──────────────────────────────────── */
+
+.page-container {
+  max-width: var(--content-max-width);
+  margin: 0 auto;
+  width: 100%;
+}
+
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--app-space-4);
+  margin-bottom: var(--app-space-6);
+}
+
+.page-title {
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-bold);
+  margin-bottom: var(--app-space-1);
+}
+
+.page-subtitle {
+  font-size: var(--text-base);
+  color: var(--color-text-secondary);
+}
+
+
+/* ── 12. Cards ───────────────────────────────────────────── */
+
+.card {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.card-header {
+  padding: var(--app-space-4) var(--app-space-5);
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.card-title {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+}
+
+.card-body {
+  padding: var(--app-space-4) var(--app-space-5);
+}
+
+.card-body p {
+  line-height: var(--leading-relaxed);
+}
+
+.empty-state {
+  text-align: center;
+  padding: var(--app-space-8) var(--app-space-5);
+}
+
+.empty-state .card-body {
+  color: var(--color-text-secondary);
+}
+
+
+/* ── 13. Buttons ─────────────────────────────────────────── */
+
+.btn {
+  --btn-bg: var(--moss);
+  --btn-fg: var(--paper);
+  --btn-border: var(--moss);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--app-space-2);
+  font-family: var(--body);
+  font-size: 0.95rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  line-height: 1;
+  padding: 0.68rem 1.1rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--btn-border);
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+  box-shadow: var(--shadow-button);
+  transition: transform var(--dur-quick) var(--ease-press),
+              background var(--dur-base) var(--ease-default),
+              border-color var(--dur-base) var(--ease-default),
+              color var(--dur-base) var(--ease-default),
+              box-shadow var(--dur-base) var(--ease-default);
+  min-height: 36px;
+}
+/* Links styled as buttons should not get the underline-grow. */
+.btn,
+.btn:hover,
+.btn:focus-visible {
+  background-image: none;
+}
+.btn:hover:not(:disabled),
+.btn:focus-visible:not(:disabled) {
+  background-color: var(--moss-bright);
+  border-color: var(--moss-bright);
+  color: var(--paper);
+  transform: translateY(-1px);
+}
+.btn:active:not(:disabled) { transform: translateY(0); }
+.btn:focus-visible {
+  outline: 2px solid var(--moss);
+  outline-offset: 3px;
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+.btn .arrow { transition: transform var(--dur-base) var(--ease-default); }
+.btn:hover:not(:disabled) .arrow { transform: translateX(3px); }
+
+.btn-primary {
+  /* primary is the default filled-moss pill — inherits .btn */
+}
+
+/* Ghost pill: hairline border, transparent fill, ink text. */
+.btn.ghost,
+.btn-secondary,
+.btn-outline {
+  --btn-bg: transparent;
+  --btn-fg: var(--ink);
+  --btn-border: color-mix(in srgb, var(--ink) 30%, transparent);
+  box-shadow: none;
+}
+.btn.ghost:hover:not(:disabled),
+.btn.ghost:focus-visible:not(:disabled),
+.btn-secondary:hover:not(:disabled),
+.btn-secondary:focus-visible:not(:disabled),
+.btn-outline:hover:not(:disabled),
+.btn-outline:focus-visible:not(:disabled) {
+  background-color: color-mix(in srgb, var(--ink) 5%, transparent);
+  border-color: var(--ink);
+  color: var(--ink);
+  transform: none;
+}
+
+.btn-danger {
+  --btn-bg: var(--danger);
+  --btn-fg: var(--paper);
+  --btn-border: var(--danger);
+}
+.btn-danger:hover:not(:disabled),
+.btn-danger:focus-visible:not(:disabled) {
+  background-color: color-mix(in srgb, var(--danger) 85%, var(--ink));
+  border-color: color-mix(in srgb, var(--danger) 85%, var(--ink));
+  color: var(--paper);
+}
+
+.btn-full {
+  width: 100%;
+}
+
+
+/* ── 13b. Code Card (opt-in inverted block) ──────────────── */
+
+/* Apply to a <pre>-or-wrapper that should adopt the Botanical
+   Ledger code-card treatment from the landing page. Only used
+   on surfaces that already had a "shell"-like context; default
+   <pre> blocks keep the lightweight on-paper styling above. */
+.code-card {
+  position: relative;
+  margin-top: var(--space-5);
+  background: var(--ink);
+  color: var(--paper-on-ink);
+  border-radius: var(--radius-code);
+  padding: var(--space-6) var(--space-5) var(--space-5);
+  font-family: var(--mono);
+  font-size: var(--fs-mono-block);
+  line-height: 1.65;
+  overflow-x: auto;
+  border: 1px solid color-mix(in srgb, var(--ink) 88%, var(--moss) 12%);
+  box-shadow: var(--shadow-code);
+}
+.code-card::before {
+  content: attr(data-label);
+  position: absolute;
+  top: var(--space-2);
+  left: var(--space-5);
+  font-family: var(--display);
+  font-style: italic;
+  font-size: var(--fs-caption);
+  color: var(--tok-dim);
+}
+.code-card pre {
+  background: none;
+  color: inherit;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  margin: 0;
+  white-space: pre;
+}
+/* Plain (non-tokenised) code must take the card's light colour, not the dark
+   global `code` colour, or it renders invisibly on the ink surface. */
+.code-card pre code { color: inherit; }
+.code-card .tok-cmd  { color: var(--tok-cmd); }
+.code-card .tok-flag { color: var(--tok-flag); }
+.code-card .tok-str  { color: var(--tok-str); }
+.code-card .tok-img  { color: var(--tok-img); font-weight: 500; }
+.code-card .tok-dim  { color: var(--tok-dim); }
+
+/* Copy button living in the code-card top-right (§9.8). */
+.code-card-copy {
+  position: absolute;
+  top: var(--space-3);
+  right: var(--space-3);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0.3rem 0.6rem;
+  font-family: var(--body);
+  font-size: var(--fs-caption);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--paper-on-ink);
+  background: color-mix(in srgb, var(--paper-on-ink) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--paper-on-ink) 20%, transparent);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: background var(--dur-quick) var(--ease-default),
+              border-color var(--dur-quick) var(--ease-default);
+}
+.code-card-copy:hover,
+.code-card-copy:focus-visible {
+  background: color-mix(in srgb, var(--paper-on-ink) 14%, transparent);
+  border-color: color-mix(in srgb, var(--paper-on-ink) 36%, transparent);
+}
+.code-card-copy:focus-visible {
+  outline: 2px solid var(--moss-bright);
+  outline-offset: 2px;
+}
+
+
+/* ── 13c. Upgrade notice (editorial update card) ───────────
+   Replaces the generic info banner. A paper-deep card whose
+   command lives in the canonical ink code-card (§9.8); a copper
+   eyebrow marks the one "new" thing in view (§2.3). */
+
+.upgrade-notice {
+  background: var(--paper-deep);
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
+  border-radius: var(--radius-card);
+  padding: var(--space-5);
+  margin-bottom: var(--space-5);
+}
+
+.upgrade-notice-eyebrow {
+  display: block;
+  font-family: var(--display);
+  font-style: italic;
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--copper);
+  margin-bottom: var(--space-1);
+}
+
+.upgrade-notice-title {
+  margin: 0;
+  font-family: var(--display);
+  font-weight: 500;
+  font-size: var(--fs-display-sm);
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  font-variant-numeric: oldstyle-nums proportional-nums;
+}
+
+/* code-card default margin-top is tuned for a section gap; tighten
+   it to sit inside the notice between heading and actions. */
+.upgrade-notice .code-card {
+  margin-top: var(--space-4);
+}
+
+.upgrade-notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+
+/* ── 14. Forms ───────────────────────────────────────────── */
+
+.form-group {
+  margin-bottom: var(--app-space-4);
+}
+
+.form-group:last-child {
+  margin-bottom: 0;
+}
+
+.form-label {
+  display: block;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+  margin-bottom: var(--app-space-1);
+}
+
+.form-input {
+  display: block;
+  width: 100%;
+  font-family: var(--body);
+  font-size: var(--text-base);
+  line-height: 1.5;
+  padding: var(--app-space-2) var(--app-space-3);
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-input);
+  transition: border-color var(--dur-quick) var(--ease-default),
+              box-shadow var(--dur-quick) var(--ease-default);
+  min-height: 40px;
+}
+.form-input::placeholder {
+  color: var(--sage);
+}
+.form-input:focus {
+  outline: none;
+  border-color: var(--moss);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--moss) 18%, transparent);
+}
+.form-input:disabled {
+  background: var(--paper-deep);
+  color: var(--sage);
+  cursor: not-allowed;
+}
+.form-input.input-error {
+  border-color: var(--danger);
+}
+.form-input.input-error:focus {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 18%, transparent);
+}
+
+.selector {
+  display: block;
+  width: 100%;
+  font-family: var(--body);
+  font-size: var(--text-base);
+  line-height: 1.5;
+  padding: var(--app-space-2) var(--app-space-3);
+  padding-right: var(--app-space-8);
+  color: var(--color-text);
+  background: var(--color-input-bg);
+  border: 1px solid var(--color-input-border);
+  border-radius: var(--radius-md);
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%232E352E' d='M3 4.5L6 8l3-3.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 12px;
+  cursor: pointer;
+  min-height: 40px;
+  transition: border-color var(--dur-quick) var(--ease-default),
+              box-shadow var(--dur-quick) var(--ease-default);
+}
+.selector:focus {
+  outline: none;
+  border-color: var(--moss);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--moss) 18%, transparent);
+}
+
+.form-error {
+  font-size: var(--text-sm);
+  color: var(--color-error);
+  margin-top: var(--app-space-1);
+}
+
+.form-hint {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  margin-top: var(--app-space-1);
+}
+
+.form-help-text {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  margin-top: var(--app-space-1);
+  line-height: var(--leading-normal);
+}
+
+.form-value {
+  font-size: var(--text-base);
+  color: var(--color-text);
+  padding: var(--app-space-1) 0;
+}
+
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.checkbox input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--color-primary);
+}
+
+
+/* ── 15. Auth Shell — Botanical frontispiece ───────────── */
+
+/* A two-column frontispiece: an editorial prose panel on the left
+   (the "why"), and a certificate-style form panel on the right (the
+   "how"). Below the form, a hairline vine flourish marks the close. */
+
+.auth-frame {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: clamp(2.25rem, 5vw, 3.5rem);
+  width: 100%;
+  max-width: 64rem;
+  margin: 0 auto;
+  padding:
+    clamp(2rem, 6vw, 4.5rem)
+    var(--gutter)
+    clamp(3rem, 8vw, 6rem);
+  align-items: start;
+}
+
+@media (min-width: 860px) {
+  .auth-frame {
+    grid-template-columns: 1fr minmax(0, 28rem);
+    gap: clamp(2.5rem, 5vw, 4.5rem);
+    align-items: start;
+  }
+}
+
+/* ── editorial prose panel ── */
+
+.auth-prose {
+  padding-top: clamp(0.5rem, 2.5vw, 1.5rem);
+  max-width: 36ch;
+}
+
+@media (max-width: 859px) {
+  .auth-prose { order: 2; max-width: none; }
+  .auth-card  { order: 1; }
+}
+
+.auth-num {
+  display: inline-block;
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 0.95rem;
+  color: var(--copper);
+  letter-spacing: 0.04em;
+  margin-bottom: 1rem;
+}
+
+.auth-display {
+  font-family: var(--display);
+  font-weight: 500;
+  font-size: clamp(2.1rem, 4.6vw, 3.4rem);
+  line-height: 1.04;
+  letter-spacing: -0.025em;
+  color: var(--ink);
+  margin: 0 0 1.4rem;
+  max-width: 16ch;
+}
+.auth-display em {
+  font-style: italic;
+  font-weight: 400;
+  color: var(--moss);
+}
+
+.auth-lede {
+  font-family: var(--body);
+  font-size: clamp(1rem, 1.5vw, 1.15rem);
+  line-height: 1.55;
+  color: var(--ink-soft);
+  max-width: 32ch;
+  margin: 0 0 1.75rem;
+}
+
+.auth-aside {
+  margin: 0;
+  padding-top: 1.2rem;
+  border-top: 1px solid color-mix(in srgb, var(--ink) 14%, transparent);
+  font-size: 0.97rem;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  max-width: 34ch;
+}
+.auth-aside em {
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.auth-reasons {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 1.6rem;
+  max-width: 34ch;
+}
+.auth-reasons li {
+  position: relative;
+  padding-top: 1.15rem;
+  border-top: 1px solid color-mix(in srgb, var(--ink) 14%, transparent);
+  font-size: 0.97rem;
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+.auth-reasons .reason-num {
+  position: absolute;
+  top: -0.85rem;
+  left: 0;
+  background: var(--paper);
+  padding-right: 0.6rem;
+  font-family: var(--display);
+  font-style: italic;
+  font-size: 1rem;
+  color: var(--moss);
+  letter-spacing: 0.03em;
+}
+.auth-reasons strong {
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  color: var(--ink);
+  margin-right: 0.25em;
+}
+
+/* page-load reveal — direct children of .auth-prose.reveal */
+@media (prefers-reduced-motion: no-preference) {
+  .auth-prose.reveal > * {
+    opacity: 0;
+    transform: translateY(0.6rem);
+    animation: authReveal 700ms cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
+  }
+  .auth-prose.reveal > *:nth-child(1) { animation-delay:  60ms; }
+  .auth-prose.reveal > *:nth-child(2) { animation-delay: 160ms; }
+  .auth-prose.reveal > *:nth-child(3) { animation-delay: 280ms; }
+  .auth-prose.reveal > *:nth-child(4) { animation-delay: 400ms; }
+}
+@keyframes authReveal {
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── form card (certificate) ── */
+
+.auth-card {
+  position: relative;
+  width: 100%;
+  max-width: 28rem;
+  justify-self: center;
+  background: var(--paper-deep);
+  border: 1px solid color-mix(in srgb, var(--ink) 14%, transparent);
+  border-radius: var(--radius-card);
+  padding:
+    clamp(2rem, 3.4vw, 2.6rem)
+    clamp(1.4rem, 3vw, 2.1rem)
+    clamp(1.4rem, 3vw, 2rem);
+  box-shadow:
+    0 1px 0 rgba(255,255,255,0.4) inset,
+    0 16px 32px -22px rgba(26,31,26,0.35);
+}
+@media (min-width: 860px) {
+  .auth-card { justify-self: stretch; }
+}
+
+.auth-card .corner {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  color: color-mix(in srgb, var(--ink) 40%, transparent);
+  pointer-events: none;
+}
+.auth-card .corner.tl { top: 10px; left: 10px; }
+.auth-card .corner.tr { top: 10px; right: 10px; transform: scaleX(-1); }
+.auth-card .corner.bl { bottom: 10px; left: 10px; transform: scaleY(-1); }
+.auth-card .corner.br { bottom: 10px; right: 10px; transform: scale(-1, -1); }
+
+.auth-header {
+  text-align: center;
+  margin: 0 0 1.5rem;
+  padding: 0;
+  border: none;
+}
+
+.auth-title {
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  font-size: clamp(1.45rem, 2.4vw, 1.75rem);
+  letter-spacing: -0.005em;
+  color: var(--ink);
+  margin: 0;
+  line-height: 1.2;
+}
+
+.auth-body { padding: 0; }
+
+.auth-body .form-input,
+.auth-body .form-input:disabled {
+  /* Inputs sit on --paper-deep, so the paper-coloured input creates the
+     intentional "paper on paper" depth from the design system. */
+  background: var(--paper);
+}
+.auth-body .form-input:disabled {
+  background: color-mix(in srgb, var(--paper-deep) 70%, var(--paper-edge));
+}
+
+.auth-body .form-hint.auth-cookie {
+  margin-top: 1rem;
+  font-family: var(--display);
+  font-style: italic;
+  font-size: 0.92rem;
+  color: var(--sage);
+  text-align: center;
+}
+
+/* vine flourish — closes the form like the landing's hero ornament */
+.auth-vine {
+  display: flex;
+  justify-content: center;
+  margin: 1.6rem 0 0.9rem;
+  color: color-mix(in srgb, var(--moss) 55%, transparent);
+}
+
+/* footer link row — italic Fraunces, like the colophon */
+.auth-card .auth-footer {
+  text-align: center;
+  margin: 0;
+  padding: 0;
+  border: none;
+  font-family: var(--display);
+  font-style: italic;
+  font-size: 1rem;
+  color: var(--ink-soft);
+}
+.auth-card .auth-footer p { margin: 0; }
+
+.auth-link {
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  color: var(--moss);
+}
+.auth-link:hover,
+.auth-link:focus-visible {
+  color: var(--moss-bright);
+}
+
+/* Primary button keeps the moss pill, but the trailing arrow leans
+   into the editorial voice — a calm right-pointing reed rather than a
+   chevron. */
+.auth-body .btn-full {
+  margin-top: 0.25rem;
+}
+.auth-body .btn .arrow {
+  display: inline-block;
+  margin-left: 0.15rem;
+}
+
+
+/* ── 16. Username Generator ──────────────────────────────── */
+
+.username-gen-row {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+}
+
+.username-gen-display {
+  flex: 1;
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+  padding: var(--app-space-2) var(--app-space-3);
+  background: var(--color-bg-inset);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.username-gen-display.input-error {
+  border-color: var(--color-error);
+}
+
+.username-gen-row .form-input {
+  flex: 1;
+}
+
+.username-gen-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  background: var(--paper);
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-input);
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition:
+    background var(--dur-quick) var(--ease-default),
+    color var(--dur-quick) var(--ease-default),
+    border-color var(--dur-quick) var(--ease-default),
+    transform var(--dur-quick) var(--ease-default);
+}
+.username-gen-btn:hover:not(:disabled),
+.username-gen-btn:focus-visible:not(:disabled) {
+  background: var(--paper);
+  color: var(--moss);
+  border-color: var(--moss);
+  outline: none;
+}
+.username-gen-btn:hover:not(:disabled) svg {
+  transform: rotate(-12deg);
+}
+.username-gen-btn svg {
+  transition: transform var(--dur-base) var(--ease-default);
+}
+.username-gen-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.username-gen-btn.active {
+  background: var(--moss);
+  color: var(--paper);
+  border-color: var(--moss);
+}
+
+.password-input-row {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+}
+.password-input-row .form-input {
+  flex: 1;
+}
+
+.password-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  background: var(--color-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.password-toggle-btn:hover:not(:disabled) {
+  background: var(--color-secondary-hover);
+  color: var(--color-text);
+}
+.password-toggle-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+
+/* ── 17. Banner ──────────────────────────────────────────── */
+
+.banner {
+  padding: var(--app-space-3) var(--app-space-4);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--app-space-4);
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.banner-error {
+  background: var(--color-error-bg);
+  color: var(--color-error);
+  border: 1px solid var(--color-error);
+}
+
+.banner-warning {
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+  border: 1px solid var(--color-warning);
+}
+
+.banner-info {
+  background: var(--color-info-bg);
+  color: var(--color-info);
+  border: 1px solid var(--color-info);
+}
+
+
+/* ── 17b. Instance Notice (operator-supplied banner) ───────
+   Edge-to-edge parchment strip beneath the navbar. The
+   italic "Notice." prefix and the moss accent stripe on the
+   left read as an editorial sidebar caption rather than a
+   SaaS info banner — no blue, no shouting. */
+
+.instance-notice {
+  position: relative;
+  background: var(--paper-deep);
+  color: var(--ink-soft);
+  border-top: 1px solid var(--paper-edge);
+  border-bottom: 1px solid var(--paper-edge);
+  padding: 0.75rem clamp(1rem, 4vw, 2rem) 0.75rem
+           calc(clamp(1rem, 4vw, 2rem) + 0.85rem);
+  margin: 0 calc(-1 * var(--app-space-4)) var(--app-space-5);
+  font-family: var(--body);
+  font-size: 0.95rem;
+  line-height: 1.5;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.instance-notice::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--moss);
+}
+
+.instance-notice::first-letter {
+  /* No drop-cap stunt — guarantees the leading char inherits the right
+     family even when the operator HTML is malformed. */
+  font-family: inherit;
+}
+
+.instance-notice > *:first-child::before {
+  content: "Notice. ";
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  color: var(--moss);
+  margin-right: 0.35em;
+  letter-spacing: 0.005em;
+}
+
+.instance-notice p {
+  margin: 0;
+}
+
+.instance-notice p + p {
+  margin-top: 0.4rem;
+}
+
+.instance-notice a {
+  color: var(--moss);
+  font-family: var(--mono);
+  font-size: 0.88em;
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--moss) 50%, transparent);
+  padding-bottom: 1px;
+  transition: border-color var(--dur-quick) var(--ease-default),
+              color var(--dur-quick) var(--ease-default);
+}
+
+.instance-notice a:hover,
+.instance-notice a:focus-visible {
+  color: var(--moss-bright);
+  border-bottom-color: var(--moss);
+}
+
+@media (max-width: 640px) {
+  .instance-notice {
+    margin-inline: calc(-1 * var(--app-space-3));
+    padding-left: calc(var(--app-space-3) + 0.85rem);
+    padding-right: var(--app-space-3);
+  }
+}
+
+
+/* ── 17c. Update Notice (server/client build drift) ──────── */
+
+.update-notice {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-3);
+  background: var(--paper-deep);
+  color: var(--ink-soft);
+  border-top: 1px solid var(--paper-edge);
+  border-bottom: 1px solid var(--paper-edge);
+  padding: 0.75rem clamp(1rem, 4vw, 2rem) 0.75rem
+           calc(clamp(1rem, 4vw, 2rem) + 0.85rem);
+  margin: 0 calc(-1 * var(--app-space-4)) var(--app-space-5);
+  font-family: var(--body);
+  font-size: 0.95rem;
+  line-height: 1.45;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.update-notice::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--moss);
+}
+
+.update-notice-body {
+  min-width: min(100%, 18rem);
+  flex: 1 1 24rem;
+}
+
+.update-notice-eyebrow {
+  display: block;
+  margin-bottom: 0.15rem;
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  color: var(--moss);
+}
+
+.update-notice-message {
+  margin: 0;
+}
+
+.update-notice-build {
+  display: inline-block;
+  padding: 0.05rem 0.3rem;
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-tag);
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 0.88em;
+  line-height: 1.35;
+}
+
+.update-notice-build-server {
+  border-color: color-mix(in srgb, var(--moss) 38%, var(--paper-edge));
+}
+
+.update-notice-build-client {
+  border-color: color-mix(in srgb, var(--copper) 42%, var(--paper-edge));
+}
+
+.update-notice-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  flex: 0 0 auto;
+}
+
+.update-notice-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--sage);
+  font-family: var(--body);
+  font-size: 1.35rem;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background var(--dur-quick) var(--ease-default),
+    border-color var(--dur-quick) var(--ease-default),
+    color var(--dur-quick) var(--ease-default);
+}
+
+.update-notice-dismiss:hover,
+.update-notice-dismiss:focus-visible {
+  background: var(--paper);
+  border-color: var(--paper-edge);
+  color: var(--moss);
+}
+
+.update-notice-dismiss:focus-visible {
+  outline: 2px solid var(--moss);
+  outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+  .update-notice {
+    margin-inline: calc(-1 * var(--app-space-3));
+    padding-left: calc(var(--app-space-3) + 0.85rem);
+    padding-right: var(--app-space-3);
+  }
+
+  .update-notice-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .update-notice {
+    animation: update-notice-enter var(--dur-base) var(--ease-default);
+  }
+
+  @keyframes update-notice-enter {
+    from {
+      opacity: 0;
+      transform: translateY(-0.35rem);
+    }
+
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+
+
+/* ── 18. Alerts (inline) ─────────────────────────────────── */
+
+.alert {
+  padding: var(--app-space-3) var(--app-space-4);
+  font-size: var(--text-sm);
+  border-radius: var(--radius-md);
+  margin: var(--app-space-3) 0;
+}
+
+.alert-error {
+  background: var(--color-error-bg);
+  color: var(--color-error);
+  border: 1px solid var(--color-error);
+}
+
+.alert-info {
+  background: var(--paper-deep);
+  color: var(--ink-soft);
+  border: 1px solid var(--paper-edge);
+  border-left: 3px solid var(--moss);
+}
+
+/* Upgrade call-to-action links: a trailing arrow gives the affordance at
+   rest, since these are standalone conversion actions rather than inline
+   prose links. Keeps the moss link colour and the .btn .arrow nudge idiom. */
+.upgrade-link {
+  font-weight: 500;
+}
+.upgrade-link::after {
+  content: " \2192";
+  display: inline-block;
+  transition: transform var(--dur-base) var(--ease-default);
+}
+.upgrade-link:hover::after,
+.upgrade-link:focus-visible::after {
+  transform: translateX(3px);
+}
+
+.alert-warning {
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+  border: 1px solid var(--color-warning);
+}
+
+.etherscan-key-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: var(--app-space-2);
+  padding: var(--app-space-1) var(--app-space-2);
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+}
+.etherscan-key-badge.is-set {
+  color: var(--color-success);
+  background: var(--color-success-bg);
+}
+.etherscan-key-badge.is-unset {
+  color: var(--color-warning);
+  background: var(--color-warning-bg);
+}
+
+
+/* ── 19. Modal ───────────────────────────────────────────── */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: var(--app-space-10) var(--app-space-4);
+  background: var(--color-bg-overlay);
+  overflow-y: auto;
+}
+
+.modal {
+  width: 100%;
+  max-width: 520px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-3);
+  padding: var(--app-space-5);
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.modal-close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.modal-close-btn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.modal-header h2,
+.modal-header h3 {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+}
+
+.modal-body {
+  padding: var(--app-space-5);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--app-space-3);
+  margin-top: var(--app-space-5);
+  padding-top: var(--app-space-4);
+  border-top: 1px solid var(--color-border-light);
+}
+
+
+/* ── Sidebar contact footer ──────────────────────────────── */
+
+/* The footer sits below the nav sections, pushed to the bottom of the rail.
+   `.sidebar-nav` grows to fill so `margin-top: auto` can pin it. */
+.sidebar-contact {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-2);
+  padding: var(--app-space-4) var(--app-space-3) var(--app-space-3);
+  border-top: 1px solid var(--color-border-light);
+}
+
+/* An editorial signature (Fraunces italic), distinct from the sans nav links. */
+.sidebar-contact-title {
+  font-family: var(--display);
+  font-style: italic;
+  font-size: 1.1rem;
+  line-height: 1.15;
+  color: var(--color-text);
+}
+
+.sidebar-contact-note {
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--color-text-muted);
+  margin-top: calc(-1 * var(--app-space-1));
+}
+
+/* Email as a copy-first control: a quiet inset row, address in mono. */
+.sidebar-contact-email {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  width: 100%;
+  padding: var(--app-space-2);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-surface);
+  color: var(--color-text);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+.sidebar-contact-email:hover {
+  border-color: var(--color-primary);
+  background: var(--color-bg-hover);
+}
+.sidebar-contact-addr {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-contact-copy {
+  display: inline-flex;
+  flex: none;
+  color: var(--color-text-muted);
+}
+.sidebar-contact-email:hover .sidebar-contact-copy {
+  color: var(--color-primary);
+}
+
+.sidebar-contact-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  font-size: var(--text-xs);
+}
+.sidebar-contact-action {
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: var(--color-primary);
+  text-decoration: none;
+  cursor: pointer;
+}
+.sidebar-contact-action:hover {
+  text-decoration: underline;
+}
+.sidebar-contact-sep {
+  color: var(--color-text-muted);
+}
+
+
+/* ── PGP key modal (§9.12) ───────────────────────────────── */
+
+/* Wider than a default dialog so the 60-char armor lines never wrap. */
+.contact-modal {
+  width: min(620px, calc(100% - 2 * var(--app-space-4)));
+  max-width: 620px;
+  max-height: calc(100dvh - 2 * var(--app-space-10));
+  margin: var(--app-space-10) auto;
+  padding: 0;
+  color: inherit;
+  overflow-y: auto;
+}
+
+.contact-modal::backdrop {
+  background: var(--color-bg-overlay);
+}
+
+.contact-pgp-inline-addr {
+  font-family: var(--mono);
+  color: var(--ink-soft);
+}
+
+.contact-pgp-note {
+  margin-bottom: var(--space-4);
+  max-width: var(--measure);
+}
+
+.contact-pgp-fp {
+  font-family: var(--mono);
+  font-size: var(--fs-caption);
+  color: var(--sage);
+}
+.contact-pgp-fp span {
+  color: var(--ink-soft);
+  word-break: break-all;
+}
+
+/* Smaller than the default code-block: the key is for copying, not reading
+   character-by-character, and at this size the lines fit without wrapping. */
+.contact-pgp-key pre {
+  white-space: pre;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.contact-pgp-download {
+  margin-top: var(--space-4);
+}
+
+
+/* ── 20. Settings ────────────────────────────────────────── */
+
+.settings-nav {
+  display: flex;
+  gap: var(--app-space-1);
+  border-bottom: 1px solid var(--color-border-light);
+  margin-bottom: var(--app-space-4);
+}
+
+.settings-nav-link {
+  padding: var(--app-space-2) var(--app-space-3);
+  padding-bottom: calc(var(--app-space-2) + 1px);
+  margin-bottom: -1px;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+.settings-nav-link:hover {
+  color: var(--color-text);
+}
+.settings-nav-link.active {
+  color: var(--color-primary);
+  font-weight: var(--weight-semibold);
+  border-bottom-color: var(--color-primary);
+}
+
+.settings-section {
+  margin-bottom: var(--app-space-4);
+}
+
+.settings-status-success {
+  font-size: var(--text-sm);
+  color: var(--color-success);
+  margin-top: var(--app-space-1);
+}
+
+.settings-status-error {
+  font-size: var(--text-sm);
+  color: var(--color-error);
+  margin-top: var(--app-space-1);
+}
+
+.settings-auto-saved {
+  font-size: var(--text-sm);
+  color: var(--color-success);
+  margin-left: var(--app-space-2);
+  animation: settings-fade-out 2s ease-out forwards;
+}
+
+.paired-clients-table-wrap {
+  overflow-x: auto;
+}
+
+.paired-clients-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.paired-clients-table th,
+.paired-clients-table td {
+  padding: var(--app-space-2);
+  border-bottom: 1px solid var(--color-border-light);
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.paired-clients-table th {
+  color: var(--color-text-secondary);
+  font-weight: var(--weight-semibold);
+}
+
+.paired-clients-table tr:last-child td {
+  border-bottom: 0;
+}
+
+@keyframes settings-fade-out {
+  0%, 60% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+.session-duration-selector {
+  max-width: 280px;
+}
+
+
+/* ── 21. Identicon ───────────────────────────────────────── */
+
+.user-identicon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-full);
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+}
+
+/* Account-tab identity card: large identicon framed as a rounded square */
+.account-identity {
+  display: flex;
+  gap: var(--app-space-5);
+  align-items: center;
+}
+
+.account-identity-fields {
+  flex: 1;
+  min-width: 0;
+}
+
+.account-identicon {
+  width: 120px;
+  height: 120px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-raised);
+  overflow: hidden;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+}
+
+/* Override the navbar-scoped 32px / pill defaults for this large instance. */
+.account-identicon .user-identicon {
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 0;
+}
+
+@media (max-width: 640px) {
+  .account-identity {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+
+/* ── 22. Not Found ───────────────────────────────────────── */
+
+.not-found-shell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: calc(100vh - var(--navbar-height) - var(--app-space-12));
+  padding: var(--app-space-4);
+}
+
+.not-found-card {
+  text-align: center;
+  max-width: 440px;
+}
+
+.not-found-label {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.not-found-title {
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-bold);
+  margin: var(--app-space-2) 0;
+}
+
+.not-found-subtitle {
+  color: var(--color-text-secondary);
+  margin-bottom: var(--app-space-3);
+}
+
+.not-found-path {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  margin-bottom: var(--app-space-6);
+}
+
+.not-found-actions {
+  display: flex;
+  justify-content: center;
+  gap: var(--app-space-3);
+}
+
+
+/* ── 23. Error Blocks ────────────────────────────────────── */
+
+.error-block {
+  padding: var(--app-space-4);
+  background: var(--color-error-bg);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-error);
+  margin-bottom: var(--app-space-4);
+}
+
+.error-title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-error);
+}
+
+.error-help {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  margin-top: var(--app-space-1);
+}
+
+.error-text {
+  font-size: var(--text-sm);
+  color: var(--color-error);
+}
+
+
+/* ── 24. Skeleton Loading ────────────────────────────────── */
+
+.skeleton-card {
+  pointer-events: none;
+}
+
+.skeleton-line {
+  height: 14px;
+  background: var(--color-bg-inset);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--app-space-3);
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
+}
+
+.skeleton-line:last-child {
+  margin-bottom: 0;
+}
+
+.skeleton-line-title { width: 50%; height: 18px; }
+.skeleton-line-short { width: 30%; }
+.skeleton-line-medium { width: 65%; }
+.skeleton-line-full { width: 100%; }
+
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.8; }
+}
+
+
+/* ── 25. Utility Classes ─────────────────────────────────── */
+
+.muted {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.mt-sm { margin-top: var(--app-space-3); }
+.mt-md { margin-top: var(--app-space-5); }
+
+.section-title {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+}
+
+/* ── 26. Flow Steps (multi-step modals) ──────────────────── */
+
+.flow-step {
+  margin-bottom: var(--app-space-4);
+}
+
+.flow-step:last-child {
+  margin-bottom: 0;
+}
+
+.flow-step p {
+  margin-bottom: var(--app-space-2);
+}
+
+
+/* ── 27. Label Editor ────────────────────────────────────── */
+
+.label-editor {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  margin-top: var(--app-space-2);
+}
+
+.label-editor .form-input,
+.label-editor input {
+  flex: 1;
+}
+
+.label-edit-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: var(--app-space-1);
+  color: var(--color-text-muted);
+  border-radius: var(--radius-sm);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+.label-edit-button:hover {
+  color: var(--color-text);
+  background: var(--color-bg-hover);
+}
+
+.label-error {
+  font-size: var(--text-sm);
+  color: var(--color-error);
+  margin-left: var(--app-space-2);
+}
+
+
+/* ── 28. Inline Copy Button ──────────────────────────────── */
+
+.inline-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: var(--app-space-1);
+  color: var(--color-text-muted);
+  border-radius: var(--radius-sm);
+  transition: color var(--transition-fast), background var(--transition-fast);
+  flex-shrink: 0;
+}
+.inline-copy-btn:hover {
+  color: var(--color-text);
+  background: var(--color-bg-hover);
+}
+.inline-copy-btn.copied {
+  color: var(--color-success);
+}
+
+
+/* ── 29. Address Links ───────────────────────────────────── */
+
+.address-link {
+  color: var(--color-link);
+  text-decoration: none;
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  word-break: break-all;
+}
+.address-link:hover {
+  color: var(--color-link-hover);
+  text-decoration: underline;
+}
+
+
+/* ── 30. Command Palette (overrides inline Tailwind) ─────── */
+
+/* The CommandPalette uses inline Tailwind classes, so these
+   provide the required Tailwind-like utilities that are used.
+   This keeps it working without adding Tailwind as a dep. */
+
+.fixed { position: fixed; }
+.relative { position: relative; }
+.inset-0 { inset: 0; }
+.z-50 { z-index: 50; }
+.flex { display: flex; }
+.items-start { align-items: flex-start; }
+.justify-center { justify-content: center; }
+.pt-20 { padding-top: 5rem; }
+.w-full { width: 100%; }
+.max-w-lg { max-width: 32rem; }
+.transform { transform: translateZ(0); }
+.overflow-hidden { overflow: hidden; }
+.rounded-xl { border-radius: 0.75rem; }
+.shadow-2xl { box-shadow: var(--shadow-modal); }
+.ring-1 { box-shadow: 0 0 0 1px var(--color-border); }
+.transition-all { transition: all 150ms; }
+.transition-opacity { transition: opacity 150ms; }
+.h-14 { height: 3.5rem; }
+.border-0 { border: 0; }
+.bg-transparent { background: transparent; }
+.pl-4 { padding-left: 1rem; }
+.pr-4 { padding-right: 1rem; }
+.px-4 { padding-left: 1rem; padding-right: 1rem; }
+.py-14 { padding-top: 3.5rem; padding-bottom: 3.5rem; }
+.py-2 { padding-top: 0.5rem; padding-bottom: 0.5rem; }
+.mt-4 { margin-top: 1rem; }
+.text-center { text-align: center; }
+.text-left { text-align: left; }
+.text-sm { font-size: 0.875rem; line-height: 1.25rem; }
+.max-h-80 { max-height: 20rem; }
+.scroll-py-2 { scroll-padding-top: 0.5rem; scroll-padding-bottom: 0.5rem; }
+.overflow-y-auto { overflow-y: auto; }
+.cursor-default { cursor: default; }
+.select-none { user-select: none; }
+
+.bg-white { background: var(--paper); }
+.bg-black\/50 { background: color-mix(in srgb, var(--ink) 55%, transparent); }
+.backdrop-blur-sm { backdrop-filter: blur(4px); }
+.ring-black\/5 { box-shadow: 0 0 0 1px color-mix(in srgb, var(--ink) 12%, transparent); }
+.text-gray-900 { color: var(--ink); }
+.text-gray-400 { color: var(--sage); }
+.text-gray-100 { color: var(--ink-soft); }
+
+.hover\:bg-gray-100:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.divide-y > * + * { border-top: 1px solid; }
+.divide-gray-100 > * + * { border-color: var(--paper-edge); }
+
+.placeholder\:text-gray-400::placeholder { color: var(--sage); }
+.focus\:ring-0:focus { box-shadow: none; outline: none; }
+
+@media (min-width: 640px) {
+  .sm\:pt-24 { padding-top: 6rem; }
+  .sm\:text-sm { font-size: 0.875rem; line-height: 1.25rem; }
+  .sm\:px-14 { padding-left: 3.5rem; padding-right: 3.5rem; }
+}
+
+
+/* ── 31. Responsive — Tablet ─────────────────────────────── */
+
+@media (max-width: 1024px) {
+  .sidebar {
+    transform: translateX(-100%);
+  }
+
+  .sidebar.open {
+    transform: translateX(0);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .sidebar-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 29;
+    background: var(--color-bg-overlay);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity var(--transition-base), visibility var(--transition-base);
+  }
+
+  .sidebar-overlay.visible {
+    opacity: 1;
+    visibility: visible;
+  }
+
+  .sidebar-toggle {
+    display: flex;
+  }
+
+  .main-content.with-sidebar {
+    margin-left: 0;
+  }
+
+}
+
+
+/* Touch devices: prevent iOS Safari from auto-zooming when an input
+   gets focus. iOS zooms whenever an editable element's effective
+   font-size is below 16px, which then causes horizontal overflow that
+   has to be scrolled or pinched out. Force inputs to 16px on touch. */
+@media (hover: none) and (pointer: coarse) {
+  input,
+  select,
+  textarea,
+  .form-input,
+  .selector,
+  .xpub-input {
+    font-size: 16px;
+  }
+}
+
+
+/* ── 32. Responsive — Mobile ─────────────────────────────── */
+
+@media (max-width: 640px) {
+  :root {
+    --text-base: 0.9375rem;
+  }
+
+  .navbar {
+    padding: 0 var(--app-space-3);
+  }
+
+  .main-content {
+    padding: var(--app-space-4) var(--app-space-3);
+    padding-bottom: calc(var(--mobile-bottom-bar-height) + var(--app-space-4));
+  }
+
+  .mobile-bottom-bar {
+    display: block;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 40;
+    height: var(--mobile-bottom-bar-height);
+    background: var(--color-navbar-bg);
+    border-top: 1px solid var(--color-navbar-border);
+  }
+
+  /* Hide desktop sidebar on mobile — use bottom bar instead */
+  .sidebar {
+    display: none;
+  }
+  .sidebar.open {
+    display: block;
+    transform: translateX(0);
+  }
+
+  .page-title {
+    font-size: var(--text-xl);
+  }
+
+  .auth-frame {
+    padding-top: clamp(1.5rem, 5vw, 2.5rem);
+  }
+
+  .auth-card {
+    max-width: 100%;
+  }
+
+  .modal-overlay {
+    padding: var(--app-space-4) var(--app-space-3);
+  }
+
+  .modal {
+    max-width: 100%;
+  }
+
+  .modal-actions {
+    flex-direction: column-reverse;
+  }
+
+  .not-found-actions {
+    flex-direction: column;
+  }
+
+  .settings-nav {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+
+/* ── 33. Empty State Illustrations ────────────────────────── */
+
+.empty-state-illustration {
+  display: block;
+  width: 80px;
+  height: 80px;
+  margin: 0 auto var(--app-space-4);
+  color: var(--color-text-muted);
+  opacity: 0.5;
+}
+
+.empty-state-heading {
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  font-size: var(--text-lg);
+  color: var(--ink);
+  margin-bottom: var(--app-space-2);
+}
+
+.empty-state-body {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+
+/* ── 34. Toast Notifications ─────────────────────────────── */
+
+.toast-container {
+  position: fixed;
+  bottom: var(--app-space-5);
+  right: var(--app-space-5);
+  z-index: 60;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: var(--app-space-2);
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-3);
+  padding: var(--app-space-3) var(--app-space-4);
+  background: var(--color-bg-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  min-width: 240px;
+  max-width: 380px;
+  animation: toast-enter var(--transition-base) ease-out;
+}
+
+.toast-success {
+  border-left: 3px solid var(--color-success);
+}
+
+.toast-error {
+  border-left: 3px solid var(--color-error);
+}
+
+.toast-info {
+  border-left: 3px solid var(--color-info);
+}
+
+.toast-dismiss {
+  margin-left: auto;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  padding: var(--app-space-1);
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+.toast-dismiss:hover {
+  color: var(--color-text);
+  background: var(--color-bg-hover);
+}
+
+@keyframes toast-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+
+
+
+/* ── 36. Accessibility — Reduced Motion ──────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+
+/* ── 37. Mobile — Toast ──────────────────────────────────── */
+
+@media (max-width: 640px) {
+  .toast-container {
+    left: var(--app-space-3);
+    right: var(--app-space-3);
+    bottom: calc(var(--mobile-bottom-bar-height) + var(--app-space-3));
+  }
+
+  .toast {
+    max-width: 100%;
+  }
+}
+
+
+/* ── 37b. Payments Page (Botanical Ledger) ──────────────── */
+
+.payments-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-6);
+}
+
+/* Intro / lede paragraph below the section head. */
+.payments-intro {
+  max-width: var(--measure);
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: var(--fs-body);
+  line-height: 1.55;
+}
+
+.payments-intro em {
+  display: inline-block;
+  font-family: var(--body);
+  font-style: normal;
+  font-weight: 500;
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0.08rem 0.5rem;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+  vertical-align: 0.06em;
+  color: var(--moss);
+}
+
+.payments-intro em + em {
+  margin-left: 0;
+}
+
+.payments-intro em:nth-of-type(2) {
+  color: var(--copper);
+}
+
+/* Commitments block under the tier grid — ports landing-page §04
+   "Your data is always yours" / "Pay in your own coin". */
+.payments-commitments {
+  display: grid;
+  gap: 0.85rem;
+  max-width: var(--measure);
+  margin: 0.5rem 0 0;
+  padding-top: 1.6rem;
+  border-top: 1px dashed color-mix(in srgb, var(--ink) 22%, transparent);
+  font-size: 0.97rem;
+  color: var(--ink-soft);
+  line-height: 1.55;
+}
+
+.payments-commitments p {
+  margin: 0;
+}
+
+.payments-commitments em {
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  color: var(--ink);
+  margin-right: 0.35em;
+}
+
+/* Section head — "§ 01 · Plans, honestly drawn." */
+.payments-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--app-space-3);
+  flex-wrap: wrap;
+  margin: 0;
+}
+
+.payments-section-title {
+  font-family: var(--display);
+  font-weight: 500;
+  font-size: var(--fs-display-lg);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  margin: 0;
+}
+
+.payments-section-title em {
+  font-style: italic;
+  color: var(--ink);
+}
+
+.payments-login-prompt {
+  margin: 0;
+}
+
+.payments-shell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-6);
+}
+
+/* Status panel (mid-flow or active-summary) */
+.payments-status-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-3);
+  padding: var(--app-space-5);
+  background: var(--paper-deep);
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
+  border-radius: var(--radius-card);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.4) inset;
+}
+
+.payments-status-row {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  font-family: var(--display);
+  font-size: 1.25rem;
+  letter-spacing: -0.01em;
+}
+
+.payments-status-label {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.payments-status-label em {
+  font-style: italic;
+}
+
+.payments-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+  background: var(--sage);
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 14%, transparent);
+  color: var(--sage);
+}
+
+.payments-status-active {
+  background: var(--positive);
+  color: var(--positive);
+  animation: payments-pulse 2.4s ease-in-out infinite;
+}
+
+.payments-status-pending {
+  background: var(--caution);
+  color: var(--caution);
+  animation: payments-pulse 1.6s ease-in-out infinite;
+}
+
+.payments-status-failed {
+  background: var(--danger);
+  color: var(--danger);
+}
+
+.payments-status-canceled {
+  background: var(--sage);
+  color: var(--sage);
+}
+
+.payments-status-unavailable {
+  background: var(--caution);
+  color: var(--caution);
+}
+
+.payments-status-blocked {
+  background: var(--danger);
+  color: var(--danger);
+}
+
+.payments-status-inactive {
+  background: var(--sage);
+  color: var(--sage);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .payments-status-active,
+  .payments-status-pending {
+    animation: none;
+  }
+}
+
+@keyframes payments-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 14%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 6px color-mix(in srgb, currentColor 22%, transparent);
+  }
+}
+
+.payments-status-desc {
+  color: var(--ink-soft);
+  font-size: 1rem;
+  line-height: 1.55;
+  max-width: var(--measure);
+  margin: 0;
+}
+
+.payments-status-subline {
+  color: var(--ink-soft);
+  font-size: 0.95rem;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.payments-status-subline strong {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+/* Update-required notice (re-uses the operator-notice pattern's tone) */
+.payments-update-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--app-space-3);
+  padding: var(--app-space-4) var(--app-space-5);
+  border: 1px solid color-mix(in srgb, var(--copper) 50%, var(--ink) 10%);
+  background: color-mix(in srgb, var(--copper) 5%, var(--paper-deep));
+  border-radius: var(--radius-card);
+}
+
+.payments-update-notice-label {
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  color: var(--copper);
+  font-size: 1.05rem;
+  letter-spacing: 0.005em;
+}
+
+.payments-update-notice-copy {
+  color: var(--ink-soft);
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.payments-sync-warning {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-3);
+  padding: var(--app-space-4);
+  border: 1px solid color-mix(in srgb, var(--copper) 52%, var(--ink) 8%);
+  background: color-mix(in srgb, var(--copper) 7%, var(--paper-deep));
+  border-radius: var(--radius-card);
+}
+
+/* ── Tier grid ──────────────────────────────────────────── */
+
+/* The outer grid declares both column tracks (one equal-width column per
+   tier, via --payments-tier-columns set inline from the catalog) and
+   row tracks. Each tier card opts into the parent's row tracks via
+   `grid-template-rows: subgrid`, so equivalent rows (name, price,
+   bullet 1, bullet 2, …) line up across all cards. `minmax(0, 1fr)`
+   on the columns keeps long button text from inflating one column past
+   the others. */
+.payments-tier-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--payments-tier-columns, 3), minmax(0, 1fr));
+  grid-auto-rows: auto;
+  /* Row template: name, price, alternates, summary, 4 bullets,
+     paid-through, spacer, cta, switch-link. The 4 bullet rows are
+     hard-coded for now — every catalog tier ships with 4 bullets. If
+     that ever changes, swap to subgrid+JS-set custom property. */
+  grid-template-rows:
+    auto    /* 1: name */
+    auto    /* 2: price */
+    auto    /* 3: alternates "or $X / Y" */
+    auto    /* 4: summary */
+    auto    /* 5: bullet 1 (accounts) */
+    auto    /* 6: bullet 2 (history) */
+    auto    /* 7: bullet 3 (unsynced) */
+    auto    /* 8: bullet 4 (export) */
+    auto    /* 9: paid-through (only on current card) */
+    1fr     /* 10: spacer that pushes CTA down */
+    auto    /* 11: cta */
+    auto;   /* 12: switch-link */
+  gap: clamp(1.25rem, 2.5vw, 1.75rem);
+  align-items: stretch;
+}
+
+@media (max-width: 860px) {
+  .payments-tier-grid {
+    grid-template-columns: 1fr;
+    /* Tracks reset per card on narrow widths — fall back to flex on each
+       card. Subgrid would chain all 3 cards vertically as one giant
+       column grid, which we don't want on mobile. */
+    grid-template-rows: none;
+  }
+}
+
+.payments-tier-grid--dimmed {
+  opacity: 0.55;
+  pointer-events: none;
+  transition: opacity var(--dur-base) var(--ease-default);
+}
+
+/* Two placeholder columns to match the shipping two-tier catalog (see
+   CatalogSkeleton). */
+.payments-catalog-skeleton {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(1.25rem, 2.5vw, 1.75rem);
+}
+
+@media (max-width: 860px) {
+  .payments-catalog-skeleton {
+    grid-template-columns: 1fr;
+  }
+}
+
+.payments-catalog-error {
+  margin-block: 1rem;
+}
+
+.payments-catalog-error .card-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.payments-refreshing {
+  margin-top: 0.25rem;
+  font-size: 0.85rem;
+}
+
+.payments-poll-note {
+  margin-block: 0.5rem;
+  font-size: 0.85rem;
+}
+
+/* ── Tier card ──────────────────────────────────────────── */
+
+.payments-tier-card {
+  position: relative;
+  background: var(--paper-deep);
+  border: 1px solid color-mix(in srgb, var(--ink) 14%, transparent);
+  border-radius: var(--radius-card);
+  padding: 3rem 1.8rem 2.2rem;
+  /* Card uses subgrid for rows so bullets etc. align across cards.
+     `min-width: 0` makes the card willing to shrink to its grid track
+     (otherwise a long Buy-CTA text inflates one column past the others). */
+  display: grid;
+  grid-row: 1 / -1;
+  grid-template-rows: subgrid;
+  min-width: 0;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.4) inset;
+  transition: transform var(--dur-base) var(--ease-default),
+    box-shadow var(--dur-base) var(--ease-default),
+    border-color var(--dur-base) var(--ease-default);
+}
+
+@media (max-width: 860px) {
+  .payments-tier-card {
+    display: flex;
+    flex-direction: column;
+    grid-row: auto;
+    grid-template-rows: none;
+  }
+}
+
+.payments-tier-card:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-card);
+}
+
+.payments-tier-grid--dimmed .payments-tier-card:hover {
+  transform: none;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.4) inset;
+}
+
+.payments-tier-corner {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  color: color-mix(in srgb, var(--ink) 40%, transparent);
+  pointer-events: none;
+}
+
+.payments-tier-corner-tl { top: 8px; left: 8px; }
+.payments-tier-corner-tr { top: 8px; right: 8px; transform: scaleX(-1); }
+.payments-tier-corner-bl { bottom: 8px; left: 8px; transform: scaleY(-1); }
+.payments-tier-corner-br { bottom: 8px; right: 8px; transform: scale(-1, -1); }
+
+.payments-tier-name {
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  font-size: 1.4rem;
+  letter-spacing: 0.005em;
+  color: var(--ink);
+  margin: 0;
+}
+
+.payments-tier-price {
+  font-family: var(--display);
+  font-size: 2.7rem;
+  line-height: 1;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+  color: var(--ink);
+  margin: 0.6rem 0 0;
+  font-variant-numeric: tabular-nums;
+  min-height: 2.7rem;
+  align-self: end;
+}
+
+.payments-tier-price small {
+  display: inline-block;
+  font-family: var(--body);
+  font-style: normal;
+  font-weight: 400;
+  font-size: 0.95rem;
+  color: var(--sage);
+  margin-left: 0.4rem;
+  letter-spacing: 0.01em;
+  font-variant-numeric: normal;
+}
+
+.payments-tier-price--empty {
+  color: var(--sage);
+}
+
+.payments-term-alternates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--app-space-3);
+  font-family: var(--body);
+  font-size: 0.92rem;
+  color: var(--ink-soft);
+  min-height: 1.4em;
+  margin: 0.4rem 0 1.2rem;
+}
+
+.payments-term-alternates--empty {
+  /* Reserve the row height even when there's no alternate option to
+     keep equivalent rows aligned across cards via subgrid. */
+}
+
+.payments-term-toggle {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--moss);
+  cursor: pointer;
+  background-image: linear-gradient(currentColor, currentColor);
+  background-repeat: no-repeat;
+  background-position: 0 100%;
+  background-size: 0 1px;
+  transition: background-size var(--dur-base) var(--ease-default),
+    color var(--dur-quick) var(--ease-default);
+  letter-spacing: 0.01em;
+}
+
+.payments-term-toggle:hover:not(:disabled),
+.payments-term-toggle:focus-visible:not(:disabled) {
+  color: var(--moss-bright);
+  background-size: 100% 1px;
+}
+
+.payments-term-toggle:focus-visible {
+  outline: 2px solid var(--moss);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+.payments-term-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.payments-tier-summary {
+  font-family: var(--display);
+  font-style: italic;
+  font-size: 1.05rem;
+  color: var(--ink-soft);
+  margin: 0;
+  padding-bottom: 1rem;
+  line-height: 1.4;
+}
+
+/* Each bullet is its own subgrid row (see .payments-tier-grid). The
+   <ul> becomes display: contents so its children participate directly
+   in the card grid — required for subgrid alignment to work. */
+.payments-tier-bullets {
+  display: contents;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 0.97rem;
+  color: var(--ink-soft);
+}
+
+.payments-tier-bullet {
+  padding: 0.5rem 0;
+  border-top: 1px dashed color-mix(in srgb, var(--ink) 22%, transparent);
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  line-height: 1.45;
+}
+
+/* Empty bullet (a tier has fewer bullets than the grid row count):
+   stays in the grid (so alignment is preserved) but renders no border,
+   pseudo-dot, or padding so the row collapses visually. */
+.payments-tier-bullet:empty {
+  border-top: 0;
+  padding: 0;
+}
+
+.payments-tier-bullet:empty::before {
+  display: none;
+}
+
+.payments-tier-bullet::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  background: var(--moss);
+  border-radius: 50%;
+  flex: 0 0 auto;
+  margin-top: 0.55rem;
+}
+
+.payments-tier-bullet strong {
+  font-weight: 500;
+  color: var(--ink);
+}
+
+@media (max-width: 860px) {
+  /* Bullet UL needs to be a normal list again on mobile (no subgrid). */
+  .payments-tier-bullets {
+    display: block;
+    margin: 0 0 1.6rem;
+  }
+}
+
+.payments-tier-paid-through {
+  margin: 0.6rem 0 0;
+  font-size: 0.9rem;
+  color: var(--sage);
+  font-style: italic;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-2);
+}
+
+.payments-tier-paid-through strong {
+  color: var(--ink-soft);
+  font-weight: 500;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
+
+.payments-tier-cta {
+  margin-top: 0.8rem;
+  align-self: start;
+  justify-self: start;
+  white-space: normal;
+  text-align: left;
+}
+
+/* Below-CTA "switch to monthly/yearly billing" — quieter than the
+   "or $X" link near the price; same global effect. */
+.payments-tier-switch-link {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0.5rem 0 0;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--moss);
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  background-image: linear-gradient(currentColor, currentColor);
+  background-repeat: no-repeat;
+  background-position: 0 100%;
+  background-size: 0 1px;
+  align-self: start;
+  justify-self: start;
+  transition: background-size var(--dur-base) var(--ease-default),
+    color var(--dur-quick) var(--ease-default);
+}
+
+.payments-tier-switch-link:hover:not(:disabled),
+.payments-tier-switch-link:focus-visible:not(:disabled) {
+  color: var(--moss-bright);
+  background-size: 100% 1px;
+}
+
+.payments-tier-switch-link:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* Featured (copper-ribboned) tier */
+.payments-tier-card--featured {
+  border-color: color-mix(in srgb, var(--copper) 65%, var(--ink) 10%);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--copper) 7%, var(--paper-deep)),
+    var(--paper-deep) 35%
+  );
+}
+
+.payments-tier-card--featured .payments-tier-price {
+  color: var(--copper);
+}
+
+.payments-tier-card--featured .payments-tier-bullet::before {
+  background: var(--copper);
+}
+
+.payments-tier-ribbon {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  font-family: var(--display);
+  font-style: italic;
+  font-size: 0.78rem;
+  letter-spacing: 0.05em;
+  color: var(--paper);
+  background: var(--copper);
+  padding: 0.25rem 0.7rem;
+  border-radius: var(--radius-full);
+  white-space: nowrap;
+}
+
+/* Current-plan wax-stamp seal.
+   Replaces the top-left corner mark when shown. Sits in the corner
+   on a different axis (round, rotated) from the right-edge ribbon
+   pill, so even a long "Early adopter discount" label cannot
+   collide with it. */
+.payments-tier-current-stamp {
+  position: absolute;
+  top: 0.6rem;
+  left: 0.6rem;
+  width: 3.6rem;
+  height: 3.6rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.18rem;
+
+  font-family: var(--display);
+  font-style: italic;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-weight: 500;
+  line-height: 1;
+  color: color-mix(in srgb, var(--moss) 78%, transparent);
+
+  background: color-mix(in srgb, var(--paper) 35%, transparent);
+  border: 1.25px solid color-mix(in srgb, var(--moss) 55%, transparent);
+  border-radius: 50%;
+
+  transform: rotate(-8deg);
+  pointer-events: none;
+  user-select: none;
+  z-index: 2;
+}
+
+/* Inner ring — gives the double-line rubber-stamp silhouette. */
+.payments-tier-current-stamp::before {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border: 1px solid color-mix(in srgb, var(--moss) 38%, transparent);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.payments-tier-current-stamp-line {
+  display: block;
+  text-indent: 0.14em; /* compensates for letter-spacing on last char */
+}
+
+.payments-tier-current-stamp-line--top {
+  font-size: 0.74rem;
+}
+
+.payments-tier-current-stamp-line--bottom {
+  font-size: 0.66rem;
+  opacity: 0.88;
+}
+
+/* Tiny horizontal divider between the two words, echoing the
+   ledger-rule motif used elsewhere on the page. */
+.payments-tier-current-stamp-rule {
+  display: block;
+  width: 1rem;
+  height: 1px;
+  background: color-mix(in srgb, var(--moss) 50%, transparent);
+}
+
+/* Featured tier sits on a warm copper-tinted background; nudge the
+   stamp ink slightly so it still reads as cool sage/moss rather than
+   muddying into the copper field. */
+.payments-tier-card--featured .payments-tier-current-stamp {
+  background: color-mix(in srgb, var(--paper) 55%, transparent);
+}
+
+/* ── Current-plan ledger line ───────────────────────────── */
+
+/* Always-visible record of the user's plan, independent of the
+   sellable catalog (BGC may unlist the current tier at any time,
+   taking the stamped tier card with it). Hairline rules echo the
+   .payments-facts ledger vocabulary: this is the opening entry of
+   the account region, above the order-history rows. */
+.payments-plan-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--app-space-2) var(--app-space-4);
+  padding: var(--app-space-4) 0;
+  border-top: 1px solid var(--paper-edge);
+  border-bottom: 1px solid var(--paper-edge);
+}
+
+.payments-plan-line-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-1);
+  min-width: 0;
+}
+
+/* Eyebrow shares the stamp's typographic register (italic display,
+   uppercase, letterspaced, moss ink) without repeating the seal. */
+.payments-plan-line-eyebrow {
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 0.72rem;
+  color: color-mix(in srgb, var(--moss) 78%, transparent);
+}
+
+.payments-plan-line-name {
+  font-family: var(--display);
+  font-size: 1.15rem;
+  color: var(--ink);
+}
+
+.payments-plan-line-status {
+  font-family: var(--body);
+  font-size: 0.9rem;
+  color: var(--ink-soft);
+}
+
+.payments-plan-line-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  font-family: var(--body);
+  font-size: 0.9rem;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.payments-plan-line-paid-through strong {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.payments-plan-refresh {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  padding: 0.2rem;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--sage);
+  cursor: pointer;
+  border-radius: var(--radius-full);
+  line-height: 0;
+  transition: color var(--dur-quick) var(--ease-default),
+    background-color var(--dur-quick) var(--ease-default);
+}
+
+.payments-plan-refresh:hover:not(:disabled),
+.payments-plan-refresh:focus-visible:not(:disabled) {
+  color: var(--moss);
+  background: color-mix(in srgb, var(--moss) 10%, transparent);
+}
+
+.payments-plan-refresh:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.payments-plan-refresh svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Fallback price / "unavailable" line under the grid */
+.payments-price {
+  font-family: var(--body);
+  font-size: 1rem;
+  color: var(--ink-soft);
+  margin: 0;
+}
+
+.payments-price strong {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+/* ── Action button rows + inline errors ─────────────────── */
+
+.payments-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--app-space-3);
+  align-items: center;
+}
+
+.payments-error {
+  margin: 0;
+}
+
+/* ── Ledger fact list (payment summary, top-up amounts, …) ── */
+
+.payments-facts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--app-space-3);
+  margin: 0;
+  padding: var(--app-space-4) 0;
+  border-top: 1px solid var(--paper-edge);
+  border-bottom: 1px solid var(--paper-edge);
+}
+
+@media (min-width: 560px) {
+  .payments-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.payments-fact {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-1);
+}
+
+.payments-fact dt {
+  font-family: var(--body);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--sage);
+  font-weight: 500;
+}
+
+.payments-fact dd {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.payments-fact-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-1);
+  min-width: 0;
+}
+
+.payments-fact-copy code {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+  background: transparent;
+  padding: 0;
+}
+
+.payments-support-reference {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-3);
+  padding: var(--app-space-4) var(--app-space-5);
+  background: color-mix(in srgb, var(--ink) 2%, var(--paper-deep));
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-card);
+}
+
+.payments-support-reference-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-3);
+}
+
+.payments-support-reference-header h3 {
+  margin: 0;
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  font-size: 1.1rem;
+}
+
+.payments-support-reference-facts {
+  padding-top: var(--app-space-3);
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+/* ── Order history (ledger-table style) ─────────────────── */
+
+.payments-history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-4);
+  padding-top: var(--app-space-5);
+  border-top: 1px solid var(--paper-edge);
+}
+
+.payments-history-header h3 {
+  margin: 0;
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  font-size: 1.2rem;
+  color: var(--ink);
+}
+
+.payments-history-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.payments-history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--app-space-2);
+  padding: 0.9rem 0;
+  border-bottom: 1px solid var(--paper-edge);
+  transition: background-color var(--dur-quick) var(--ease-default);
+}
+
+.payments-history-row:hover {
+  background: color-mix(in srgb, var(--paper-deep) 60%, transparent);
+}
+
+.payments-history-row:last-child {
+  border-bottom: 0;
+}
+
+.payments-history-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-1);
+  min-width: 0;
+}
+
+.payments-history-title-row,
+.payments-history-meta,
+.payments-history-order-id {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  min-width: 0;
+}
+
+.payments-history-title-row {
+  justify-content: space-between;
+}
+
+.payments-history-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 var(--app-space-2);
+  border-radius: var(--radius-full);
+  font-family: var(--body);
+  font-size: 0.78rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--ink) 18%, transparent);
+  color: var(--ink-soft);
+}
+
+.payments-history-status-paid {
+  background: var(--positive-soft);
+  border-color: color-mix(in srgb, var(--positive) 35%, transparent);
+  color: var(--positive);
+}
+
+.payments-history-status-pending {
+  background: var(--caution-soft);
+  border-color: color-mix(in srgb, var(--caution) 35%, transparent);
+  color: var(--caution);
+}
+
+.payments-history-status-failed,
+.payments-history-status-expired {
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+  color: var(--danger);
+}
+
+.payments-history-status-canceled {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--sage) 50%, transparent);
+  color: var(--sage);
+}
+
+.payments-history-amount {
+  font-family: var(--mono);
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.payments-history-order-id code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--sage);
+  background: transparent;
+  padding: 0;
+}
+
+.payments-history-meta {
+  flex-wrap: wrap;
+  font-size: 0.9rem;
+  color: var(--sage);
+}
+
+@media (min-width: 640px) {
+  .payments-history-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+
+  .payments-history-meta {
+    justify-content: flex-end;
+  }
+}
+
+
+
+/* ── 38. Print ───────────────────────────────────────────── */
+
+@media print {
+  .navbar,
+  .sidebar,
+  .mobile-bottom-bar,
+  .sidebar-overlay,
+  .modal-overlay {
+    display: none !important;
+  }
+
+  .main-content,
+  .main-content.with-sidebar {
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+  }
+
+  .card {
+    border: 1px solid color-mix(in srgb, var(--ink) 22%, transparent);
+    box-shadow: none;
+  }
+}
+
+/* ── Section heads (design-system §9.4) ─────────────────── */
+.section-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin-bottom: var(--space-6);
+}
+.section-num {
+  flex-shrink: 0;
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  font-size: 1.1rem;
+  letter-spacing: 0.02em;
+  color: var(--copper);
+}
+.section-title {
+  font-family: var(--display);
+  font-weight: 500;
+  font-size: var(--fs-display-lg);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+.section-title em {
+  font-style: italic;
+}
+
+/* ── Import result summary ──────────────────────────────── */
+.import-summary {
+  margin: var(--space-4) 0 0;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0;
+}
+.import-summary dt,
+.import-summary dd {
+  margin: 0;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--paper-edge);
+}
+.import-summary dt {
+  color: var(--ink-soft);
+}
+.import-summary dd {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+/* ── Editorial page title (design-system §3.4) ──────────── */
+.page-title-display {
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}

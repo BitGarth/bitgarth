@@ -1,0 +1,24 @@
+{
+  "capabilities": {
+    "features": {
+      "balance_assertions": true,
+      "balance_sync": true,
+      "exchange_rates_current": true,
+      "exchange_rates_history": false,
+      "hledger_export": true,
+      "price_overrides": true,
+      "tax_reports": false,
+      "transaction_history_sync": false
+    },
+    "limits": {
+      "accounts": {
+        "total": 50
+      },
+      "history": {
+        "max_transactions_per_account": 0
+      }
+    }
+  },
+  "capability_schema_version": 3,
+  "captured_at": "2026-07-05T11:48:36.543803Z"
+}

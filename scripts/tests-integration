@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+"${SCRIPT_DIR}/test-results-record-cargo" \
+  integration \
+  rtk cargo test -p bitgarth-app --features server test::integration

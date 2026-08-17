@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+
+cd "${ROOT_DIR}"
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  exec npx playwright install chromium
+fi
+
+if [[ ! -x /usr/bin/unzip ]] || ! command -v curl >/dev/null 2>&1; then
+  exec npx playwright install chromium
+fi
+
+read -r chromium_revision chromium_version headless_revision headless_version ffmpeg_revision < <(
+  node - <<'NODE'
+const browsers = require("./node_modules/playwright-core/browsers.json").browsers;
+const chromium = browsers.find((browser) => browser.name === "chromium");
+const headless = browsers.find((browser) => browser.name === "chromium-headless-shell");
+const ffmpeg = browsers.find((browser) => browser.name === "ffmpeg");
+if (!chromium || !headless || !ffmpeg) {
+  throw new Error("Playwright Chromium browser metadata is missing");
+}
+console.log([
+  chromium.revision,
+  chromium.browserVersion,
+  headless.revision,
+  headless.browserVersion,
+  ffmpeg.revision,
+].join(" "));
+NODE
+)
+
+case "$(uname -m)" in
+  arm64)
+    readonly platform_suffix="mac-arm64"
+    readonly ffmpeg_zip_basename="ffmpeg-mac-arm64.zip"
+    ;;
+  x86_64)
+    readonly platform_suffix="mac-x64"
+    readonly ffmpeg_zip_basename="ffmpeg-mac.zip"
+    ;;
+  *)
+    exec npx playwright install chromium
+    ;;
+esac
+
+if [[ "${PLAYWRIGHT_BROWSERS_PATH:-}" == "0" ]]; then
+  cache_root="${ROOT_DIR}/node_modules/playwright-core/.local-browsers"
+elif [[ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]]; then
+  cache_root="${PLAYWRIGHT_BROWSERS_PATH}"
+else
+  cache_root="${HOME}/Library/Caches/ms-playwright"
+fi
+
+if [[ "${cache_root}" != /* ]]; then
+  cache_root="${ROOT_DIR}/${cache_root}"
+fi
+
+download_host="${PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST:-${PLAYWRIGHT_DOWNLOAD_HOST:-https://cdn.playwright.dev}}"
+tools_download_host="${PLAYWRIGHT_DOWNLOAD_HOST:-https://cdn.playwright.dev}"
+
+install_artifact() {
+  local name="$1"
+  local revision="$2"
+  local label="$3"
+  local zip_basename="$4"
+  local executable_relative_path="$5"
+  local url="$6"
+
+  local directory_name="${name//-/_}-${revision}"
+  local browser_dir="${cache_root}/${directory_name}"
+  local marker_file="${browser_dir}/INSTALLATION_COMPLETE"
+  local executable_path="${browser_dir}/${executable_relative_path}"
+
+  if [[ -f "${marker_file}" && -x "${executable_path}" ]]; then
+    echo "${name} ${label} already installed"
+    return
+  fi
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/bitgarth-playwright.XXXXXX")"
+  trap 'rm -rf "${tmp_dir}"' RETURN
+
+  local zip_path="${tmp_dir}/${zip_basename}"
+
+  echo "Downloading ${name} ${label}"
+  mkdir -p "${cache_root}"
+  rm -rf "${cache_root}/__dirlock" "${browser_dir}"
+  curl --fail --location --show-error --progress-bar "${url}" --output "${zip_path}"
+
+  echo "Installing ${name} ${label}"
+  mkdir -p "${browser_dir}"
+  /usr/bin/unzip -q "${zip_path}" -d "${browser_dir}"
+  chmod 0755 "${executable_path}"
+  touch "${marker_file}"
+  rm -rf "${tmp_dir}"
+  trap - RETURN
+}
+
+install_artifact \
+  "chromium" \
+  "${chromium_revision}" \
+  "${chromium_version}" \
+  "chrome-${platform_suffix}.zip" \
+  "chrome-${platform_suffix}/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing" \
+  "${download_host}/builds/cft/${chromium_version}/${platform_suffix}/chrome-${platform_suffix}.zip"
+
+install_artifact \
+  "chromium-headless-shell" \
+  "${headless_revision}" \
+  "${headless_version}" \
+  "chrome-headless-shell-${platform_suffix}.zip" \
+  "chrome-headless-shell-${platform_suffix}/chrome-headless-shell" \
+  "${download_host}/builds/cft/${headless_version}/${platform_suffix}/chrome-headless-shell-${platform_suffix}.zip"
+
+install_artifact \
+  "ffmpeg" \
+  "${ffmpeg_revision}" \
+  "${ffmpeg_revision}" \
+  "${ffmpeg_zip_basename}" \
+  "ffmpeg-mac" \
+  "${tools_download_host}/builds/ffmpeg/${ffmpeg_revision}/${ffmpeg_zip_basename}"

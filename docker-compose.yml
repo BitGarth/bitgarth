@@ -1,0 +1,16 @@
+services:
+  bitgarth:
+    image: bitgarth/bitgarth:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - bitgarth-data:/data
+    environment:
+      IP: "0.0.0.0"
+      PORT: "8080"
+      RUST_LOG: info
+      BITGARTH_PROJECT_DIR: /data
+    restart: unless-stopped
+
+volumes:
+  bitgarth-data:

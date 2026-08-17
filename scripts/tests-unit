@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+requested="${1:-all}"
+if [ "$requested" != "all" ] && [ "$requested" != "unit" ] && [ "$requested" != "server-unit" ] && [ "$requested" != "cli-tests" ]; then
+  echo "usage: tests-unit [unit|server-unit|cli-tests]" >&2
+  exit 2
+fi
+
+if [ "$requested" = "all" ] || [ "$requested" = "unit" ]; then
+  "${SCRIPT_DIR}/test-results-record-cargo" \
+    unit \
+    rtk cargo test -p bitgarth-app --no-default-features -- --skip test::integration
+fi
+
+if [ "$requested" = "all" ] || [ "$requested" = "server-unit" ]; then
+  "${SCRIPT_DIR}/test-results-record-cargo" \
+    server-unit \
+    rtk cargo test -p bitgarth-app --no-default-features --features server -- --skip test::integration
+fi
+
+if [ "$requested" = "all" ] || [ "$requested" = "cli-tests" ]; then
+  "${SCRIPT_DIR}/test-results-record-cargo" \
+    cli-tests \
+    rtk cargo test -p bitgarth-cli
+fi

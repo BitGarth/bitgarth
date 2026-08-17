@@ -1,0 +1,13 @@
+{
+  "request": {
+    "client_name": "business",
+    "key_verifier": "geFJOqW5wsUi7LidS2OuPuOOylI2EV4fFLr5Rmaos_k",
+    "permissions": ["balances_read"]
+  },
+  "response": {
+    "pairing_id": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+    "code": "1111-1111",
+    "approval_url": "https://example.com/pair?code=1111-1111",
+    "expires_at": "2026-07-31T15:10:00Z"
+  }
+}

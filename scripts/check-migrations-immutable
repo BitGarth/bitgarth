@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Existing files under migrations/ are immutable once they may have been
+# applied anywhere; only additions are allowed.
+#
+# Usage: check-migrations-immutable [<base-rev>]
+# Compares <base-rev> (default: merge-base with origin/main) against the
+# working tree, so uncommitted edits are caught too.
+
+base="${1:-}"
+if [ -z "$base" ]; then
+  if git rev-parse --verify --quiet origin/main >/dev/null; then
+    base="$(git merge-base origin/main HEAD)"
+  else
+    base="$(git merge-base main HEAD)"
+  fi
+fi
+
+if ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
+  echo "error: base revision '$base' does not resolve to a commit." >&2
+  exit 1
+fi
+
+# ':/migrations/' is a top-level-relative pathspec, so this works regardless
+# of the caller's current directory (finding: cwd-relative pathspec silently
+# passed when invoked from a subdirectory).
+if ! diff_output="$(git diff --name-status "$base" -- ':/migrations/')"; then
+  echo "error: git diff failed comparing base '$base' against the working tree." >&2
+  exit 1
+fi
+
+violations="$(printf '%s\n' "$diff_output" | grep -Ev '^A' || true)"
+
+if [ -n "$violations" ]; then
+  echo "error: existing migration files were modified, deleted, or renamed." >&2
+  echo "Migrations are append-only; add a new migration instead. Offending entries:" >&2
+  echo "$violations" >&2
+  exit 1
+fi
+
+echo "migrations-immutable guard passed (base $base)"

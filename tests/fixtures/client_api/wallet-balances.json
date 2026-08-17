@@ -1,0 +1,56 @@
+{
+  "wallets": [
+    {
+      "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "name": "Alpha",
+      "balances": [
+        {
+          "asset_id": "bitcoin",
+          "network_id": "bitcoin-mainnet",
+          "unit": "BTC",
+          "amount": "1.2345",
+          "status": "final",
+          "reasons": []
+        },
+        {
+          "asset_id": "ethereum",
+          "network_id": "ethereum-mainnet",
+          "unit": "ETH",
+          "amount": "2",
+          "status": "provisional",
+          "reasons": [
+            "first_successful_sync_pending",
+            "inactive_account_not_syncing"
+          ]
+        },
+        {
+          "asset_id": "usd-coin",
+          "network_id": "polygon-mainnet",
+          "unit": "USDC",
+          "amount": null,
+          "status": "unknown",
+          "reasons": []
+        }
+      ]
+    },
+    {
+      "id": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+      "name": "Empty",
+      "balances": []
+    },
+    {
+      "id": "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+      "name": "Manual",
+      "balances": [
+        {
+          "asset_id": "cardano",
+          "network_id": "cardano-mainnet",
+          "unit": "ADA",
+          "amount": "1.234",
+          "status": "final",
+          "reasons": []
+        }
+      ]
+    }
+  ]
+}

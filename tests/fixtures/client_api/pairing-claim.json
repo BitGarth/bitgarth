@@ -1,0 +1,10 @@
+{
+  "pending_response": {
+    "status": "pending"
+  },
+  "active_response": {
+    "status": "active",
+    "remote_user_id": "01K1H6M0K73J8YK6D0R8NQ3T5V",
+    "permissions": ["balances_read"]
+  }
+}

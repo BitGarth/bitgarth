@@ -1,0 +1,19 @@
+{
+  "name": "bitgarth-e2e",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Browser-based E2E testing for BitGarth web app",
+  "scripts": {
+    "e2e": "./scripts/e2e",
+    "e2e:build": "./scripts/e2e-build",
+    "e2e:headed": "./scripts/e2e --headed",
+    "e2e:ui": "./scripts/e2e --ui",
+    "e2e:install-browsers": "./scripts/e2e-install-browsers",
+    "screenshots": "node tests/e2e/screenshots/capture.mjs --self-contained",
+    "screenshots:dev": "node tests/e2e/screenshots/capture.mjs --base-url http://127.0.0.1:8081",
+    "screenshots:page": "node tests/e2e/screenshots/capture.mjs --base-url http://127.0.0.1:8081"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.53.0"
+  }
+}

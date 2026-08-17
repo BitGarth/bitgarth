@@ -1,0 +1,122 @@
+/* ============================================================
+   BitGarth — Botanical Ledger Tokens
+   Source of truth for the visual system. Mirrors §12 of
+   docs/ux/design-system.md. Load before any other stylesheet.
+   ============================================================ */
+
+:root {
+  /* ── palette ── */
+  --paper:         #F4EFE3;
+  --paper-deep:    #EBE3D2;
+  --paper-edge:    #DDD2B9;
+  --ink:           #1A1F1A;
+  --ink-deeper:    #0E120E;
+  --ink-soft:      #2E352E;
+  --paper-on-ink:  #ECE5D2;
+  --moss:          #2F4A30;
+  --moss-bright:   #4A7A4D;
+  --copper:        #A8693A;
+  --copper-soft:   #C08856;
+  --sage:          #8A9783;
+  --positive:      #3F6B3F;
+  --positive-soft: #DCE5D2;
+  --caution:       #A8693A;
+  --caution-soft:  #F3E2D1;
+  --danger:        #8A3A2C;
+  --danger-soft:   #F1D9D2;
+  --info:          #3A5A6B;
+
+  /* ── code-block tokens (on ink) ── */
+  --tok-cmd:  #ECE5D2;
+  --tok-flag: #C9B27E;
+  --tok-str:  #B8C8A8;
+  --tok-img:  #D8A877;
+  --tok-dim:  #6B7568;
+
+  /* ── typography ── */
+  --display: "Fraunces", "Times New Roman", serif;
+  --body:    "Instrument Sans", system-ui, sans-serif;
+  --mono:    "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+
+  --fs-display-xl: clamp(2.6rem, 7.2vw, 5.6rem);
+  --fs-display-lg: clamp(1.9rem, 3.6vw, 2.9rem);
+  --fs-display-md: 1.5rem;
+  --fs-display-sm: 1.25rem;
+  --fs-lede:       clamp(1.05rem, 1.6vw, 1.25rem);
+  --fs-body:       1rem;
+  --fs-body-sm:    0.95rem;
+  --fs-caption:    0.85rem;
+  --fs-eyebrow:    0.78rem;
+  --fs-mono-block: 0.95rem;
+
+  /* ── spacing (4 px base) ── */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  24px;
+  --space-6:  32px;
+  --space-7:  48px;
+  --space-8:  64px;
+  --space-9:  96px;
+  --space-10: 128px;
+
+  --gutter:    clamp(1.25rem, 4vw, 2.5rem);
+  --section-y: clamp(4rem, 10vw, 7.5rem);
+  --measure:   36rem;
+
+  /* ── radii ── */
+  --radius-tag:   4px;
+  --radius-input: 6px;
+  --radius-card:  8px;
+  --radius-code:  10px;
+  --radius-pill:  999px;
+
+  /* ── motion ── */
+  --ease-default: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --ease-press:   cubic-bezier(0.4, 0, 0.6, 1);
+  --ease-in:      cubic-bezier(0.4, 0, 1, 1);
+  --dur-quick:    140ms;
+  --dur-base:     220ms;
+  --dur-soft:     420ms;
+  --dur-reveal:   700ms;
+
+  /* ── elevation ── */
+  --shadow-button: 0 1px 0 rgba(26,31,26,0.04),
+                   0 6px 18px -10px rgba(47,74,48,0.45);
+  --shadow-card:   0 1px 0 rgba(255,255,255,0.4) inset,
+                   0 16px 32px -22px rgba(26,31,26,0.35);
+  --shadow-code:   0 1px 0 rgba(255,255,255,0.04) inset,
+                   0 18px 40px -28px rgba(26,31,26,0.55),
+                   0 4px 12px -6px rgba(26,31,26,0.35);
+  --shadow-modal:  0 1px 0 rgba(255,255,255,0.5) inset,
+                   0 32px 80px -32px rgba(26,31,26,0.45);
+}
+
+/* parchment grain — subtle SVG noise overlay, lifted from the
+   landing page verbatim so the texture matches pixel-for-pixel. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.35;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.10  0 0 0 0 0.12  0 0 0 0 0.10  0 0 0 0.06 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+}
+
+/* gentle vignette — warm copper at the top, cool moss at the bottom. */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(120% 80% at 50% -10%, rgba(168,105,58,0.05), transparent 60%),
+    radial-gradient(120% 80% at 50% 110%, rgba(47,74,48,0.06), transparent 60%);
+}
+
+/* Lift real content above the texture layers. */
+body > * { position: relative; z-index: 2; }

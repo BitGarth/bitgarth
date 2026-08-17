@@ -1,0 +1,3630 @@
+/* ============================================================
+   BitGarth — Wallets & Transactions
+   Styles for wallet management, accounts, sync status,
+   transaction history, and related modals.
+   ============================================================ */
+
+
+
+/* ── 1. Wallet Page Layout ───────────────────────────────── */
+
+.wallet-section {
+  margin-bottom: var(--app-space-6);
+}
+
+.wallet-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--app-space-4);
+}
+
+.wallet-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-4);
+}
+
+
+
+/* ── 2. Wallet Card ──────────────────────────────────────── */
+
+.wallet-card {
+  overflow: visible;
+}
+
+.wallet-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--app-space-3);
+  padding: var(--app-space-4) var(--app-space-5);
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.wallet-label-row {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+}
+
+.wallet-heading-row {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  min-width: 0;
+}
+
+.wallet-title-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.wallet-collapse-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  flex: 0 0 28px;
+}
+
+.wallet-collapse-btn:hover {
+  color: var(--color-primary);
+  background: var(--color-bg-hover);
+}
+
+.wallet-collapse-icon {
+  display: inline-flex;
+  transform: rotate(90deg);
+  transition: transform var(--transition-fast);
+}
+
+.wallet-collapse-btn.collapsed .wallet-collapse-icon {
+  transform: rotate(0deg);
+}
+
+.wallet-label {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+}
+
+.wallet-fingerprint {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.wallet-value-summary {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.wallet-card-body {
+  padding: var(--app-space-4) var(--app-space-5);
+}
+
+
+/* ── 3. Add Dropdown ───────────────────────────────────────── */
+/* Shares the floating-menu language with the kebab menu (§4b):
+   paper surface on the parchment palette, hairline ink border,
+   moss-wash hover. The button it hangs from already says "Add",
+   so items are nouns — no redundant "Add" prefix. */
+
+.add-dropdown {
+  position: relative;
+}
+
+.add-dropdown-menu {
+  position: absolute;
+  top: calc(100% + var(--app-space-2));
+  right: 0;
+  z-index: 49;
+  min-width: 232px;
+  background: var(--paper);
+  border: 1px solid color-mix(in srgb, var(--ink) 14%, transparent);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+  padding: 0.35rem;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-4px);
+  transition: opacity var(--transition-base), transform var(--transition-base), visibility var(--transition-base);
+}
+
+.add-dropdown-menu.visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.add-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: var(--body);
+  font-size: 0.92rem;
+  white-space: nowrap;
+  color: var(--ink);
+  border-radius: var(--radius-tag);
+  transition: background var(--transition-fast), color var(--transition-fast);
+  text-align: left;
+}
+
+.add-dropdown-item:hover,
+.add-dropdown-item:focus-visible {
+  background: color-mix(in srgb, var(--moss) 10%, transparent);
+  color: var(--ink);
+  outline: none;
+}
+
+
+/* ── 4. Account Row ────────────────────────────────────────── */
+
+.account-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-3);
+  padding: var(--app-space-3) 0;
+  border-top: 1px solid var(--color-border-light);
+  flex-wrap: wrap;
+}
+
+.account-row:first-child {
+  border-top: none;
+}
+
+.account-row-info {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  min-width: 0;
+}
+
+.account-asset-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  padding: 2px var(--app-space-2);
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}
+
+.account-name {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.account-row-name-group {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* First line of the name group: label plus the marks that annotate it
+   (sync pill, history-gap badge), so they align with the name instead of
+   centring against the two-line group. */
+.account-row-name-line {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  min-width: 0;
+}
+
+.account-row-subline {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--sage);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.account-row-right {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  flex-shrink: 0;
+}
+
+.sync-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--app-space-1);
+  border: none;
+  background: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  line-height: 1;
+}
+
+.sync-icon-btn:hover:not(:disabled) {
+  color: var(--color-primary);
+  background: var(--color-bg-hover);
+}
+
+.sync-icon-btn:disabled {
+  color: var(--color-text-disabled);
+  cursor: default;
+}
+
+.sync-icon-btn.spinning svg {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.sync-capacity-summary {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  margin: 0 0 var(--app-space-3) 0;
+}
+
+.wallet-value-overview {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--app-space-3);
+  margin-bottom: var(--app-space-3);
+}
+
+.wallet-value-overview-label,
+.wallet-value-overview-total,
+.wallet-list-control-btn {
+  white-space: nowrap;
+}
+
+.wallet-list-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-3);
+  margin-bottom: var(--app-space-3);
+}
+
+.wallet-list-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.account-history-gap-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 1px var(--app-space-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+
+.account-navigate {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--app-space-1);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.account-navigate:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+
+/* ── 4b. Kebab Menu ────────────────────────────────────────── */
+/* One menu language, every page. The same paper surface, hairline
+   ink border, and moss-wash hover render identically on /wallets,
+   /wallets/:id, and the account transactions page. */
+
+.kebab-menu {
+  position: relative;
+}
+
+.kebab-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0.35rem;
+  border-radius: var(--radius-pill);
+  color: var(--sage);
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.kebab-menu-trigger:hover,
+.kebab-menu-trigger:focus-visible {
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  color: var(--ink);
+  outline: none;
+}
+
+.kebab-menu-dismiss-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 48;
+}
+
+.kebab-menu-dropdown {
+  position: absolute;
+  top: calc(100% + var(--app-space-1));
+  right: 0;
+  z-index: 49;
+  min-width: 184px;
+  background: var(--paper);
+  border: 1px solid color-mix(in srgb, var(--ink) 14%, transparent);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+  padding: 0.35rem;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-4px);
+  transition: opacity var(--transition-base), transform var(--transition-base), visibility var(--transition-base);
+}
+
+.kebab-menu-dropdown.visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.kebab-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: var(--body);
+  font-size: 0.92rem;
+  white-space: nowrap;
+  color: var(--ink);
+  border-radius: var(--radius-tag);
+  transition: background var(--transition-fast), color var(--transition-fast);
+  text-align: left;
+}
+
+.kebab-menu-item:hover,
+.kebab-menu-item:focus-visible {
+  background: color-mix(in srgb, var(--moss) 10%, transparent);
+  color: var(--ink);
+  outline: none;
+}
+
+.kebab-menu-item.danger {
+  color: var(--danger);
+}
+
+.kebab-menu-item.danger:hover,
+.kebab-menu-item.danger:focus-visible {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+}
+
+
+/* ── 4c. Sync Status Dot ───────────────────────────────────── */
+
+.sync-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+}
+
+.sync-dot-idle {
+  background: var(--color-text-muted);
+  opacity: 0.4;
+}
+
+.sync-dot-success {
+  background: var(--color-success);
+}
+
+.sync-dot-partial {
+  background: var(--color-warning);
+}
+
+.sync-dot-failure {
+  background: var(--color-error);
+}
+
+.account-sync-spinner-small {
+  width: 10px;
+  height: 10px;
+  border-width: 1.5px;
+  flex-shrink: 0;
+}
+
+
+/* ── 5. Account Balance ──────────────────────────────────── */
+
+.account-balance {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+.account-balance-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.account-balance-amount-row {
+  display: flex;
+  align-items: baseline;
+}
+
+.account-balance-provisional-label {
+  font-size: var(--text-xs);
+  color: var(--sage);
+}
+
+.account-current-value {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+
+/* ── 6. Sync Status ──────────────────────────────────────── */
+
+.account-sync-status {
+  font-size: var(--text-sm);
+  padding: var(--app-space-2) 0;
+  color: var(--color-text-secondary);
+}
+
+.account-sync-status-idle {
+  color: var(--color-text-muted);
+}
+
+.account-sync-status-running {
+  color: var(--color-text-secondary);
+}
+
+.account-sync-status-success {
+  color: var(--color-success);
+}
+
+.account-sync-status-partial {
+  color: var(--color-warning);
+}
+
+.account-sync-status-failure {
+  color: var(--color-error);
+}
+
+.account-sync-spinner-row {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+}
+
+.account-sync-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spinner-rotate 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spinner-rotate {
+  to { transform: rotate(360deg); }
+}
+
+.account-sync-running-text {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--app-space-1);
+}
+
+.account-sync-progress-track {
+  width: 100%;
+  max-width: 200px;
+  height: 4px;
+  background: var(--color-bg-inset);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+
+.account-sync-progress-fill {
+  height: 100%;
+  background: var(--color-primary);
+  border-radius: var(--radius-full);
+  transition: width var(--transition-base);
+}
+
+.account-sync-progress-percent {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  margin-top: var(--app-space-1);
+}
+
+.account-sync-integrations {
+  display: flex;
+  gap: 2px;
+  height: 4px;
+  border-radius: var(--radius-full);
+  overflow: hidden;
+  margin: var(--app-space-2) 0;
+}
+
+.account-sync-integration-segment {
+  flex: 1;
+  height: 100%;
+}
+
+.account-sync-integration-segment-success {
+  background: var(--color-success);
+}
+
+.account-sync-integration-segment-partial {
+  background: var(--color-warning);
+}
+
+.account-sync-integration-segment-failure {
+  background: var(--color-error);
+}
+
+
+/* ── 7. Pubkey / Address Display ─────────────────────────── */
+
+.pubkey-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-3);
+  margin-bottom: var(--app-space-4);
+}
+
+.pubkey-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--app-space-3);
+  padding: var(--app-space-2) var(--app-space-3);
+  background: var(--color-bg-inset);
+  border-radius: var(--radius-md);
+}
+
+.pubkey-meta {
+  flex-shrink: 0;
+}
+
+.pubkey-path {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+}
+
+.pubkey-value {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  word-break: break-all;
+}
+
+.address-section {
+  margin-top: var(--app-space-3);
+}
+
+.address-section-title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--app-space-2);
+}
+
+.address-scheme-section {
+  margin-bottom: var(--app-space-2);
+}
+
+
+/* ── 8. Transaction Counts Table ─────────────────────────── */
+
+.tx-counts-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+  margin-top: var(--app-space-2);
+}
+
+.tx-counts-table th,
+.tx-counts-table td {
+  padding: var(--app-space-2) var(--app-space-3);
+  text-align: left;
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.tx-counts-table th {
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tx-counts-table td {
+  font-family: var(--mono);
+  color: var(--color-text);
+}
+
+
+/* ── 9. Account Addresses Modal ─────────────────────────── */
+
+.account-addresses-modal {
+  max-width: 740px;
+}
+
+.account-addresses-modal-body {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.account-addresses-table-wrap {
+  overflow-x: auto;
+  margin: 0 calc(-1 * var(--app-space-5));
+  padding: 0 var(--app-space-5);
+}
+
+.account-addresses-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.account-addresses-table th,
+.account-addresses-table td {
+  padding: var(--app-space-2) var(--app-space-3);
+  text-align: left;
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.account-addresses-table th {
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.account-address-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+}
+
+.account-address-path {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.tx-count {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.tx-count-complete {
+  color: var(--color-success);
+}
+
+.tx-count-partial {
+  color: var(--color-text-muted);
+}
+
+.address-sync-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  white-space: nowrap;
+}
+
+.address-sync-text {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+}
+
+.account-addresses-modal-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.account-addresses-pagination {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+}
+
+
+/* ── 10. XPub Flow ───────────────────────────────────────── */
+
+.xpub-input {
+  display: block;
+  width: 100%;
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  padding: var(--app-space-2) var(--app-space-3);
+  color: var(--color-text);
+  background: var(--color-input-bg);
+  border: 1px solid var(--color-input-border);
+  border-radius: var(--radius-md);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  min-height: 40px;
+}
+.xpub-input:focus {
+  outline: none;
+  border-color: var(--moss);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--moss) 18%, transparent);
+}
+
+.xpub-scheme-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-2);
+  margin: var(--app-space-3) 0;
+}
+
+.xpub-scheme-option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--app-space-3);
+  padding: var(--app-space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+.xpub-scheme-option:hover {
+  background: var(--color-bg-hover);
+}
+.xpub-scheme-option.selected {
+  border-color: var(--color-primary);
+  background: color-mix(in srgb, var(--moss) 8%, transparent);
+}
+.xpub-scheme-option.linked {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.xpub-scheme-details {
+  flex: 1;
+  min-width: 0;
+}
+
+.xpub-scheme-header {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  margin-bottom: var(--app-space-1);
+}
+
+.xpub-scheme-name {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.xpub-activity-indicator {
+  font-size: var(--text-xs);
+}
+
+.activity-yes { color: var(--color-success); }
+.activity-no { color: var(--color-text-muted); }
+.activity-unknown { color: var(--color-warning); }
+
+.xpub-check-address {
+  display: block;
+  margin-top: var(--app-space-1);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  word-break: break-all;
+}
+
+
+/* ── 11. Wallet Picker (XPub step 2) ────────────────────── */
+
+.xpub-wallet-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-2);
+  margin: var(--app-space-3) 0;
+}
+
+.xpub-wallet-option {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-3);
+  padding: var(--app-space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+.xpub-wallet-option:hover {
+  background: var(--color-bg-hover);
+}
+.xpub-wallet-option.selected {
+  border-color: var(--color-primary);
+  background: color-mix(in srgb, var(--moss) 8%, transparent);
+}
+
+.xpub-label-input {
+  margin-top: var(--app-space-3);
+}
+
+.xpub-label-input input,
+.xpub-label-input .form-input {
+  width: 100%;
+}
+
+
+/* ── 12. Account Selector (Trezor) ───────────────────────── */
+
+.account-selector {
+  margin: var(--app-space-3) 0;
+}
+
+.account-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-3);
+  margin: var(--app-space-3) 0;
+}
+
+.account-selection-row {
+  padding: var(--app-space-3);
+  background: var(--color-bg-inset);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-light);
+}
+
+.account-selection-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--app-space-2);
+}
+
+.account-selection-label {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.account-selection-schemes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--app-space-2);
+}
+
+.account-add {
+  margin-top: var(--app-space-2);
+}
+
+.pill-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: var(--app-space-1);
+  color: var(--color-text-muted);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+.pill-remove:hover {
+  color: var(--color-danger);
+  background: var(--color-error-bg);
+}
+
+.address-scheme-notes {
+  margin-top: var(--app-space-3);
+}
+
+
+/* ── 13. Device Picker (Trezor) ──────────────────────────── */
+
+.device-picker {
+  margin: var(--app-space-3) 0;
+}
+
+.device-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-2);
+  margin-top: var(--app-space-2);
+}
+
+.device-item {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-3);
+  text-align: left;
+  justify-content: flex-start;
+  padding: var(--app-space-3);
+}
+
+.device-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.device-product {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.device-path {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+}
+
+
+/* ── 14. Change Wallet (inline) ──────────────────────────── */
+
+.change-wallet-inline {
+  margin: var(--app-space-3) 0;
+  padding: var(--app-space-3);
+  background: var(--color-bg-inset);
+  border-radius: var(--radius-md);
+}
+
+.change-wallet-select-row {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+}
+
+.change-wallet-select {
+  flex: 1;
+}
+
+.change-wallet-warning {
+  font-size: var(--text-sm);
+  color: var(--color-warning);
+  margin-top: var(--app-space-2);
+}
+
+.change-wallet-new-wallet-row {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  margin-top: var(--app-space-2);
+}
+
+.change-wallet-new-wallet-input {
+  flex: 1;
+}
+
+.change-wallet-error {
+  margin-top: var(--app-space-2);
+}
+
+
+/* ── 15. Transactions Page ───────────────────────────────── */
+
+.transactions-page {
+  max-width: 960px;
+}
+
+.transactions-page-header {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--app-space-1);
+}
+
+.tx-header-top-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.tx-header-title-group {
+  display: flex;
+  align-items: baseline;
+  gap: var(--app-space-2);
+  min-width: 0;
+}
+
+.tx-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-1);
+  flex-shrink: 0;
+}
+
+.tx-back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-1);
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  padding: var(--app-space-1) var(--app-space-2);
+  border-radius: var(--radius-md);
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.tx-back-link:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+
+.tx-header-heading {
+  font-size: var(--text-xl);
+  font-weight: var(--weight-bold);
+  margin: 0;
+  color: var(--color-text);
+}
+
+.wr-report-kind {
+  color: var(--color-text-secondary);
+  display: inline-block;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  margin-left: var(--app-space-2);
+}
+
+.wr-free-window-badge {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-secondary);
+  display: inline-block;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  margin-left: var(--app-space-2);
+  padding: var(--app-space-1) var(--app-space-2);
+  text-decoration: none;
+}
+
+.wr-free-window-badge:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.wr-free-notice {
+  align-items: center;
+  background: var(--color-bg-subtle);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-primary);
+  border-radius: var(--radius-md);
+  display: flex;
+  gap: var(--app-space-4);
+  justify-content: space-between;
+  margin-bottom: var(--app-space-4);
+  padding: var(--app-space-3) var(--app-space-4);
+}
+
+.wr-free-notice-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-1);
+  min-width: 0;
+}
+
+.wr-free-notice-title {
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.wr-free-notice-text {
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.wr-free-notice-cta {
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-md);
+  color: var(--color-primary);
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  padding: var(--app-space-1) var(--app-space-3);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.wr-free-notice-cta:hover {
+  background: var(--color-primary);
+  color: var(--color-primary-text);
+}
+
+@media (max-width: 640px) {
+  .wr-free-notice {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--app-space-3);
+  }
+}
+
+.tx-header-wallet-label {
+  font-weight: var(--weight-bold);
+}
+
+.tx-header-separator {
+  color: var(--color-text-muted);
+  font-weight: var(--weight-normal);
+}
+
+.tx-header-account-label {
+  font-weight: var(--weight-medium);
+}
+
+.tx-header-balance {
+  margin: 0;
+  white-space: nowrap;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-sm);
+}
+
+.tx-header-balance-label {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.tx-header-balance-value {
+  font-size: var(--text-lg);
+  font-family: var(--mono);
+  font-weight: var(--weight-bold);
+  text-align: right;
+}
+
+.sync-control-card .card-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-4);
+}
+
+.sync-control-title {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+
+.sync-control-hint {
+  margin: 0;
+}
+
+.sync-control-context {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-3);
+  padding: var(--app-space-3);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-subtle);
+}
+
+.sync-control-meta {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.sync-control-meta-label {
+  font-weight: var(--weight-semibold);
+}
+
+.sync-control-addresses {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-2);
+}
+
+.sync-control-address-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--app-space-2);
+  font-size: var(--text-sm);
+}
+
+.sync-control-address {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  padding: var(--app-space-1) var(--app-space-2);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-raised);
+  border: 1px solid var(--color-border-light);
+}
+
+.sync-control-address-detail {
+  color: var(--color-text-secondary);
+}
+
+.sync-control-result-success {
+  color: var(--color-success);
+}
+
+.sync-control-result-failure {
+  color: var(--color-error);
+}
+
+.sync-control-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--app-space-3);
+}
+
+.sync-control-input-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--app-space-2);
+  flex: 1;
+}
+
+.sync-control-iterations-input {
+  max-width: 96px;
+}
+
+.sync-control-iterations-label {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.sync-control-input-error {
+  width: 100%;
+  margin: 0;
+}
+
+.sync-control-run-btn {
+  min-width: 120px;
+}
+
+.sync-control-run-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--app-space-2);
+}
+
+.sync-control-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  font-size: var(--text-sm);
+}
+
+.sync-control-result {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-2);
+  padding-top: var(--app-space-3);
+  border-top: 1px solid var(--color-border-light);
+}
+
+.sync-control-result-row {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.sync-control-backfill-badge,
+.sync-control-stopped-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--app-space-1) var(--app-space-2);
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+}
+
+.sync-control-backfill-badge {
+  color: var(--color-warning);
+  background: var(--color-warning-bg);
+}
+
+.sync-control-stopped-badge {
+  color: var(--color-error);
+  background: var(--color-error-bg);
+}
+
+.sync-control-result-error {
+  color: var(--color-error);
+}
+
+
+/* ── 15c. Converted Secondary Values ────────────────────── */
+
+.tx-converted-secondary {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  line-height: 1.3;
+}
+
+
+.tx-filter-label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tx-filter-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--app-space-1);
+}
+
+.tx-filter-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--app-space-1) var(--app-space-3);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.tx-filter-pill:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+.tx-filter-pill.active {
+  background: var(--color-primary);
+  color: var(--color-primary-text);
+  border-color: var(--color-primary);
+}
+.tx-filter-pill:focus-visible {
+  outline: 2px solid var(--moss);
+  outline-offset: 2px;
+}
+
+.tx-filter-divider {
+  align-self: stretch;
+  width: 1px;
+  margin: var(--app-space-1) var(--app-space-1);
+  background: var(--color-border);
+}
+
+
+/* ── 17. Transactions Table Section ──────────────────────── */
+
+.transactions-table-section {
+  overflow: hidden;
+}
+
+.transactions-table-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--app-space-3) var(--app-space-5);
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.transactions-table-title {
+  font-family: var(--display);
+  font-size: var(--text-base);
+  font-weight: 500;
+}
+
+.transactions-table-header-right {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-3);
+}
+
+.transactions-list {
+  padding: 0;
+}
+
+.transactions-empty-state {
+  padding: var(--app-space-8) var(--app-space-5);
+  text-align: center;
+  color: var(--color-text-muted);
+}
+
+.manual-assertions-upgrade-link {
+  display: inline-block;
+  margin-top: var(--app-space-3);
+  font-size: var(--text-sm);
+}
+
+
+/* ── 18. Transaction Sort ────────────────────────────────── */
+
+.tx-sort-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-1);
+  font-size: var(--text-xs);
+  padding: var(--app-space-1) var(--app-space-2);
+}
+
+
+/* ── 19. Transaction Date Headers ────────────────────────── */
+
+.tx-date-header {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-muted);
+  padding: var(--app-space-3) var(--app-space-5);
+  background: var(--color-bg-inset);
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+
+/* ── 20. Transaction Cards ───────────────────────────────── */
+
+.tx-card {
+  padding: var(--app-space-3) var(--app-space-5);
+  border-bottom: 1px solid var(--color-border-light);
+  transition: background var(--transition-fast);
+}
+.tx-card:hover {
+  background: var(--color-bg-hover);
+}
+.tx-card:last-child {
+  border-bottom: none;
+}
+
+.tx-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--app-space-3);
+  margin-bottom: var(--app-space-2);
+}
+
+.tx-card-type-group {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-3);
+  min-width: 0;
+}
+
+.tx-card-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  color: var(--ink-soft);
+}
+
+.tx-card-title-group {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.tx-card-title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+}
+
+.tx-card-timestamp {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.tx-card-amount-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex-shrink: 0;
+}
+
+.tx-card-amount {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.tx-amount-positive,
+.tx-amount-negative,
+.tx-amount-neutral {
+  color: var(--ink);
+}
+
+.tx-card-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--app-space-3) var(--app-space-5);
+  padding-left: calc(32px + var(--app-space-3));
+}
+
+.tx-card-detail-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tx-card-detail-actions {
+  margin-left: auto;
+}
+
+.tx-card-detail-label {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  font-weight: var(--weight-medium);
+}
+
+
+/* ── 21. Transaction Status Indicators ───────────────────── */
+
+.tx-status-indicator {
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  padding: 1px var(--app-space-2);
+  border-radius: var(--radius-full);
+}
+
+.tx-status-confirmed {
+  color: var(--color-success);
+  background: var(--color-success-bg);
+}
+
+.tx-status-pending {
+  color: var(--color-warning);
+  background: var(--color-warning-bg);
+}
+
+.tx-status-provisional {
+  color: var(--color-info);
+  background: var(--color-info-bg);
+}
+
+.tx-status-failed {
+  color: var(--color-error);
+  background: var(--color-error-bg);
+}
+
+.history-gap-notice {
+  padding: var(--app-space-3) var(--app-space-4);
+  margin-bottom: var(--app-space-4);
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius-md);
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+  font-size: var(--text-sm);
+}
+
+
+/* ── 22. Transaction Cell Utilities ──────────────────────── */
+
+.tx-cell-with-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-1);
+  min-width: 0;
+}
+
+.tx-external-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-1);
+}
+
+.tx-fee-value {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.tx-balance-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+}
+
+.tx-balance-cell .tx-status-indicator {
+  flex-shrink: 0;
+}
+
+
+/* ── 23. Pagination ──────────────────────────────────────── */
+
+.transactions-pagination-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-3);
+  padding: var(--app-space-3) var(--app-space-5);
+  border-top: 1px solid var(--color-border-light);
+  flex-wrap: wrap;
+}
+
+.transactions-pagination {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+}
+
+.tx-page-jump {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-1);
+}
+
+.tx-page-input {
+  width: 56px;
+  font-size: var(--text-sm);
+  text-align: center;
+  padding: var(--app-space-1) var(--app-space-2);
+  border: 1px solid var(--color-input-border);
+  border-radius: var(--radius-md);
+  background: var(--color-input-bg);
+  color: var(--color-text);
+  min-height: 32px;
+}
+.tx-page-input:focus {
+  outline: none;
+  border-color: var(--color-border-focus);
+}
+
+.tx-page-total {
+  font-size: var(--text-sm);
+}
+
+
+/* ── 24. Responsive — Mobile Transactions ────────────────── */
+
+@media (max-width: 640px) {
+  .tx-header-top-row {
+    align-items: flex-start;
+    gap: var(--app-space-2);
+  }
+
+  .tx-header-heading {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .tx-header-balance {
+    flex-direction: column;
+    align-items: flex-start;
+    white-space: normal;
+    gap: 0;
+  }
+
+  .tx-header-balance-value {
+    overflow-wrap: anywhere;
+  }
+
+  .tx-card-details {
+    padding-left: 0;
+    flex-direction: column;
+    gap: var(--app-space-2);
+  }
+
+  .transactions-pagination-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--app-space-2);
+  }
+
+  .transactions-pagination {
+    justify-content: center;
+  }
+
+  .sync-control-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .sync-control-input-group {
+    align-items: flex-start;
+  }
+
+  .sync-control-run-btn {
+    width: 100%;
+  }
+
+  .pubkey-row {
+    flex-direction: column;
+  }
+
+  /* Wallet header stays a row even on narrow screens: stacking sends the
+     kebab to the left edge where its right-anchored dropdown shoots off
+     the left of the viewport. */
+  .wallet-card-header {
+    flex-direction: row;
+  }
+
+  .account-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .account-row-right {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .kebab-menu-dropdown {
+    min-width: 160px;
+    /* Belt-and-braces guard against narrow viewports — the dropdown can
+       never extend wider than the available content area. */
+    max-width: calc(100vw - var(--app-space-4));
+  }
+
+  /* Hide table view on mobile — cards are better for narrow screens */
+  .tx-view-toggle {
+    display: none;
+  }
+  .transactions-table-view {
+    display: none;
+  }
+}
+
+
+/* ── 25. View Toggle (Card / Table) ──────────────────────── */
+
+.tx-view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.tx-view-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--app-space-1) var(--app-space-2);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  gap: var(--app-space-1);
+  transition: background var(--transition-fast), color var(--transition-fast);
+  min-height: 28px;
+}
+.tx-view-toggle-btn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+.tx-view-toggle-btn.active {
+  background: var(--color-bg-active);
+  color: var(--color-text);
+}
+.tx-view-toggle-btn + .tx-view-toggle-btn {
+  border-left: 1px solid var(--color-border);
+}
+
+
+/* ── 26. Transaction Table View ──────────────────────────── */
+
+.transactions-table-view {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.transactions-table-view th {
+  padding: var(--app-space-2) var(--app-space-3);
+  text-align: left;
+  font-weight: var(--weight-medium);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  border-bottom: 1px solid var(--color-border-light);
+  white-space: nowrap;
+  background: var(--color-bg-inset);
+}
+
+.transactions-table-view th:last-child,
+.transactions-table-view td:last-child {
+  text-align: right;
+}
+
+.transactions-table-view td {
+  padding: var(--app-space-2) var(--app-space-3);
+  border-bottom: 1px solid var(--color-border-light);
+  vertical-align: middle;
+  color: var(--color-text);
+}
+
+.transactions-table-view tr:hover td {
+  background: var(--color-bg-hover);
+}
+
+.transactions-table-view .tx-table-hash {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+}
+
+.transactions-table-view .tx-table-amount {
+  font-family: var(--mono);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+
+.transactions-table-view .tx-table-fee {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+}
+
+.transactions-table-view .tx-table-balance {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+
+/* ── 27. Shared Date Range Toolbar ─────────────────────────── */
+
+.date-range-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-3);
+}
+
+.date-range-toolbar-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--app-space-4);
+  align-items: end;
+}
+
+.date-range-toolbar-date-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-1);
+  min-width: 160px;
+}
+
+.date-range-year-dial {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-1);
+  padding: 2px;
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
+  border-radius: var(--radius-pill);
+  background: var(--paper-deep);
+}
+
+.date-range-year-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--moss);
+  cursor: pointer;
+  transition: background var(--dur-quick) var(--ease-default),
+              color var(--dur-quick) var(--ease-default);
+}
+
+.date-range-year-step svg {
+  width: 20px;
+  height: 20px;
+}
+
+.date-range-year-step:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--moss) 12%, transparent);
+  color: var(--moss-bright);
+}
+
+.date-range-year-step:focus-visible {
+  outline: 2px solid var(--moss);
+  outline-offset: 2px;
+}
+
+.date-range-year-step:disabled {
+  color: var(--color-text-disabled);
+  cursor: not-allowed;
+}
+
+.date-range-year-value {
+  min-width: 4.5ch;
+  padding: 0 var(--app-space-2);
+  font-family: var(--display, "Fraunces", serif);
+  font-size: 1.3rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  color: var(--color-text);
+}
+
+.date-range-custom-toggle {
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-family: var(--body);
+  font-size: var(--text-sm);
+  color: var(--moss);
+  cursor: pointer;
+}
+
+.date-range-custom-toggle:hover {
+  color: var(--moss-bright);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.date-range-custom-toggle:focus-visible {
+  outline: 2px solid var(--moss);
+  outline-offset: 3px;
+  border-radius: var(--radius-sm);
+}
+
+.date-range-custom-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--app-space-4);
+  align-items: end;
+}
+
+.date-range-toolbar-right {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-2);
+  margin-left: auto;
+}
+
+.date-range-toolbar-right-extension {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-2);
+}
+
+.date-range-toolbar-currency-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-1);
+  min-width: 120px;
+}
+
+.date-range-toolbar-currency-select {
+  min-width: 120px;
+}
+
+.date-range-toolbar-validation {
+  color: var(--color-danger);
+  font-size: var(--text-sm);
+}
+
+.date-range-toolbar-secondary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-3);
+  padding-top: var(--app-space-1);
+  border-top: 1px solid var(--color-border-light);
+}
+
+.tx-toolbar-secondary-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--app-space-3);
+}
+
+.tx-toolbar-secondary-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--app-space-2);
+}
+
+/* ── 28. Wallet Report ─────────────────────────────────────── */
+
+/* ── Desktop / Tablet Table ────────────────────────────────── */
+
+.wr-desktop-view {
+  overflow-x: auto;
+}
+
+.wr-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.wr-table thead {
+  background: var(--color-bg-inset);
+}
+
+.wr-table th {
+  padding: var(--app-space-3) var(--app-space-4);
+  text-align: left;
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  border-bottom: 1px solid var(--color-border-light);
+  white-space: nowrap;
+}
+
+.wr-th-account {
+  width: 25%;
+}
+
+.wr-th-value {
+  width: 25%;
+  border-left: 1px solid var(--color-border-light);
+}
+
+.wr-th-date {
+  font-weight: var(--weight-normal);
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--color-text-secondary);
+}
+
+.wr-th-change {
+  text-align: right !important;
+  border-left: 1px solid var(--color-border-light);
+}
+
+.wr-table td {
+  padding: var(--app-space-4);
+  border-bottom: 1px solid var(--color-border-light);
+  vertical-align: top;
+}
+
+.wr-row:hover td {
+  background: var(--color-bg-hover);
+}
+
+.wr-td-account {
+  width: 25%;
+}
+
+.wr-td-value {
+  border-left: 1px solid var(--color-border-light);
+}
+
+.wr-td-change {
+  text-align: right;
+  vertical-align: middle;
+  border-left: 1px solid var(--color-border-light);
+}
+
+.wr-td-total-label {
+  text-align: right;
+  font-weight: var(--weight-semibold);
+}
+
+.wr-totals-row td {
+  background: var(--color-bg-inset);
+  border-top: 2px solid var(--color-border);
+  padding: var(--app-space-3) var(--app-space-4);
+}
+
+/* ── Account Info (shared desktop / mobile) ────────────────── */
+
+.wr-account-info {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+}
+
+.wr-account-label {
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-sm);
+}
+
+.wr-account-asset {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+}
+
+/* ── Value Cell (desktop table) ────────────────────────────── */
+
+.wr-value-cell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-1);
+}
+
+.wr-fiat-value {
+  font-weight: var(--weight-medium);
+  font-size: var(--text-sm);
+}
+
+.wr-crypto-value {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+}
+
+.wr-price-display {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.15em;
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.wr-price-display-prefix {
+  opacity: 0.7;
+}
+
+.wr-price-display-value {
+  font-variant-numeric: tabular-nums;
+}
+
+.wr-total-value {
+  font-weight: var(--weight-semibold);
+}
+
+/* ── Change Values ─────────────────────────────────────────── */
+
+.wr-change {
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-sm);
+}
+
+.wr-change-positive {
+  color: var(--color-positive);
+}
+
+.wr-change-negative {
+  color: var(--color-negative);
+}
+
+/* ── Mobile Cards ──────────────────────────────────────────── */
+
+.wr-mobile-view {
+  display: none;
+}
+
+.wr-card {
+  overflow: hidden;
+}
+
+.wr-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--app-space-3) var(--app-space-4);
+  background: var(--color-bg-inset);
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.wr-card-change-badge {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-bold);
+  padding: var(--app-space-1) var(--app-space-2);
+  border-radius: var(--radius-sm);
+}
+
+.wr-card-change-badge.wr-change-positive {
+  background: var(--color-success-bg);
+}
+
+.wr-card-change-badge.wr-change-negative {
+  background: var(--color-error-bg);
+}
+
+.wr-card-body {
+  padding: var(--app-space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-4);
+}
+
+.wr-card-side {
+  padding-bottom: var(--app-space-3);
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.wr-card-side:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.wr-card-side-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: var(--app-space-2);
+}
+
+.wr-card-date-label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-secondary);
+}
+
+.wr-card-fiat-value {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.wr-card-side-detail {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.wr-card-crypto {
+  font-size: var(--text-sm);
+  color: var(--color-text);
+}
+
+/* ── Mobile Summary Card ───────────────────────────────────── */
+
+.wr-summary-card {
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--app-space-4) var(--app-space-5);
+}
+
+.wr-summary-title {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-secondary);
+  margin-bottom: var(--app-space-3);
+}
+
+.wr-summary-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-2);
+}
+
+.wr-summary-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--text-sm);
+}
+
+.wr-summary-label {
+  color: var(--color-text-secondary);
+}
+
+.wr-summary-value {
+  font-weight: var(--weight-medium);
+}
+
+.wr-summary-change-row {
+  padding-top: var(--app-space-2);
+  border-top: 1px solid var(--color-border-light);
+}
+
+.wr-summary-change-label {
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+
+/* ── 28. Wallet Report Responsive ──────────────────────────── */
+
+@media (max-width: 1023px) {
+  .wr-desktop-view {
+    display: none;
+  }
+
+  .wr-mobile-view {
+    display: flex;
+    flex-direction: column;
+    gap: var(--app-space-4);
+  }
+}
+
+@media (max-width: 640px) {
+  .date-range-toolbar-main {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .date-range-toolbar-date-group {
+    min-width: unset;
+  }
+
+  .date-range-custom-fields {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .date-range-toolbar-right {
+    margin-left: 0;
+  }
+
+  .date-range-toolbar-currency-group {
+    min-width: unset;
+  }
+
+  .tx-toolbar-secondary-row,
+  .tx-toolbar-secondary-group {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+}
+
+
+/* ── 29. Wallet Report Print ───────────────────────────────── */
+
+@media print {
+  .tx-back-link,
+  .date-range-year-dial,
+  .date-range-this-year,
+  .date-range-custom-toggle,
+  .date-range-toolbar-currency-group {
+    display: none !important;
+  }
+
+  .wr-mobile-view {
+    display: none !important;
+  }
+
+  .wr-desktop-view {
+    display: block !important;
+  }
+
+  .wr-table {
+    font-size: 11px;
+  }
+
+  .wr-row:hover td {
+    background: none;
+  }
+}
+
+
+/* ============================================================
+   30. /wallets — Botanical Ledger re-skin
+   Restyles the page header, wallet cards, account rows, and
+   the kebab/dropdown chrome onto the design-system palette
+   without changing component anatomy. Phase 2 layout polish.
+   ============================================================ */
+
+.wallets-page-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1.25rem;
+  margin-bottom: 2.25rem;
+  padding-bottom: 1.25rem;
+  border-bottom: 1px solid var(--paper-edge);
+  flex-wrap: wrap;
+}
+
+.wallets-page-title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.wallets-page-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.85rem;
+  min-width: 0;
+}
+
+
+.wallets-page .page-title {
+  font-family: var(--display);
+  font-weight: 500;
+  font-size: clamp(2rem, 4.5vw, 2.9rem);
+  line-height: 1.05;
+  letter-spacing: -0.025em;
+  color: var(--ink);
+  margin: 0;
+}
+
+.wallets-page .page-subtitle {
+  font-family: var(--display);
+  font-style: italic;
+  font-size: clamp(1rem, 1.5vw, 1.15rem);
+  color: var(--ink-soft);
+  line-height: 1.4;
+  max-width: 32rem;
+  margin: 0;
+}
+
+.wallets-page .page-subtitle em {
+  font-style: italic;
+  color: var(--moss);
+  font-weight: 500;
+}
+
+.wallets-page-header .add-dropdown {
+  align-self: flex-end;
+  flex: 0 0 auto;
+}
+
+.wallets-page .wallet-section {
+  margin-bottom: 0;
+}
+
+.wallets-page .sync-capacity-summary {
+  font-family: var(--body);
+  font-size: 0.78rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--sage);
+  margin: 0 0 1.1rem 0;
+  font-weight: 500;
+}
+
+/* Net worth — the page's headline figure. Quiet surface (no tile),
+   but the figure is the one element allowed to be large because the
+   rest of the page is paper (design system §1.2). */
+.wallets-page .wallet-value-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin-bottom: 1.4rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--paper-edge);
+}
+
+.wallets-page .wallet-value-overview-label {
+  font-family: var(--body);
+  font-size: 0.78rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--sage);
+  font-weight: 500;
+}
+
+.wallets-page .wallet-value-overview-total {
+  font-family: var(--display);
+  font-size: clamp(2.3rem, 5vw, 3rem);
+  font-weight: 500;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.wallets-page .wallet-value-overview-sub {
+  margin: 0.15rem 0 0;
+  font-family: var(--body);
+  font-size: 0.85rem;
+  color: var(--sage);
+}
+
+.wallets-page .wallet-list-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.1rem;
+}
+
+.wallets-page .wallet-list-toolbar .sync-capacity-summary {
+  margin: 0;
+}
+
+.wallets-page .account-limit-summary-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.wallets-page .account-limit-upgrade-cta {
+  margin: 0;
+  font-family: var(--body);
+  font-size: 0.82rem;
+}
+
+.wallets-page .wallet-list-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.wallets-page .wallet-list-control-btn {
+  min-height: 2rem;
+  padding: 0.35rem 0.65rem;
+  font-size: 0.82rem;
+}
+
+.wallets-page .wallet-list {
+  gap: 1.4rem;
+}
+
+/* Wallet card — paper-deep panel on parchment. Uses the
+   design-system inset highlight so it reads as paper resting
+   on paper, not a UI tile floating in space. Overrides the
+   generic .card chrome that lives in main.css. */
+.wallets-page .wallet-card {
+  background: var(--paper-deep);
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
+  border-radius: var(--radius-card);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.4) inset;
+  overflow: visible;
+  position: relative;
+  transition: border-color var(--dur-base) var(--ease-default),
+              box-shadow var(--dur-base) var(--ease-default);
+}
+
+.wallets-page .wallet-card:hover {
+  border-color: color-mix(in srgb, var(--ink) 18%, transparent);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.5) inset,
+              0 16px 32px -22px rgba(26, 31, 26, 0.25);
+}
+
+.wallets-page .wallet-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 1.1rem 1.4rem;
+  border-bottom: 1px solid var(--paper-edge);
+  background: none;
+}
+
+.wallets-page .wallet-heading-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.wallets-page .wallet-collapse-btn {
+  width: 2rem;
+  height: 2rem;
+  flex-basis: 2rem;
+  color: var(--sage);
+  border-radius: var(--radius-tag);
+  transition: color var(--dur-quick) var(--ease-default),
+              background var(--dur-quick) var(--ease-default);
+}
+
+.wallets-page .wallet-collapse-btn:hover,
+.wallets-page .wallet-collapse-btn:focus-visible {
+  color: var(--moss);
+  background: color-mix(in srgb, var(--moss) 8%, transparent);
+}
+
+.wallets-page .wallet-collapse-btn:focus-visible {
+  outline: 2px solid var(--moss);
+  outline-offset: 2px;
+}
+
+.wallets-page .wallet-collapse-icon {
+  transform: rotate(90deg);
+}
+
+.wallets-page .wallet-collapse-btn.collapsed .wallet-collapse-icon {
+  transform: rotate(0deg);
+}
+
+.wallets-page .wallet-title-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+  min-width: 0;
+}
+
+.wallets-page .wallet-label-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.7rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.wallets-page .wallet-label {
+  font-family: var(--display);
+  font-weight: 500;
+  font-style: italic;
+  font-size: 1.35rem;
+  line-height: 1.2;
+  letter-spacing: -0.005em;
+  color: var(--ink);
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wallets-page .wallet-label-link,
+.wallets-page .wallet-label-link:hover,
+.wallets-page .wallet-label-link:focus-visible {
+  color: inherit;
+  background-image: none;
+  text-decoration: none;
+  padding-bottom: 0;
+}
+
+.wallets-page .wallet-label-link:focus-visible {
+  outline: 2px solid var(--moss);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.wallets-page .wallet-fingerprint {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: var(--sage);
+  padding: 0.1em 0.5em;
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-tag);
+  flex: 0 0 auto;
+  background: color-mix(in srgb, var(--paper) 70%, transparent);
+}
+
+.wallets-page .wallet-value-summary {
+  margin: 0;
+  font-family: var(--body);
+  font-size: 0.78rem;
+  color: var(--sage);
+  font-variant-numeric: tabular-nums;
+}
+
+.wallets-page .wallet-card-body {
+  padding: 0.35rem 1.4rem 0.8rem;
+}
+
+.wallets-page .wallet-account-group + .wallet-account-group {
+  margin-top: 0.45rem;
+}
+
+.wallets-page .wallet-account-group-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 0.55rem;
+  padding: 0.75rem 0 0.35rem;
+  border-top: 1px solid var(--paper-edge);
+  font-family: var(--body);
+  font-size: 0.75rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--sage);
+}
+
+/* Account row — hairline divider only, no card-on-card. */
+.wallets-page .account-row {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.85rem 0;
+  border-top: 1px solid var(--paper-edge);
+  flex-wrap: wrap;
+}
+
+.wallets-page .account-row:first-child {
+  border-top: none;
+}
+
+.wallets-page .wallet-account-group-inactive .account-row:first-of-type {
+  border-top: none;
+}
+
+.wallets-page .account-row-info {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.wallets-page .account-row-name-line {
+  gap: 0.7rem;
+}
+
+.wallets-page .account-name {
+  font-family: var(--body);
+  font-weight: 500;
+  font-size: 1rem;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wallets-page .account-name-link,
+.wallets-page .account-name-link:hover,
+.wallets-page .account-name-link:focus-visible {
+  color: inherit;
+  background-image: none;
+  text-decoration: none;
+  padding-bottom: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wallets-page .account-name-link:focus-visible {
+  outline: 2px solid var(--moss);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Asset badge — monochrome ink-stamp per design system §9.15. */
+.wallets-page .account-asset-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--body);
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.2em 0.55em;
+  border-radius: var(--radius-tag);
+  color: var(--ink-soft);
+  background: color-mix(in srgb, var(--paper) 60%, transparent);
+  border: 1px solid var(--paper-edge);
+  flex-shrink: 0;
+  min-width: 2.6rem;
+}
+
+.wallets-page .account-row-inactive .account-name {
+  color: var(--ink-soft);
+}
+
+/* Inactive accounts don't sync or price — dim the figure so a stale
+   balance never reads as bright as a live, synced one. */
+.wallets-page .account-row-inactive .account-balance {
+  color: var(--ink-soft);
+}
+
+.wallets-page .account-row-right {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-shrink: 0;
+}
+
+.wallets-page .sync-icon-btn {
+  color: var(--sage);
+  border-radius: var(--radius-tag);
+  padding: 0.3rem;
+  transition: color var(--dur-quick) var(--ease-default),
+              background var(--dur-quick) var(--ease-default);
+}
+
+.wallets-page .sync-icon-btn:hover:not(:disabled) {
+  color: var(--moss);
+  background: color-mix(in srgb, var(--moss) 8%, transparent);
+}
+
+.wallets-page .sync-icon-btn:disabled {
+  color: color-mix(in srgb, var(--ink) 22%, transparent);
+}
+
+.wallets-page .account-balance {
+  font-family: var(--mono);
+  font-size: 1.05rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.wallets-page .account-balance-unit {
+  font-family: var(--mono);
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--sage);
+  margin-left: 0.3ch;
+  white-space: nowrap;
+}
+
+.wallets-page .account-balance-group {
+  align-items: flex-end;
+  gap: 0;
+}
+
+.wallets-page .account-balance-provisional-label {
+  font-family: var(--display);
+  font-style: italic;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  color: var(--sage);
+}
+
+.wallets-page .account-current-value {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--sage);
+  white-space: nowrap;
+}
+
+/* No price available for a priceable asset while fetching is on.
+   Editorial copper annotation, not a number — never blank, so rows
+   keep a consistent two-line shape (design system: honest gaps). */
+.wallets-page .account-current-value.is-missing {
+  font-family: var(--display);
+  font-style: italic;
+  color: var(--copper);
+}
+
+.wallets-page .account-navigate {
+  color: var(--sage);
+  transition: color var(--dur-quick) var(--ease-default),
+              background var(--dur-quick) var(--ease-default);
+}
+
+.wallets-page .account-navigate:hover,
+.wallets-page .account-navigate:focus-visible {
+  color: var(--moss);
+  background: color-mix(in srgb, var(--moss) 8%, transparent);
+  border-radius: var(--radius-tag);
+}
+
+.wallets-page .account-history-gap-badge {
+  font-family: var(--body);
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0.18em 0.55em;
+  border-radius: var(--radius-pill);
+  background: var(--caution-soft);
+  color: var(--copper);
+  border: 1px solid color-mix(in srgb, var(--copper) 30%, transparent);
+}
+
+.wallets-page .kebab-menu-item:disabled {
+  color: color-mix(in srgb, var(--ink) 32%, transparent);
+  cursor: default;
+}
+
+/* Sync status ladder (design system §9.15) — visual weight proportional to
+   how much the user should care. Filled shapes are reserved for states that
+   need a human. The mark is a button; it opens the sync record. Shared by
+   /wallets account rows and the account transactions page header. */
+.sync-status {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.sync-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  padding: 0.3rem 0.2rem;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: var(--body);
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.sync-mark:focus-visible {
+  outline: 2px solid var(--moss);
+  outline-offset: 3px;
+  border-radius: var(--radius-tag);
+}
+.sync-mark-label {
+  color: var(--sage);
+}
+.sync-mark-label.is-moss {
+  color: var(--moss);
+}
+.sync-mark-tick {
+  display: inline-flex;
+  color: var(--positive);
+}
+.sync-mark-tick svg {
+  width: 0.85rem;
+  height: 0.85rem;
+}
+.sync-mark-ring {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  border: 1.5px solid var(--copper);
+  background: transparent;
+}
+.sync-mark-hollow {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  border: 1.5px solid var(--paper-edge);
+  background: transparent;
+}
+.sync-mark-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  padding: 0.16em 0.6em;
+  border-radius: var(--radius-pill);
+}
+.sync-mark-pill-dot {
+  width: 0.36rem;
+  height: 0.36rem;
+  border-radius: 999px;
+  background: currentColor;
+}
+.sync-mark-pill.is-failing {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+.sync-mark-pill.is-blocked {
+  color: var(--copper);
+  background: var(--caution-soft);
+}
+
+/* The sync record — a small ledger entry: label left, dot-leader, mono value
+   right. Paper on paper, hairline border, modal-family shadow. */
+.sync-record {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  left: 0;
+  z-index: 49;
+  width: 21.5rem;
+  max-width: 80vw;
+  padding: 0.9rem 1rem 0.95rem;
+  background: var(--paper);
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-card);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.5) inset,
+    0 24px 60px -28px rgba(26, 31, 26, 0.45);
+  text-align: left;
+}
+.sync-record-eyebrow {
+  margin: 0 0 0.5rem;
+  font-family: var(--display);
+  font-style: italic;
+  font-size: 0.85rem;
+  color: var(--copper);
+}
+.sync-record-line {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.28rem 0;
+  font-size: 0.8rem;
+}
+.sync-record-k {
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.sync-record-leader {
+  flex: 1;
+  min-width: 1rem;
+  border-bottom: 1px dotted color-mix(in srgb, var(--ink) 25%, transparent);
+  transform: translateY(-3px);
+}
+.sync-record-v {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.74rem;
+  color: var(--ink);
+  min-width: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.sync-record-rel {
+  color: var(--sage);
+}
+.sync-record-result.is-success { color: var(--positive); }
+.sync-record-result.is-failed { color: var(--danger); }
+.sync-record-result.is-partial { color: var(--copper); }
+.sync-record-result.is-running { color: var(--moss); }
+.sync-record-context {
+  margin: 0.3rem 0 0;
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+}
+.sync-record-error {
+  margin: 0.5rem 0 0;
+  padding: 0.5rem 0.65rem;
+  background: var(--paper-deep);
+  border: 1px solid var(--paper-edge);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius-tag);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+.sync-record-foot,
+.sync-record-empty {
+  margin: 0.55rem 0 0;
+  font-size: 0.78rem;
+  color: var(--sage);
+}
+
+/* Kebab + Add menu chrome now lives in the base component rules
+   (§3, §4b) so /wallets, /wallets/:id, and the account
+   transactions page share one menu language. */
+
+/* Sync status — moss/copper/danger dots on the editorial palette. */
+.wallets-page .sync-dot {
+  width: 7px;
+  height: 7px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 14%, transparent);
+}
+
+.wallets-page .sync-dot-success { background: var(--positive); color: var(--positive); }
+.wallets-page .sync-dot-partial { background: var(--copper); color: var(--copper); }
+.wallets-page .sync-dot-failure { background: var(--danger); color: var(--danger); }
+.wallets-page .sync-dot-idle {
+  background: color-mix(in srgb, var(--ink) 18%, transparent);
+  color: var(--sage);
+  opacity: 1;
+}
+
+/* Empty state on the wallets page — Fraunces italic title,
+   sage body, just enough room to breathe. */
+.wallets-page .empty-state {
+  background: var(--paper-deep);
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-card);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.4) inset;
+  padding: 2.5rem 1.5rem 2.8rem;
+  text-align: center;
+}
+
+.wallets-page .empty-state-illustration {
+  color: var(--moss);
+  opacity: 0.65;
+}
+
+.wallets-page .empty-state-heading {
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  font-size: 1.4rem;
+  color: var(--ink);
+  margin-bottom: 0.65rem;
+}
+
+.wallets-page .empty-state-body {
+  font-family: var(--body);
+  font-size: 0.97rem;
+  color: var(--ink-soft);
+  max-width: 32rem;
+  margin: 0 auto;
+}
+
+/* Mobile shrinks the header padding and lets the kebab dropdown
+   right-align inside the card. The wallet-card-header row stays
+   horizontal even on the narrowest viewport (see fix above). */
+@media (max-width: 640px) {
+  .wallets-page-header {
+    margin-bottom: 1.6rem;
+    padding-bottom: 0.85rem;
+  }
+
+  .wallets-page-section-head {
+    gap: 0.65rem;
+  }
+
+  .wallets-page .wallet-card-header {
+    padding: 0.9rem 1.05rem;
+  }
+
+  .wallets-page .wallet-card-body {
+    padding: 0.25rem 1.05rem 0.6rem;
+  }
+
+  .wallets-page .wallet-value-overview,
+  .wallets-page .wallet-list-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .wallets-page .wallet-value-overview-total {
+    text-align: left;
+  }
+
+  .wallets-page .wallet-list-controls {
+    justify-content: flex-start;
+  }
+
+  .wallets-page .wallet-label {
+    font-size: 1.2rem;
+  }
+
+  .wallets-page .account-row-right {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
+
+/* ── Manual asset search (combobox) ──────────────────────── */
+.manual-asset-combo {
+  position: relative;
+}
+.manual-asset-search-icon {
+  position: absolute;
+  left: 12px;
+  top: 11px;
+  display: grid;
+  place-items: center;
+  color: var(--sage);
+  pointer-events: none;
+}
+.manual-asset-input {
+  display: block;
+  width: 100%;
+  font-family: var(--body);
+  font-size: var(--fs-body);
+  line-height: 1.5;
+  padding: 0.6rem 0.85rem 0.6rem 2.2rem;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-input);
+  transition: border-color var(--dur-quick) var(--ease-default),
+              box-shadow var(--dur-quick) var(--ease-default);
+  min-height: 40px;
+}
+.manual-asset-input::placeholder {
+  color: var(--sage);
+}
+.manual-asset-input:focus {
+  outline: none;
+  border-color: var(--moss);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--moss) 18%, transparent);
+}
+
+.manual-asset-results {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 5;
+  background: var(--paper);
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+  max-height: 240px;
+  overflow-y: auto;
+  padding: var(--space-1);
+}
+.manual-asset-result {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  width: 100%;
+  padding: 0.55rem 0.7rem;
+  border: none;
+  border-radius: var(--radius-input);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: var(--ink);
+  font-family: var(--body);
+  transition: background var(--dur-quick) var(--ease-default);
+}
+.manual-asset-result:hover {
+  background: var(--paper-deep);
+}
+.manual-asset-result:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--moss) 10%, transparent);
+  box-shadow: inset 2px 0 0 var(--moss);
+}
+.manual-asset-result .ticker {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--ink);
+  min-width: 3.2rem;
+}
+.manual-asset-result .name {
+  font-size: var(--fs-body-sm);
+  color: var(--ink);
+  flex: 1;
+}
+.manual-asset-result .source {
+  padding: 0.1rem 0.4rem;
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-input);
+  background: var(--paper-deep);
+  color: var(--sage);
+  font-size: var(--fs-caption);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.manual-asset-result .net {
+  font-size: var(--fs-caption);
+  color: var(--sage);
+  white-space: nowrap;
+}
+.manual-asset-empty {
+  padding: 0.7rem;
+  color: var(--sage);
+  font-size: var(--fs-body-sm);
+}
+
+.manual-asset-selected {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0.6rem 0.7rem 0.6rem 0.85rem;
+  background: var(--paper-deep);
+  border: 1px solid var(--paper-edge);
+  border-left: 2px solid var(--moss);
+  border-radius: var(--radius-input);
+}
+.manual-asset-selected .ticker {
+  font-family: var(--mono);
+  font-size: var(--fs-body-sm);
+  font-weight: 500;
+  color: var(--ink);
+}
+.manual-asset-selected .name {
+  font-size: var(--fs-body-sm);
+  color: var(--ink);
+  flex: 1;
+}
+.manual-asset-selected .net {
+  font-size: var(--fs-caption);
+  color: var(--sage);
+  white-space: nowrap;
+}
+.manual-asset-clear {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+  border-radius: var(--radius-pill);
+  transition: background var(--dur-quick) var(--ease-default),
+              color var(--dur-quick) var(--ease-default);
+}
+.manual-asset-clear:hover {
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  color: var(--ink);
+}
+.manual-asset-clear:focus-visible {
+  outline: 2px solid var(--moss);
+  outline-offset: 2px;
+}
+
+.manual-asset-catalog-refresh {
+  padding: var(--space-1) var(--space-1) 0.15rem;
+  border-top: 1px solid var(--paper-edge);
+  margin-top: var(--space-1);
+}
+
+.manual-asset-consent,
+.manual-asset-detail,
+.manual-asset-loading {
+  margin-top: var(--space-3);
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-input);
+  background: var(--paper-deep);
+}
+
+.manual-asset-consent,
+.manual-asset-loading {
+  padding: var(--space-3);
+}
+
+.manual-asset-consent {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.manual-asset-consent p,
+.manual-asset-loading {
+  margin: 0;
+  color: var(--sage);
+  font-size: var(--fs-body-sm);
+}
+
+.manual-asset-detail {
+  display: flex;
+  flex-direction: column;
+  padding: 0 var(--space-3);
+}
+
+.manual-asset-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: 2.75rem;
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--paper-edge);
+}
+
+.manual-asset-row:first-child {
+  border-top: none;
+}
+
+.manual-asset-row-stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-1);
+}
+
+.manual-asset-row-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.manual-asset-row-label {
+  font-size: var(--fs-body-sm);
+  color: var(--sage);
+  white-space: nowrap;
+}
+
+.manual-asset-row-value {
+  min-width: 0;
+  font-size: var(--fs-body-sm);
+  color: var(--ink);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.manual-asset-row-value.is-mono {
+  font-family: var(--mono);
+}
+
+.manual-asset-row .manual-asset-row-control {
+  width: auto;
+  min-width: 8rem;
+  max-width: 62%;
+  margin: 0;
+}
+
+.manual-asset-row .manual-asset-row-control.is-narrow {
+  width: 4.5rem;
+  min-width: 0;
+  text-align: right;
+}
+
+.manual-asset-plain-input {
+  padding-left: 0.85rem;
+  background: var(--paper);
+}
+
+.manual-asset-field-hint {
+  margin: 0;
+  font-size: var(--fs-caption);
+  color: var(--sage);
+  line-height: 1.4;
+}
+
+.btn-inline {
+  padding: 0.3rem 0.7rem;
+  font-size: var(--fs-body-sm);
+}
+
+@media (max-width: 560px) {
+  .manual-asset-result {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .manual-asset-result .name {
+    flex-basis: calc(100% - 4.2rem);
+  }
+
+  .manual-asset-consent {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
+/* ── Account identity section (transactions page) ── §9.15/§9.18-adjacent */
+
+.transactions-page .account-identity-section {
+  margin: var(--space-4) 0;
+}
+
+.transactions-page .account-identity-strip {
+  width: 100%;
+  border: 0;
+  border-top: 1px solid var(--paper-edge);
+  border-bottom: 1px solid var(--paper-edge);
+  background: transparent;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-1);
+  cursor: pointer;
+}
+
+.transactions-page .account-identity-strip:hover {
+  background: var(--paper-deep);
+}
+
+.transactions-page .account-identity-strip:focus-visible {
+  outline: 2px solid var(--moss);
+  outline-offset: 2px;
+}
+
+.transactions-page .account-identity-strip-left {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.transactions-page .account-identity-title {
+  font-family: var(--display);
+  font-size: var(--fs-body);
+  font-style: italic;
+  color: var(--copper);
+  white-space: nowrap;
+}
+
+.transactions-page .account-identity-summary-type {
+  font-family: var(--body);
+  font-size: var(--fs-body-sm);
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+
+.transactions-page .account-identity-summary-sep {
+  color: var(--sage);
+}
+
+.transactions-page .account-identity-summary-ref {
+  font-family: var(--mono);
+  font-size: var(--fs-caption);
+  color: var(--sage);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transactions-page .account-identity-chevron {
+  font-family: var(--mono);
+  color: var(--sage);
+  font-size: var(--fs-body);
+  line-height: 1;
+}
+
+.transactions-page .account-identity-panel {
+  background: var(--paper-deep);
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-card);
+  padding: var(--space-4);
+  margin-top: var(--space-3);
+}
+
+.transactions-page .account-identity-rows {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-5);
+  margin: 0;
+}
+
+.transactions-page .account-identity-rows dt {
+  font-family: var(--body);
+  font-weight: 500;
+  font-size: var(--fs-caption);
+  letter-spacing: 0.01em;
+  color: var(--ink-soft);
+}
+
+.transactions-page .account-identity-rows dd {
+  margin: 0;
+  font-family: var(--body);
+  font-size: var(--fs-caption);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.transactions-page .account-identity-mono {
+  font-family: var(--mono);
+}
+
+.transactions-page .account-identity-reference {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.transactions-page .account-identity-addresses-btn {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font-family: var(--body);
+  font-size: var(--fs-caption);
+  color: var(--moss);
+  cursor: pointer;
+}
+
+.transactions-page .account-identity-addresses-btn:hover {
+  color: var(--moss-bright);
+}
+
+.transactions-page .account-identity-addresses-btn:focus-visible {
+  outline: 2px solid var(--moss);
+  outline-offset: 2px;
+}
+
+@media (max-width: 560px) {
+  .transactions-page .account-identity-rows {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,54 @@
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# unmaintained is a scope selector (not severity level) in cargo-deny 0.20.2.
+# "workspace" = only unmaintained advisories affecting DIRECT dependencies.
+# Transitive unmaintained crates (gtk-rs GTK3 via dioxus-desktop->wry,
+# proc-macro-error, paste, fxhash) produce no output—invisible, not warnings.
+# If any transitive unmaintained becomes a DIRECT dependency, it will
+# hard-fail the check (unmaintained findings are errors when in-scope).
+# To audit the full list: temporarily set unmaintained = "all" and run
+# `cargo deny check advisories`.
+unmaintained = "workspace"
+ignore = [
+    # quick-xml v0.39.4: build-time proc-macro dependency only, via
+    # iso4217-macros -> iso4217-static -> bitgarth. Not present in the
+    # shipped binary. iso4217-static pins the quick-xml version upstream,
+    # so there is no upgrade path from here. Revisit when iso4217-static
+    # updates its quick-xml dependency.
+    { id = "RUSTSEC-2026-0194", reason = "build-time only via iso4217-macros -> iso4217-static, not in shipped binary, no upgrade path until iso4217-static updates" },
+    { id = "RUSTSEC-2026-0195", reason = "build-time only via iso4217-macros -> iso4217-static, not in shipped binary, no upgrade path until iso4217-static updates" },
+]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "CC0-1.0",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "MITNFA",
+    "NCSA",
+    "Apache-2.0 WITH LLVM-exception",
+]
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

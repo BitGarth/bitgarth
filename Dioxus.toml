@@ -1,0 +1,27 @@
+[application]
+name = "bitgarth-app"
+
+[web.app]
+
+# HTML title tag content
+title = "BitGarth"
+
+# include `assets` in web platform
+[web.resource]
+
+# Additional CSS style files
+style = []
+
+# Additional JavaScript files
+script = []
+
+[web.resource.dev]
+
+# Javascript code file
+# serve: [dev-server] only
+script = []
+
+[bundle]
+identifier = "app.bitgarth"
+publisher = "BitGarth"
+icon = ["assets/app-icon.png", "icons/icon.ico"]

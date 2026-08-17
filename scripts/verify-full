@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+command -v cargo-deny >/dev/null || { echo "error: cargo-deny not installed. Run: cargo install cargo-deny --locked" >&2; exit 1; }
+
+# Named release-gate steps, in order.
+STEPS=(
+  fmt
+  clippy
+  allow-annotations
+  migrations-immutable
+  deny
+  unit-tests
+  db-unit-tests
+  integration-tests
+  web-build
+  e2e
+)
+
+step_command() {
+  case "$1" in
+    fmt) echo "cargo fmt --all -- --check" ;;
+    clippy) echo "cargo clippy --workspace --all-targets --all-features -- -D warnings" ;;
+    allow-annotations) echo "./scripts/check-allow-annotations.sh" ;;
+    migrations-immutable) echo "./scripts/check-migrations-immutable" ;;
+    deny) echo "cargo deny check --hide-inclusion-graph" ;;
+    unit-tests) echo "./scripts/tests-unit" ;;
+    db-unit-tests) echo "./scripts/tests-db-unit" ;;
+    integration-tests) echo "./scripts/tests-integration" ;;
+    web-build) echo "./scripts/dx-web-build" ;;
+    e2e) echo "./scripts/e2e" ;;
+    *) echo "unknown step: $1" >&2; return 2 ;;
+  esac
+}
+
+run_step() {
+  local name="$1"
+  local cmd
+  cmd="$(step_command "$name")"
+  echo
+  echo "$(date) [${name}] ${cmd} ..."
+  local status=0
+  set +e
+  time bash -c "$cmd"
+  status=$?
+  set -e
+  if [ "$status" -ne 0 ]; then
+    {
+      echo
+      echo "==============================================================="
+      echo "FAILED STEP: ${name}"
+      echo
+      echo "Iterate on this step alone until it passes:"
+      echo "  ${cmd}"
+      echo
+      echo "Then resume the remaining steps (fmt and clippy re-run"
+      echo "automatically to catch regressions from your fix):"
+      echo "  ./scripts/verify-full --from ${name}"
+      echo "==============================================================="
+    } >&2
+    exit 1
+  fi
+  echo "$(date) [${name}] done"
+}
+
+usage() {
+  echo "usage: verify-full [--from <step>]" >&2
+  echo "steps: ${STEPS[*]}" >&2
+  exit 2
+}
+
+from_step=""
+if [ "${1:-}" = "--from" ]; then
+  from_step="${2:-}"
+  [ -n "$from_step" ] || usage
+  found=0
+  for s in "${STEPS[@]}"; do
+    [ "$s" = "$from_step" ] && found=1
+  done
+  [ "$found" -eq 1 ] || usage
+  [ -z "${3:-}" ] || usage
+elif [ -n "${1:-}" ]; then
+  usage
+fi
+
+if [ -n "$from_step" ]; then
+  run_step fmt
+  run_step clippy
+  started=0
+  for s in "${STEPS[@]}"; do
+    [ "$s" = "$from_step" ] && started=1
+    if [ "$started" -eq 1 ] && [ "$s" != "fmt" ] && [ "$s" != "clippy" ]; then
+      run_step "$s"
+    fi
+  done
+else
+  for s in "${STEPS[@]}"; do
+    run_step "$s"
+  done
+fi
+
+echo
+echo "$(date) verify-full passed"

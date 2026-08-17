@@ -1,0 +1,10 @@
+DROP INDEX IF EXISTS idx_request_attempts_scope_attempted;
+DROP INDEX IF EXISTS idx_request_attempts_status_attempted;
+DROP INDEX IF EXISTS idx_raw_parse_attempts_object_attempted;
+DROP INDEX IF EXISTS idx_raw_parse_attempts_version_attempted;
+DROP INDEX IF EXISTS idx_raw_mempool_tx_obs_address_observed;
+DROP INDEX IF EXISTS idx_raw_mempool_tx_obs_version_observed;
+DROP INDEX IF EXISTS idx_raw_etherscan_normal_versions_first_observed;
+DROP INDEX IF EXISTS idx_raw_etherscan_internal_versions_first_observed;
+DROP INDEX IF EXISTS idx_raw_etherscan_normal_observations_version_observed;
+DROP INDEX IF EXISTS idx_raw_etherscan_internal_observations_version_observed;
