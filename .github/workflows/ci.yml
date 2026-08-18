@@ -9,6 +9,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  HLEDGER_VERSION: "1.99.3"
+  HLEDGER_LINUX_X64_SHA256: "7a296cbf550a60fc6caf868dcd10d1df0c163c58597b4c40417415d6bd9b5deb"
 
 jobs:
   verify:
@@ -40,6 +42,17 @@ jobs:
 
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
+
+      - name: Install hledger
+        run: |
+          archive="${RUNNER_TEMP}/hledger-linux-x64.tar.gz"
+          curl --fail --location --retry 3 --silent --show-error \
+            --output "$archive" \
+            "https://github.com/simonmichael/hledger/releases/download/${HLEDGER_VERSION}/hledger-linux-x64.tar.gz"
+          echo "${HLEDGER_LINUX_X64_SHA256}  ${archive}" | sha256sum --check -
+          sudo tar -xzf "$archive" -C /usr/local/bin hledger
+          installed_version="$(hledger --version | awk 'NR == 1 { gsub(/,$/, "", $2); print $2 }')"
+          test "$installed_version" = "$HLEDGER_VERSION"
 
       - name: Install verification tools
         run: |
