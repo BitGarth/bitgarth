@@ -2,7 +2,7 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 #[cfg(feature = "server")]
-use rand::{RngCore, rngs::OsRng};
+use rand::{RngExt, rand_core::UnwrapErr, rngs::SysRng};
 use serde::de::Error as _;
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -139,7 +139,7 @@ impl PaymentSecret {
     #[cfg(feature = "server")]
     pub(crate) fn generate() -> Self {
         let mut bytes = [0_u8; 32];
-        OsRng.fill_bytes(&mut bytes);
+        UnwrapErr(SysRng).fill(&mut bytes);
         Self(URL_SAFE_NO_PAD.encode(bytes))
     }
 

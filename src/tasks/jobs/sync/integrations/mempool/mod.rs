@@ -151,6 +151,47 @@ fn publish_address_history_proof(
     Ok(())
 }
 
+fn complete_strict_mempool_history_scan(
+    state: &mut MempoolIterationState,
+    context: &IntegrationIterationContext<'_>,
+    expected_count: TransactionCount,
+    tip_height: ChainTipHeight,
+    allow_singleton_duplicate_terminal: bool,
+) -> Result<(), UserTransactionMonitorError> {
+    let scan_start_run_id = state.strict_scan_start_run_id.ok_or_else(|| {
+        UserTransactionMonitorError::Parse(
+            "strict Mempool history scan is missing its start run".to_string(),
+        )
+    })?;
+    match validate_strict_mempool_history_scan(
+        context.run.user_id,
+        context.address.address_id,
+        scan_start_run_id,
+        expected_count,
+        allow_singleton_duplicate_terminal,
+    )? {
+        StrictMempoolScanValidation::Exact => {
+            publish_address_history_proof(
+                context,
+                Some(scan_start_run_id),
+                MempoolHistoryProof {
+                    confirmed_tx_count: expected_count,
+                    complete_height: tip_height,
+                },
+            )?;
+            state.proof_published = true;
+            state.cursor = None;
+            Ok(())
+        }
+        StrictMempoolScanValidation::Restart { reason } => {
+            restart_strict_mempool_history_scan(context.run.user_id, context.address.address_id)?;
+            Err(UserTransactionMonitorError::Db(crate::db::DbError::new(
+                reason,
+            )))
+        }
+    }
+}
+
 impl MempoolAddressSyncIntegration {
     pub(crate) const fn new() -> Self {
         Self {
@@ -592,35 +633,11 @@ fn run_mempool_iteration(
     state.run_summary.record_page(&ingested.summary);
     let page = ingested.transactions;
 
-    if let (true, Some(scan_start_run_id)) = (page.is_empty(), state.strict_scan_start_run_id) {
+    if page.is_empty() && state.strict_scan_start_run_id.is_some() {
         let expected_count = state
             .backfill_expected_tx_count
             .unwrap_or(TransactionCount::zero());
-        match validate_strict_mempool_history_scan(
-            run.user_id,
-            address.address_id,
-            scan_start_run_id,
-            expected_count,
-        )? {
-            StrictMempoolScanValidation::Exact => {
-                publish_address_history_proof(
-                    context,
-                    Some(scan_start_run_id),
-                    MempoolHistoryProof {
-                        confirmed_tx_count: expected_count,
-                        complete_height: _tip_height,
-                    },
-                )?;
-                state.proof_published = true;
-                state.cursor = None;
-            }
-            StrictMempoolScanValidation::Restart { reason } => {
-                restart_strict_mempool_history_scan(run.user_id, address.address_id)?;
-                return Err(UserTransactionMonitorError::Db(crate::db::DbError::new(
-                    reason,
-                )));
-            }
-        }
+        complete_strict_mempool_history_scan(state, context, expected_count, _tip_height, false)?;
         return Ok(SyncIterationResult {
             new_tx_count: TransactionCount::zero(),
             updated_tx_count: TransactionCount::zero(),
@@ -694,6 +711,10 @@ fn run_mempool_iteration(
                 confirmed_in_page,
             );
         }
+        let strict_singleton_duplicate_completion = page_cursor_str.as_deref().and_then(|cursor| {
+            strict_singleton_duplicate_completion(state, cursor, &page)
+                .map(|completion| (completion, cursor))
+        });
         let completed_backfill = if state.backfill_active && state.proof_publication_allowed {
             complete_backfill_if_expected_count_reached(state)
         } else {
@@ -726,7 +747,20 @@ fn run_mempool_iteration(
             )?;
         }
 
+        if let Some((completion, cursor_txid)) = strict_singleton_duplicate_completion {
+            complete_strict_mempool_history_scan(state, context, completion, _tip_height, true)?;
+            tracing::warn!(
+                user_id = %context.run.user_id,
+                run_id = %context.run.run_id,
+                address_id = %context.address.address_id,
+                cursor_txid,
+                confirmed_tx_count = completion.value(),
+                "transactions sync: detected Mempool singleton cursor pagination bug, accepting exact-count terminal page"
+            );
+        }
+
         if state.strict_scan_start_run_id.is_some()
+            && !state.proof_published
             && (state.run_summary.duplicate_cursor_page_detected || state.cursor.is_none())
         {
             restart_strict_mempool_history_scan(run.user_id, address.address_id)?;
@@ -922,6 +956,26 @@ fn complete_backfill_if_expected_count_reached(
 
     state.cursor = None;
     Some(expected_tx_count)
+}
+
+fn strict_singleton_duplicate_completion(
+    state: &MempoolIterationState,
+    fetched_cursor: &str,
+    page: &[MempoolAddressTransaction],
+) -> Option<TransactionCount> {
+    if state.strict_scan_start_run_id.is_none()
+        || !state.run_summary.duplicate_cursor_page_detected
+        || state.backfill_has_pending_transactions
+        || page.len() != 1
+        || !page[0].status.confirmed
+        || page[0].txid != fetched_cursor
+    {
+        return None;
+    }
+
+    let expected_count = state.backfill_expected_tx_count?;
+    let observed_count = u32::try_from(state.observed_confirmed_txids.len()).unwrap_or(u32::MAX);
+    (observed_count == expected_count.value()).then_some(expected_count)
 }
 
 #[derive(Clone, Copy)]
@@ -2444,6 +2498,117 @@ pub(crate) mod tests {
             Some(TransactionCount::from_u32(2))
         );
         assert_eq!(persisted.mempool_history_scan_start_run_id, None);
+    }
+
+    #[test]
+    fn bitcoin_history_full_resync_accepts_umbrel_singleton_duplicate_terminal() {
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let address = test_sync_address();
+        let now = test_now();
+        persist_sync_address_fixture(user_id, &address, now)
+            .expect("sync address fixture should persist");
+        mark_address_sync_started(
+            user_id,
+            address.address_id,
+            TransactionSyncRunId::new(),
+            now,
+        )
+        .expect("sync state row should exist");
+        let raw_sync_run = start_sync_run(
+            user_id,
+            StartSyncRunRequest {
+                integration: IntegrationKind::Mempool,
+                scope_kind: SyncRunScopeKind::Address,
+                scope_address_id: address.address_id,
+                asset_id: address.asset_id,
+                network: address.network,
+                trigger_kind: SyncRunTriggerKind::Backfill,
+                started_at: now,
+                summary_json: None,
+            },
+        )
+        .expect("raw sync run should start");
+        let txid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let page = format!(
+            r#"[{{"txid":"{txid}","vin":[],"vout":[{{"scriptpubkey":"00","scriptpubkey_address":"{}","value":1}}],"fee":0,"status":{{"confirmed":true,"block_height":1,"block_hash":"block-1","block_time":1}}}}]"#,
+            address.address.as_str()
+        );
+        let server = start_historical_sync_mempool_server_with_statuses(vec![
+            (
+                200,
+                r#"{"chain_stats":{"tx_count":1,"funded_txo_sum":1,"spent_txo_sum":0},"mempool_stats":{"tx_count":0}}"#
+                    .to_string(),
+            ),
+            (200, page.clone()),
+            (404, "{}".to_string()),
+            (200, page),
+        ]);
+        let http_counters = SyncHttpCounters::new();
+        let mempool_client = MempoolClient::new(
+            TracedBlockingClient::builder(IntegrationLabel::new(LABEL_MEMPOOL), user_id)
+                .configure(|builder| builder.timeout(Duration::from_secs(2)))
+                .build_for_tests_with_tracing(false)
+                .expect("traced blocking client should build"),
+            Url::parse(&server.base_url).expect("test mempool URL should parse"),
+        );
+        let clients = SyncClients {
+            mempool_client: Some(&mempool_client),
+            etherscan_api_key: None,
+            etherscan_base_url: None,
+            http_counters: &http_counters,
+        };
+        let clock = FixedClock::new(now);
+        let run = make_run_context(&clock, user_id);
+        let context = || IntegrationIterationContext {
+            run,
+            now_utc: now,
+            now_instant: clock.instant_now(),
+            address: &address,
+            clients,
+            single_address_progress: None,
+            allow_known_confirmed_early_exit: false,
+            chain_tip: Some(ChainTipHeight::try_new(800_001).expect("tip should parse")),
+            raw_sync_run_id: raw_sync_run.sync_run_id,
+            source_connection_id: &raw_sync_run.source_connection_id,
+            is_backfill_active: true,
+            historical_backfill_enabled: true,
+            legacy_mempool_history_repair: true,
+            mempool_history_page_frontier: None,
+        };
+        let mut integration = MempoolAddressSyncIntegration::new();
+
+        assert!(
+            integration
+                .sync_one_iteration(context())
+                .expect("first page should succeed")
+                .has_more_work
+        );
+        assert!(
+            !integration
+                .sync_one_iteration(context())
+                .expect("duplicate singleton terminal should complete")
+                .has_more_work
+        );
+
+        let requests = server.join();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[2].contains("/txs/chain/"));
+        assert!(requests[3].contains("?after_txid="));
+        let persisted = get_non_hd_sync_addresses(user_id)
+            .expect("address should load")
+            .into_iter()
+            .find(|candidate| candidate.address_id == address.address_id)
+            .expect("address should exist");
+        assert_eq!(
+            persisted
+                .mempool_history_proof
+                .map(|proof| proof.confirmed_tx_count),
+            Some(TransactionCount::from_u32(1))
+        );
+        assert_eq!(persisted.mempool_history_scan_start_run_id, None);
+        assert_eq!(persisted.mempool_backfill_cursor_txid, None);
     }
 
     #[test]

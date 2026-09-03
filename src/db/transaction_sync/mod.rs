@@ -2818,6 +2818,7 @@ mod tests {
             fixture.address_id,
             fixture.start_run_id,
             TransactionCount::from_u32(expected_count),
+            false,
         )
         .expect("validation");
         let StrictMempoolScanValidation::Restart { reason } = validation else {
@@ -2843,6 +2844,7 @@ mod tests {
                 fixture.address_id,
                 fixture.start_run_id,
                 TransactionCount::from_u32(2),
+                false,
             )
             .expect("validation"),
             StrictMempoolScanValidation::Exact
@@ -2907,6 +2909,51 @@ mod tests {
         );
         nonadvancing.seed_canonical(&[&first]);
         assert_strict_mempool_history_restart(&nonadvancing, 1);
+    }
+
+    #[test]
+    fn strict_mempool_history_scan_restarts_for_unlinked_page_with_singleton_exception() {
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let fixture = StrictMempoolHistoryFixture::new();
+        let first =
+            parse_tx_hash("abababababababababababababababababababababababababababababababa1");
+        let unlinked =
+            parse_tx_hash("abababababababababababababababababababababababababababababababa2");
+        fixture.record_page(
+            Some(fixture.start_run_id),
+            MempoolPageKind::FirstPage,
+            None,
+            Some(&first),
+            &[(&first, true)],
+        );
+        fixture.record_page(
+            Some(fixture.start_run_id),
+            MempoolPageKind::PaginatedAfterConfirmed,
+            Some(&first),
+            Some(&first),
+            &[(&first, true)],
+        );
+        fixture.record_page(
+            Some(fixture.start_run_id),
+            MempoolPageKind::PaginatedAfterConfirmed,
+            Some(&unlinked),
+            None,
+            &[],
+        );
+        fixture.seed_canonical(&[&first]);
+
+        let validation = validate_strict_mempool_history_scan(
+            fixture.user_id,
+            fixture.address_id,
+            fixture.start_run_id,
+            TransactionCount::from_u32(1),
+            true,
+        )
+        .expect("validation");
+        assert!(matches!(
+            validation,
+            StrictMempoolScanValidation::Restart { .. }
+        ));
     }
 
     #[test]

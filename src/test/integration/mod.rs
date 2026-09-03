@@ -198,7 +198,7 @@ fn setup_app_test_server_no_db() -> IntegrationTestServer {
         save_cookies: true,
         ..Default::default()
     };
-    let server = TestServer::new_with_config(router, config).expect("Failed to create test server");
+    let server = TestServer::new_with_config(router, config);
 
     IntegrationTestServer {
         server,
@@ -252,7 +252,7 @@ fn setup_app_test_server() -> IntegrationTestServer {
         save_cookies: true,
         ..Default::default()
     };
-    let server = TestServer::new_with_config(router, config).expect("Failed to create test server");
+    let server = TestServer::new_with_config(router, config);
     IntegrationTestServer {
         server,
         _runtime: Some(runtime),
@@ -334,7 +334,7 @@ fn build_test_server(
         save_cookies: true,
         ..Default::default()
     };
-    let server = TestServer::new_with_config(router, config).expect("Failed to create test server");
+    let server = TestServer::new_with_config(router, config);
 
     IntegrationTestServer {
         server,

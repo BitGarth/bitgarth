@@ -178,6 +178,7 @@ pub(crate) fn validate_strict_mempool_history_scan(
     address_id: DigitalAssetAddressId,
     start_run_id: SyncRunId,
     expected_confirmed_count: TransactionCount,
+    allow_singleton_duplicate_terminal: bool,
 ) -> Result<StrictMempoolScanValidation, DbError> {
     with_user_db(user_id, |conn| {
         let start_run_exists = conn
@@ -277,6 +278,13 @@ pub(crate) fn validate_strict_mempool_history_scan(
                 return Ok(restart("Mempool scan evidence contains a cursor cycle"));
             }
             let page = &pages[current];
+            let singleton_duplicate_terminal = allow_singleton_duplicate_terminal
+                && page.membership_count == 1
+                && page.requested_cursor == page.returned_cursor
+                && page.requested_cursor.as_ref().is_some_and(|cursor| {
+                    page.confirmed_txids.first() == Some(cursor)
+                        && observed_confirmed_txids.contains(cursor)
+                });
             for txid in &page.confirmed_txids {
                 observed_confirmed_txids.insert(txid.clone());
             }
@@ -288,6 +296,9 @@ pub(crate) fn validate_strict_mempool_history_scan(
                 break;
             };
             if page.requested_cursor.as_ref() == Some(returned_cursor) {
+                if singleton_duplicate_terminal {
+                    break;
+                }
                 return Ok(restart(
                     "Mempool scan evidence contains a non-advancing cursor",
                 ));

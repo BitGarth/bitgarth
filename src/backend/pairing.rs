@@ -31,7 +31,7 @@ use chrono::Utc;
 use dioxus::fullstack::FullstackContext;
 use dioxus::prelude::*;
 #[cfg(feature = "server")]
-use rand::{RngCore, rngs::OsRng};
+use rand::{RngExt, rand_core::UnwrapErr, rngs::SysRng};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "server")]
 use std::net::{IpAddr, SocketAddr};
@@ -79,8 +79,9 @@ pub(crate) async fn start_pairing(
     let generated = std::iter::repeat_with(|| {
         let mut id = [0_u8; 32];
         let mut code = [0_u8; 8];
-        OsRng.fill_bytes(&mut id);
-        OsRng.fill_bytes(&mut code);
+        let mut rng = UnwrapErr(SysRng);
+        rng.fill(&mut id);
+        rng.fill(&mut code);
         (id, code)
     });
     let started = match store.start(Utc::now(), source, start, generated, |verifier| {

@@ -92,7 +92,7 @@ impl BitGarthClient {
             builder = builder.no_proxy();
         }
         if let Some(root) = test_root {
-            builder = builder.add_root_certificate(root);
+            builder = builder.tls_certs_only([root]);
         }
         let client = builder
             .build()

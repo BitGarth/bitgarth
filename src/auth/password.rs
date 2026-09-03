@@ -1,6 +1,6 @@
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier};
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt};
 pub(crate) use argon2::password_hash::{PasswordHashString, SaltString};
-use rand::rngs::OsRng;
+use rand::{RngExt, rand_core::UnwrapErr, rngs::SysRng};
 
 use crate::db::encryption::argon2_with_params;
 use crate::models::{RawPlaintextPassword, ValidatedPlaintextPassword};
@@ -13,7 +13,9 @@ fn argon2_password_error() -> argon2::password_hash::Error {
 pub(crate) fn hash_password(
     password: &ValidatedPlaintextPassword,
 ) -> Result<(PasswordHashString, SaltString), argon2::password_hash::Error> {
-    let salt = SaltString::generate(&mut OsRng);
+    let mut salt_bytes = [0_u8; Salt::RECOMMENDED_LENGTH];
+    UnwrapErr(SysRng).fill(&mut salt_bytes);
+    let salt = SaltString::encode_b64(&salt_bytes)?;
     let argon2 = argon2_with_params().map_err(|_| argon2_password_error())?;
     let password_hash = argon2.hash_password(password.as_str().as_bytes(), &salt)?;
     let password_hash_string = PasswordHashString::from(password_hash);

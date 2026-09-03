@@ -1,6 +1,6 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
-use rand::{RngCore, rngs::OsRng};
+use rand::{RngExt, rand_core::UnwrapErr, rngs::SysRng};
 use sha2::{Digest, Sha256};
 use std::{fmt, str::FromStr};
 
@@ -13,7 +13,7 @@ pub(crate) struct CapabilityId([u8; 32]);
 impl CapabilityId {
     pub(crate) fn new() -> Self {
         let mut bytes = [0_u8; 32];
-        OsRng.fill_bytes(&mut bytes);
+        UnwrapErr(SysRng).fill(&mut bytes);
         Self(bytes)
     }
 

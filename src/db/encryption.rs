@@ -12,14 +12,14 @@ use crate::client_capabilities::{CapabilityId, ClientPermission, WRAP_DOMAIN};
 use crate::db::DbError;
 use crate::models::{SessionId, UserId};
 use aes_gcm::{
-    AeadCore, Aes256Gcm, KeyInit,
+    Aes256Gcm, KeyInit,
     aead::{Aead, Payload},
 };
 use argon2::{Algorithm, Argon2, Params, ParamsBuilder, Version};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use hkdf::Hkdf;
-use rand::{RngCore, rngs::OsRng};
+use rand::{RngExt, rand_core::UnwrapErr, rngs::SysRng};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::path::PathBuf;
@@ -67,7 +67,7 @@ pub(crate) struct Dek([u8; 32]);
 impl Dek {
     pub(crate) fn generate() -> Self {
         let mut bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut bytes);
+        UnwrapErr(SysRng).fill(&mut bytes);
         Self(bytes)
     }
 
@@ -188,7 +188,7 @@ pub(crate) struct WrappedDek {
 impl WrappedDek {
     pub(crate) fn new_password_wrapper(dek: &Dek, password: &str) -> Result<Self, EncryptionError> {
         let mut salt = [0u8; 16];
-        OsRng.fill_bytes(&mut salt);
+        UnwrapErr(SysRng).fill(&mut salt);
 
         let kek = PasswordKek::derive(password, &salt)?;
 
@@ -448,10 +448,11 @@ impl ClientKeyWrapper {
         let kek = ClientKeyKek::derive(raw_client_key, &context)?;
         let cipher = Aes256Gcm::new_from_slice(&kek.0)
             .map_err(|error| EncryptionError::new(format!("Failed to create cipher: {error}")))?;
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let mut nonce = [0_u8; 12];
+        UnwrapErr(SysRng).fill(&mut nonce);
         let ciphertext = cipher
             .encrypt(
-                &nonce,
+                (&nonce).into(),
                 Payload {
                     msg: dek.as_bytes(),
                     aad: &context,
@@ -557,10 +558,11 @@ fn wrap_dek(dek: &Dek, kek: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), EncryptionE
     let cipher = Aes256Gcm::new_from_slice(kek)
         .map_err(|e| EncryptionError::new(format!("Failed to create cipher: {e}")))?;
 
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let mut nonce = [0_u8; 12];
+    UnwrapErr(SysRng).fill(&mut nonce);
 
     let ciphertext = cipher
-        .encrypt(&nonce, dek.as_hex().as_bytes())
+        .encrypt((&nonce).into(), dek.as_hex().as_bytes())
         .map_err(|e| EncryptionError::new(format!("DEK encryption failed: {e}")))?;
 
     Ok((nonce.to_vec(), ciphertext))
@@ -711,7 +713,7 @@ impl ServerMasterSecret {
 
     fn generate() -> Self {
         let mut bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut bytes);
+        UnwrapErr(SysRng).fill(&mut bytes);
         Self(bytes.to_vec())
     }
 
@@ -1148,6 +1150,24 @@ mod tests {
         let arr: [u8; 32] = bytes.try_into().expect("should be 32 bytes");
         let dek2 = Dek::from_bytes(arr);
         assert_eq!(dek.as_hex(), dek2.as_hex());
+    }
+
+    #[test]
+    fn key_unwrapping_accepts_existing_aes_gcm_ciphertext() {
+        let nonce = hex::decode("333333333333333333333333").expect("nonce should decode");
+        let ciphertext = hex::decode(
+            "b6b16074f8a0471e808ad95f9519d11a34fa3d06b8ebb79eca783bb791bcb818\
+             e41755a284cdd3254dc0cf7f9b7cddaa27c487788121136b7efd249263cfe07f\
+             fe3da37d7a1758295b5482a9cba4eae8",
+        )
+        .expect("ciphertext should decode");
+
+        let dek = unwrap_dek(&nonce, &ciphertext, &[0x11; 32]).expect("should unwrap");
+
+        assert_eq!(
+            dek.as_hex(),
+            "2222222222222222222222222222222222222222222222222222222222222222"
+        );
     }
 
     #[test]

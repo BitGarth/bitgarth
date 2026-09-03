@@ -7,7 +7,7 @@ use crate::models::{Session, SessionId, SessionToken, TokenHash, UserId, parse_d
 use base64::{Engine, engine::general_purpose};
 use chrono::{DateTime, Duration, Utc};
 use dioxus::logger::tracing;
-use rand::{Rng, thread_rng};
+use rand::RngExt;
 use std::str::FromStr;
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES: i64 = 60;
@@ -134,7 +134,7 @@ pub(crate) const SESSION_COOKIE_NAME: &str = "bitgarth_session";
 
 pub(crate) fn generate_session_token() -> SessionToken {
     let mut token = [0u8; 32];
-    thread_rng().fill(&mut token);
+    rand::rng().fill(&mut token);
     SessionToken::from_raw(general_purpose::STANDARD.encode(token))
 }
 

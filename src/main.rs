@@ -1,5 +1,8 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
 
+#[cfg(target_arch = "wasm32")]
+use getrandom_0_3 as _;
+
 #[cfg(any(feature = "server", test))]
 pub(crate) mod account_limits;
 mod account_model;
