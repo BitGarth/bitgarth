@@ -25,7 +25,7 @@ step_command() {
     clippy) echo "cargo clippy --workspace --all-targets --no-default-features --features web,db-tests,dev-config -- -D warnings" ;;
     allow-annotations) echo "./scripts/check-allow-annotations.sh" ;;
     migrations-immutable) echo "./scripts/check-migrations-immutable" ;;
-    deny) echo "cargo deny check --hide-inclusion-graph" ;;
+    deny) echo "cargo deny fetch all && cargo deny --locked check --hide-inclusion-graph" ;;
     unit-tests) echo "./scripts/tests-unit" ;;
     db-unit-tests) echo "./scripts/tests-db-unit" ;;
     integration-tests) echo "./scripts/tests-integration" ;;
