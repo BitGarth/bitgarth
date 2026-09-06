@@ -1,6 +1,6 @@
 [package]
 name = "bitgarth-app"
-version = "0.3.1"
+version.workspace = true
 authors = ["BitGarth <dev@bitgarth.app>"]
 edition = "2024"
 publish = false
@@ -8,6 +8,9 @@ publish = false
 [workspace]
 resolver = "3"
 members = ["crates/bitgarth-cli"]
+
+[workspace.package]
+version = "0.3.1"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

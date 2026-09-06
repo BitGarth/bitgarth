@@ -3,6 +3,7 @@ name: CLI Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -20,13 +21,20 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             asset_suffix: linux-x86_64-gnu
+            artifact_name: cli-x86_64-unknown-linux-gnu
+            allow_failure: false
           - os: macos-15
             target: aarch64-apple-darwin
             asset_suffix: macos-aarch64
+            artifact_name: unsigned-cli-aarch64-apple-darwin
+            allow_failure: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset_suffix: windows-x86_64-msvc
+            artifact_name: cli-x86_64-pc-windows-msvc
+            allow_failure: false
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.allow_failure }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,7 +59,7 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          asset="bitgarth-${GITHUB_REF_NAME}-${{ matrix.asset_suffix }}.tar.gz"
+          asset="bitgarth-cli-${GITHUB_REF_NAME}-${{ matrix.asset_suffix }}.tar.gz"
           mkdir -p dist
           tar \
             -C "target/${{ matrix.target }}/release" \
@@ -66,7 +74,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $asset = "bitgarth-$env:GITHUB_REF_NAME-${{ matrix.asset_suffix }}.zip"
+          $asset = "bitgarth-cli-$env:GITHUB_REF_NAME-${{ matrix.asset_suffix }}.zip"
           New-Item -ItemType Directory -Force dist | Out-Null
           Compress-Archive -LiteralPath "target/${{ matrix.target }}/release/bitgarth.exe" -DestinationPath "dist/$asset"
           $entries = @(tar -tf "dist/$asset")
@@ -77,14 +85,144 @@ jobs:
       - name: Upload packaged CLI
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: cli-${{ matrix.target }}
+          name: ${{ matrix.artifact_name }}
           path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  sign_macos:
+    name: Sign macOS CLI
+    needs: build
+    if: ${{ !cancelled() }}
+    runs-on: macos-15
+    steps:
+      - name: Download unsigned macOS CLI
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: unsigned-cli-aarch64-apple-darwin
+          path: unsigned
+
+      - name: Sign macOS CLI
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          certificate_path="$RUNNER_TEMP/developer-id-application.p12"
+          keychain_path="$RUNNER_TEMP/bitgarth-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          identity="Developer ID Application: FernTrail B.V. (4UJZ75B7VG)"
+
+          cleanup() {
+            security delete-keychain "$keychain_path" >/dev/null 2>&1 || true
+            rm -f "$certificate_path"
+          }
+          trap cleanup EXIT
+
+          umask 077
+          printf '%s' "$MACOS_CERTIFICATE_BASE64" | base64 -D > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+
+          archive="$(find unsigned -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
+          test -n "$archive"
+          work_dir="$(mktemp -d)"
+          tar -xzf "$archive" -C "$work_dir"
+          binary="$work_dir/bitgarth"
+          test -x "$binary"
+
+          codesign \
+            --force \
+            --options runtime \
+            --timestamp \
+            --identifier tech.ferntrail.bitgarth.cli \
+            --keychain "$keychain_path" \
+            --sign "$identity" \
+            "$binary"
+          codesign --verify --strict --verbose=4 "$binary"
+
+          mkdir -p signed
+          tar -C "$work_dir" -czf "signed/$(basename "$archive")" bitgarth
+
+      - name: Upload signed macOS CLI pending notarization
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-aarch64-signed-pending-notarization
+          path: signed/*
+          if-no-files-found: error
+          retention-days: 1
+
+  notarize_macos:
+    name: Notarize macOS CLI
+    needs: sign_macos
+    runs-on: macos-15
+    steps:
+      - name: Download signed macOS CLI
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: macos-aarch64-signed-pending-notarization
+          path: signed
+
+      - name: Notarize macOS CLI
+        env:
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ vars.APPLE_API_ISSUER_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          api_key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          trap 'rm -f "$api_key_path"' EXIT
+          umask 077
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 -D > "$api_key_path"
+
+          archive="$(find signed -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
+          test -n "$archive"
+          work_dir="$(mktemp -d)"
+          tar -xzf "$archive" -C "$work_dir"
+          binary="$work_dir/bitgarth"
+          test -x "$binary"
+
+          submission="$RUNNER_TEMP/bitgarth-notary.zip"
+          ditto -c -k --keepParent "$binary" "$submission"
+          xcrun notarytool submit "$submission" \
+            --key "$api_key_path" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --wait
+          codesign --verify \
+            --verbose=4 \
+            --requirement '=notarized' \
+            --check-notarization \
+            "$binary"
+
+      - name: Upload notarized macOS CLI
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cli-aarch64-apple-darwin
+          path: signed/*
           if-no-files-found: error
           retention-days: 1
 
   release:
     name: Publish CLI release
-    needs: build
+    needs: [build, notarize_macos]
+    if: ${{ !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -112,12 +250,23 @@ jobs:
           version="${tag#v}"
           notes="docs/release-notes/${version}.md"
           test -f "$notes"
+          cli_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          test "$tag" = "v${cli_version}"
+
+          github_notes="$(mktemp)"
+          {
+            printf '%s\n\n' '> These release notes describe the BitGarth application. See the [installation options](https://bitgarth.app/#install) or build the app from source. The platform-specific downloads below contain the BitGarth CLI, a companion command-line client for a BitGarth server.'
+            cat "$notes"
+          } > "$github_notes"
 
           archives=(
-            "bitgarth-${tag}-linux-x86_64-gnu.tar.gz"
-            "bitgarth-${tag}-macos-aarch64.tar.gz"
-            "bitgarth-${tag}-windows-x86_64-msvc.zip"
+            "bitgarth-cli-${tag}-linux-x86_64-gnu.tar.gz"
+            "bitgarth-cli-${tag}-windows-x86_64-msvc.zip"
           )
+          macos_archive="bitgarth-cli-${tag}-macos-aarch64.tar.gz"
+          if [[ -f "dist/${macos_archive}" ]]; then
+            archives+=("$macos_archive")
+          fi
           mapfile -t archives < <(
             printf '%s\n' "${archives[@]}" | LC_ALL=C sort
           )
@@ -150,13 +299,13 @@ jobs:
             gh release edit "$tag" \
               --verify-tag \
               --title "$tag" \
-              --notes-file "$notes"
+              --notes-file "$github_notes"
           else
             gh release create "$tag" \
               --verify-tag \
               --draft \
               --title "$tag" \
-              --notes-file "$notes"
+              --notes-file "$github_notes"
             release_draft=true
           fi
 
