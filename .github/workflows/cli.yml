@@ -102,41 +102,22 @@ jobs:
           name: unsigned-cli-aarch64-apple-darwin
           path: unsigned
 
+      - name: Import macOS signing certificate
+        uses: Apple-Actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466 # v7.0.0
+        with:
+          keychain: bitgarth-signing
+          p12-file-base64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          p12-password: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+
       - name: Sign macOS CLI
-        env:
-          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
-          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         shell: bash
         run: |
           set -euo pipefail
 
-          certificate_path="$RUNNER_TEMP/developer-id-application.p12"
-          keychain_path="$RUNNER_TEMP/bitgarth-signing.keychain-db"
-          keychain_password="$(openssl rand -hex 24)"
+          keychain_path="bitgarth-signing.keychain"
           identity="Developer ID Application: FernTrail B.V. (4UJZ75B7VG)"
 
-          cleanup() {
-            security delete-keychain "$keychain_path" >/dev/null 2>&1 || true
-            rm -f "$certificate_path"
-          }
-          trap cleanup EXIT
-
-          umask 077
-          printf '%s' "$MACOS_CERTIFICATE_BASE64" | base64 -D > "$certificate_path"
-          security create-keychain -p "$keychain_password" "$keychain_path"
-          security set-keychain-settings -lut 21600 "$keychain_path"
-          security unlock-keychain -p "$keychain_password" "$keychain_path"
-          security import "$certificate_path" \
-            -k "$keychain_path" \
-            -P "$MACOS_CERTIFICATE_PASSWORD" \
-            -A \
-            -t cert \
-            -f pkcs12
           security find-identity -v -p codesigning "$keychain_path"
-          security set-key-partition-list \
-            -S apple-tool:,apple: \
-            -k "$keychain_password" \
-            "$keychain_path" >/dev/null
 
           archive="$(find unsigned -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
           test -n "$archive"
