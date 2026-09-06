@@ -132,11 +132,11 @@ jobs:
             -A \
             -t cert \
             -f pkcs12
+          security find-identity -v -p codesigning "$keychain_path"
           security set-key-partition-list \
             -S apple-tool:,apple: \
-            -s \
             -k "$keychain_password" \
-            "$keychain_path"
+            "$keychain_path" >/dev/null
 
           archive="$(find unsigned -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
           test -n "$archive"
@@ -199,12 +199,34 @@ jobs:
           test -x "$binary"
 
           submission="$RUNNER_TEMP/bitgarth-notary.zip"
+          submission_result="$RUNNER_TEMP/bitgarth-notary-submission.json"
           ditto -c -k --keepParent "$binary" "$submission"
           xcrun notarytool submit "$submission" \
             --key "$api_key_path" \
             --key-id "$APPLE_API_KEY_ID" \
             --issuer "$APPLE_API_ISSUER_ID" \
-            --wait
+            --output-format json > "$submission_result"
+          cat "$submission_result"
+          submission_id="$(plutil -extract id raw -o - "$submission_result")"
+
+          set +e
+          xcrun notarytool wait "$submission_id" \
+            --key "$api_key_path" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID"
+          notarization_exit=$?
+          set -e
+
+          if ! xcrun notarytool log "$submission_id" \
+            --key "$api_key_path" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID"; then
+            echo "::warning::Unable to fetch notarization log for $submission_id"
+          fi
+          if (( notarization_exit != 0 )); then
+            exit "$notarization_exit"
+          fi
+
           codesign --verify \
             --verbose=4 \
             --requirement '=notarized' \
