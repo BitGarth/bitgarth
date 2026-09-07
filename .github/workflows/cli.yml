@@ -182,7 +182,7 @@ jobs:
 
           if codesign --verify \
             --verbose=4 \
-            --requirement '=notarized' \
+            --test-requirement '=notarized' \
             --check-notarization \
             "$binary"
           then
@@ -221,7 +221,7 @@ jobs:
 
           codesign --verify \
             --verbose=4 \
-            --requirement '=notarized' \
+            --test-requirement '=notarized' \
             --check-notarization \
             "$binary"
 
