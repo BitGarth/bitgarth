@@ -88,7 +88,7 @@ jobs:
           name: ${{ matrix.artifact_name }}
           path: dist/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 14
 
   sign_macos:
     name: Sign macOS CLI
@@ -139,23 +139,24 @@ jobs:
           mkdir -p signed
           tar -C "$work_dir" -czf "signed/$(basename "$archive")" bitgarth
 
-      - name: Upload signed macOS CLI pending notarization
+      - name: Upload signed macOS CLI
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: macos-aarch64-signed-pending-notarization
+          name: cli-aarch64-apple-darwin
           path: signed/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 14
 
   notarize_macos:
     name: Notarize macOS CLI
     needs: sign_macos
+    if: ${{ !cancelled() }}
     runs-on: macos-15
     steps:
       - name: Download signed macOS CLI
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: macos-aarch64-signed-pending-notarization
+          name: cli-aarch64-apple-darwin
           path: signed
 
       - name: Notarize macOS CLI
@@ -178,6 +179,16 @@ jobs:
           tar -xzf "$archive" -C "$work_dir"
           binary="$work_dir/bitgarth"
           test -x "$binary"
+
+          if codesign --verify \
+            --verbose=4 \
+            --requirement '=notarized' \
+            --check-notarization \
+            "$binary"
+          then
+            echo "Apple notarization ticket is already available"
+            exit 0
+          fi
 
           submission="$RUNNER_TEMP/bitgarth-notary.zip"
           submission_result="$RUNNER_TEMP/bitgarth-notary-submission.json"
@@ -214,17 +225,9 @@ jobs:
             --check-notarization \
             "$binary"
 
-      - name: Upload notarized macOS CLI
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: cli-aarch64-apple-darwin
-          path: signed/*
-          if-no-files-found: error
-          retention-days: 1
-
   release:
     name: Publish CLI release
-    needs: [build, notarize_macos]
+    needs: [build, sign_macos, notarize_macos]
     if: ${{ !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
@@ -245,6 +248,7 @@ jobs:
       - name: Validate and publish release
         env:
           GH_TOKEN: ${{ github.token }}
+          MACOS_NOTARIZATION_RESULT: ${{ needs.notarize_macos.result }}
         shell: bash
         run: |
           set -euo pipefail
@@ -256,19 +260,15 @@ jobs:
           cli_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           test "$tag" = "v${cli_version}"
 
-          github_notes="$(mktemp)"
-          {
-            printf '%s\n\n' '> These release notes describe the BitGarth application. See the [installation options](https://bitgarth.app/#install) or build the app from source. The platform-specific downloads below contain the BitGarth CLI, a companion command-line client for a BitGarth server.'
-            cat "$notes"
-          } > "$github_notes"
-
           archives=(
             "bitgarth-cli-${tag}-linux-x86_64-gnu.tar.gz"
             "bitgarth-cli-${tag}-windows-x86_64-msvc.zip"
           )
           macos_archive="bitgarth-cli-${tag}-macos-aarch64.tar.gz"
+          macos_available=false
           if [[ -f "dist/${macos_archive}" ]]; then
             archives+=("$macos_archive")
+            macos_available=true
           fi
           mapfile -t archives < <(
             printf '%s\n' "${archives[@]}" | LC_ALL=C sort
@@ -283,6 +283,20 @@ jobs:
               "$expected" "$actual" >&2
             exit 1
           fi
+
+          github_notes="$(mktemp)"
+          {
+            if [[ "$macos_available" == "true" &&
+                  "$MACOS_NOTARIZATION_RESULT" != "success" ]]; then
+              printf '%s\n' \
+                '> [!WARNING]' \
+                '> The macOS downloads are signed but have not yet completed Apple' \
+                '> notarization. Gatekeeper may prevent them from opening.' \
+                ''
+            fi
+            printf '%s\n\n' '> These release notes describe the BitGarth application. See the [installation options](https://bitgarth.app/#install) or build the app from source. The platform-specific downloads below contain the BitGarth CLI, a companion command-line client for a BitGarth server.'
+            cat "$notes"
+          } > "$github_notes"
 
           (
             cd dist
@@ -315,4 +329,13 @@ jobs:
           gh release upload "$tag" "${assets[@]}" --clobber
           if [[ "$release_draft" == "true" ]]; then
             gh release edit "$tag" --draft=false
+          fi
+
+          if [[ "$macos_available" != "true" ]]; then
+            echo '::error::macOS signing did not produce a release archive. Linux and Windows were published. Fix signing, then use “Re-run failed jobs” on this workflow.'
+            exit 1
+          fi
+          if [[ "$MACOS_NOTARIZATION_RESULT" != "success" ]]; then
+            echo '::error::macOS notarization is incomplete. The signed CLI was published with a warning. Wait for Apple, then use “Re-run failed jobs” on this workflow.'
+            exit 1
           fi
