@@ -34,7 +34,7 @@ windows-sys = { version = "0.61.2", features = [
 ] }
 
 [dev-dependencies]
-rustls = { version = "0.23.43", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+rustls = { version = "0.23.45", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
 
 [lints.rust]
 warnings = "deny"

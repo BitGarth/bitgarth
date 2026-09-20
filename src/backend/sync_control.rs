@@ -8,7 +8,6 @@ use crate::models::FieldErrors;
 #[cfg(feature = "server")]
 use crate::models::UserId;
 #[cfg(feature = "server")]
-use crate::payments::types::EntitlementTier;
 #[cfg(feature = "server")]
 use crate::sync_control::is_sync_control_enabled;
 
@@ -153,9 +152,8 @@ fn require_active_native_account_for_sync(
         .map_err(|err| internal_error("load_feature_entitlements", err))?;
     let eligible = crate::db::account_limits::native_account_sync_eligible_for_user(
         user_id,
-        usize::from(entitlements.sync_account_slots_limit),
+        &entitlements,
         native_account_id,
-        entitlements.tier == EntitlementTier::Free,
     )
     .map_err(|err| internal_error("classify_supported_accounts_for_user", err))?;
 

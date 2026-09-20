@@ -632,6 +632,16 @@ pub(super) fn resolve_or_create_wallet_id(
         return Ok(wallet_id);
     }
 
+    if let Some(wallet_id) = matching_manual_only_wallet(state, imported_wallet) {
+        let meta = state.wallet_meta.get(&wallet_id).ok_or_else(|| {
+            WalletDataImportDbError::Internal(
+                "Matched manual wallet is missing metadata".to_string(),
+            )
+        })?;
+        result.wallets_matched.push(meta.label.as_str().to_string());
+        return Ok(wallet_id);
+    }
+
     let unique_wallet_label = unique_label_with_numeric_suffix(
         &imported_wallet.label,
         &state.wallet_label_keys,
@@ -672,6 +682,28 @@ pub(super) fn resolve_or_create_wallet_id(
 pub(super) struct ResolvedNativeAccount {
     pub(super) account_id: WalletAccountId,
     pub(super) was_created: bool,
+}
+
+pub(super) fn matching_manual_only_wallet(
+    state: &ImportState,
+    imported_wallet: &ParsedImportedWallet,
+) -> Option<WalletId> {
+    if imported_wallet.master_fingerprint.is_some() || !imported_wallet.native_accounts.is_empty() {
+        return None;
+    }
+    state.wallet_meta.iter().find_map(|(&wallet_id, meta)| {
+        (meta.label.key() == imported_wallet.label.key()
+            && imported_wallet.manual_accounts.iter().any(|account| {
+                state
+                    .manual_account_lookup
+                    .contains_key(&ManualAccountLookupKey {
+                        wallet_id,
+                        asset_id: account.snapshot.asset_id.clone(),
+                        network_id: account.snapshot.network_id.clone(),
+                    })
+            }))
+        .then_some(wallet_id)
+    })
 }
 
 pub(super) fn resolve_or_create_native_account(

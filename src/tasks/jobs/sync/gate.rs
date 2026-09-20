@@ -147,14 +147,14 @@ pub(super) enum TipUnchangedGateDecision {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum MempoolHistoryPolicy {
+pub(crate) enum TransactionFetchPolicy {
     CurrentOnly,
     Normal { cap: TransactionCount },
     LegacyRepair,
 }
 
-impl MempoolHistoryPolicy {
-    pub(super) fn normal(enabled: bool, cap: TransactionCount) -> Self {
+impl TransactionFetchPolicy {
+    pub(crate) fn normal(enabled: bool, cap: TransactionCount) -> Self {
         if enabled {
             Self::Normal { cap }
         } else {
@@ -162,7 +162,7 @@ impl MempoolHistoryPolicy {
         }
     }
 
-    pub(super) fn permits_transaction_page(self, stored_count: TransactionCount) -> bool {
+    pub(crate) fn permits_transaction_page(self, stored_count: TransactionCount) -> bool {
         match self {
             Self::CurrentOnly => false,
             Self::Normal { cap } => stored_count.value() < cap.value(),
@@ -171,16 +171,16 @@ impl MempoolHistoryPolicy {
     }
 }
 
-pub(super) fn load_account_transaction_count_for_history_policy(
+pub(super) fn load_account_transaction_count_for_fetch_policy(
     user_id: crate::models::UserId,
     account_id: crate::wallets::DigitalAssetAccountId,
-    policy: MempoolHistoryPolicy,
+    policy: TransactionFetchPolicy,
 ) -> Result<TransactionCount, UserTransactionMonitorError> {
     match policy {
-        MempoolHistoryPolicy::Normal { cap } => Ok(
+        TransactionFetchPolicy::Normal { cap } => Ok(
             crate::db::load_canonical_account_transaction_count_bounded(user_id, account_id, cap)?,
         ),
-        MempoolHistoryPolicy::CurrentOnly | MempoolHistoryPolicy::LegacyRepair => {
+        TransactionFetchPolicy::CurrentOnly | TransactionFetchPolicy::LegacyRepair => {
             Ok(TransactionCount::zero())
         }
     }
@@ -245,7 +245,7 @@ pub(super) struct SyncSingleAddressControlRequest<'a> {
     pub(super) accumulator: &'a mut super::CycleAccumulator,
     pub(super) processed_for_account: &'a mut u32,
     pub(super) single_address_progress: Option<SingleAddressProgressPlan>,
-    pub(super) mempool_history_policy: MempoolHistoryPolicy,
+    pub(super) transaction_fetch_policy: TransactionFetchPolicy,
     pub(super) mempool_history_page_frontier: Option<crate::db::HdMempoolHistoryFrontierUpdate>,
 }
 
@@ -262,24 +262,25 @@ pub(super) fn sync_single_address_with_controls(
         accumulator,
         processed_for_account,
         single_address_progress,
-        mempool_history_policy,
+        transaction_fetch_policy,
         mempool_history_page_frontier,
     } = request;
     let stored_count = match address.account_id {
-        Some(account_id) => load_account_transaction_count_for_history_policy(
+        Some(account_id) => load_account_transaction_count_for_fetch_policy(
             run.user_id,
             account_id,
-            mempool_history_policy,
+            transaction_fetch_policy,
         )?,
         None => TransactionCount::zero(),
     };
-    let historical_backfill_enabled = mempool_history_policy.permits_transaction_page(stored_count);
+    let transaction_page_permitted =
+        transaction_fetch_policy.permits_transaction_page(stored_count);
     let now_utc = run.clock.utc_now();
     let now_instant = run.clock.instant_now();
     let mut allow_known_confirmed_early_exit = true;
     let provider = default_api_provider_for_asset(address.asset_id);
 
-    if !historical_backfill_enabled
+    if !transaction_page_permitted
         && is_successful_balance_refresh_fresh(
             address.last_result,
             address.last_completed_at,
@@ -291,8 +292,10 @@ pub(super) fn sync_single_address_with_controls(
     }
 
     if is_on_cooldown(address, now_utc, run.source)
-        && (!matches!(mempool_history_policy, MempoolHistoryPolicy::LegacyRepair)
-            || matches!(address.last_result, Some(TransactionSyncResult::Failure)))
+        && (!matches!(
+            transaction_fetch_policy,
+            TransactionFetchPolicy::LegacyRepair
+        ) || matches!(address.last_result, Some(TransactionSyncResult::Failure)))
     {
         accumulator.add_skipped();
         return Ok((false, false));
@@ -306,7 +309,10 @@ pub(super) fn sync_single_address_with_controls(
     }
 
     if provider == SyncProviderId::MempoolSpace
-        && !matches!(mempool_history_policy, MempoolHistoryPolicy::LegacyRepair)
+        && !matches!(
+            transaction_fetch_policy,
+            TransactionFetchPolicy::LegacyRepair
+        )
         && address.mempool_backfill_cursor_txid.is_none()
         && !mempool_history_requires_first_page_restart(address)
         && let Some(last_tip_height) = address.last_tip_height
@@ -377,10 +383,10 @@ pub(super) fn sync_single_address_with_controls(
         clients,
         single_address_progress,
         allow_known_confirmed_early_exit,
-        historical_backfill_enabled,
+        transaction_page_permitted,
         legacy_mempool_history_repair: matches!(
-            mempool_history_policy,
-            MempoolHistoryPolicy::LegacyRepair
+            transaction_fetch_policy,
+            TransactionFetchPolicy::LegacyRepair
         ),
         mempool_history_page_frontier,
     });
@@ -457,7 +463,10 @@ pub(super) fn sync_single_address_with_controls(
             );
             accumulator.add_failed(
                 &err,
-                matches!(mempool_history_policy, MempoolHistoryPolicy::LegacyRepair),
+                matches!(
+                    transaction_fetch_policy,
+                    TransactionFetchPolicy::LegacyRepair
+                ),
             );
             let completed_at = run.clock.utc_now();
             mark_sync_failure(run, address.address_id, &err, completed_at);
@@ -557,27 +566,30 @@ mod pure_tests {
     }
 
     #[test]
-    fn mempool_history_policy_enforces_normal_cap_per_page() {
-        let current_only = MempoolHistoryPolicy::CurrentOnly;
-        let zero_cap = MempoolHistoryPolicy::Normal {
+    fn transaction_fetch_policy_enforces_normal_cap_per_page() {
+        let current_only = TransactionFetchPolicy::CurrentOnly;
+        let zero_cap = TransactionFetchPolicy::Normal {
             cap: TransactionCount::zero(),
         };
-        let normal = MempoolHistoryPolicy::Normal {
-            cap: TransactionCount::from_u32(100),
-        };
-        let repair = MempoolHistoryPolicy::LegacyRepair;
+        let normal = TransactionFetchPolicy::normal(true, TransactionCount::from_u32(1000));
+        let repair = TransactionFetchPolicy::LegacyRepair;
 
         assert!(!current_only.permits_transaction_page(TransactionCount::zero()));
         assert!(!zero_cap.permits_transaction_page(TransactionCount::zero()));
-        assert!(normal.permits_transaction_page(TransactionCount::from_u32(99)));
-        assert!(!normal.permits_transaction_page(TransactionCount::from_u32(100)));
+        assert!(normal.permits_transaction_page(TransactionCount::from_u32(999)));
+        assert!(!normal.permits_transaction_page(TransactionCount::from_u32(1000)));
+        assert!(!normal.permits_transaction_page(TransactionCount::from_u32(1002)));
+        // Etherscan can return a 2,000-entry page set: finish it, then pause.
+        assert!(normal.permits_transaction_page(TransactionCount::zero()));
+        assert!(!normal.permits_transaction_page(TransactionCount::from_u32(2_000)));
+        assert!(!normal.permits_transaction_page(TransactionCount::from_u32(2_999)));
         assert!(repair.permits_transaction_page(TransactionCount::from_u32(u32::MAX)));
     }
 
     #[test]
     fn bitcoin_history_full_resync_policy_is_cap_exempt() {
         assert!(
-            MempoolHistoryPolicy::LegacyRepair
+            TransactionFetchPolicy::LegacyRepair
                 .permits_transaction_page(TransactionCount::from_u32(u32::MAX))
         );
     }
@@ -597,6 +609,7 @@ mod pure_tests {
             last_completed_at: None,
             last_result: None,
             last_tip_height: None,
+            etherscan_transaction_tip_height: None,
             mempool_backfill_cursor_txid: None,
             mempool_expected_tx_count: None,
             mempool_history_proof: None,
@@ -640,6 +653,7 @@ mod pure_tests {
             last_completed_at: None,
             last_result: None,
             last_tip_height: None,
+            etherscan_transaction_tip_height: None,
             mempool_backfill_cursor_txid: None,
             mempool_expected_tx_count: None,
             mempool_history_proof: None,
@@ -662,6 +676,7 @@ mod pure_tests {
             last_completed_at: None,
             last_result: None,
             last_tip_height: None,
+            etherscan_transaction_tip_height: None,
             mempool_backfill_cursor_txid: None,
             mempool_expected_tx_count: None,
             mempool_history_proof: None,
@@ -763,7 +778,7 @@ mod tests {
                 accumulator: &mut accumulator,
                 processed_for_account: &mut processed_for_account,
                 single_address_progress: None,
-                mempool_history_policy: MempoolHistoryPolicy::CurrentOnly,
+                transaction_fetch_policy: TransactionFetchPolicy::CurrentOnly,
                 mempool_history_page_frontier: None,
             })
             .expect("cooldown skip should not error");
@@ -823,7 +838,7 @@ mod tests {
                 accumulator: &mut accumulator,
                 processed_for_account: &mut processed_for_account,
                 single_address_progress: None,
-                mempool_history_policy: MempoolHistoryPolicy::LegacyRepair,
+                transaction_fetch_policy: TransactionFetchPolicy::LegacyRepair,
                 mempool_history_page_frontier: None,
             })
             .expect("manual sync should bypass cooldown");
@@ -881,7 +896,7 @@ mod tests {
                 accumulator: &mut accumulator,
                 processed_for_account: &mut processed_for_account,
                 single_address_progress: None,
-                mempool_history_policy: MempoolHistoryPolicy::LegacyRepair,
+                transaction_fetch_policy: TransactionFetchPolicy::LegacyRepair,
                 mempool_history_page_frontier: None,
             })
             .expect("address-level failures should be accumulated");
@@ -936,7 +951,7 @@ mod tests {
                 accumulator: &mut accumulator,
                 processed_for_account: &mut processed_for_account,
                 single_address_progress: None,
-                mempool_history_policy: MempoolHistoryPolicy::LegacyRepair,
+                transaction_fetch_policy: TransactionFetchPolicy::LegacyRepair,
                 mempool_history_page_frontier: None,
             })
             .expect("activity-only success should be accumulated");
@@ -998,7 +1013,7 @@ mod tests {
                 accumulator: &mut accumulator,
                 processed_for_account: &mut processed_for_account,
                 single_address_progress: None,
-                mempool_history_policy: MempoolHistoryPolicy::LegacyRepair,
+                transaction_fetch_policy: TransactionFetchPolicy::LegacyRepair,
                 mempool_history_page_frontier: None,
             })
             .expect("zero-count reconciliation should be accumulated");
@@ -1087,7 +1102,7 @@ mod tests {
                 accumulator: &mut accumulator,
                 processed_for_account: &mut processed_for_account,
                 single_address_progress: None,
-                mempool_history_policy: MempoolHistoryPolicy::LegacyRepair,
+                transaction_fetch_policy: TransactionFetchPolicy::LegacyRepair,
                 mempool_history_page_frontier: None,
             })
             .expect("success persistence failure should enter normal failure handling");
@@ -1173,7 +1188,7 @@ mod tests {
                 accumulator: &mut accumulator,
                 processed_for_account: &mut processed_for_account,
                 single_address_progress: None,
-                mempool_history_policy: MempoolHistoryPolicy::LegacyRepair,
+                transaction_fetch_policy: TransactionFetchPolicy::LegacyRepair,
                 mempool_history_page_frontier: None,
             })
             .expect("cooldown boundary should sync");
@@ -1233,7 +1248,7 @@ mod tests {
                 accumulator: &mut accumulator,
                 processed_for_account: &mut processed_for_account,
                 single_address_progress: None,
-                mempool_history_policy: MempoolHistoryPolicy::CurrentOnly,
+                transaction_fetch_policy: TransactionFetchPolicy::CurrentOnly,
                 mempool_history_page_frontier: None,
             })
             .expect("failed balance refresh should retry after failed cooldown");
@@ -1297,7 +1312,7 @@ mod tests {
                 accumulator: &mut accumulator,
                 processed_for_account: &mut processed_for_account,
                 single_address_progress: None,
-                mempool_history_policy: MempoolHistoryPolicy::LegacyRepair,
+                transaction_fetch_policy: TransactionFetchPolicy::LegacyRepair,
                 mempool_history_page_frontier: None,
             })
             .expect("active backfill should bypass cooldown");
@@ -1358,7 +1373,7 @@ mod tests {
                 accumulator: &mut accumulator,
                 processed_for_account: &mut processed_for_account,
                 single_address_progress: None,
-                mempool_history_policy: MempoolHistoryPolicy::CurrentOnly,
+                transaction_fetch_policy: TransactionFetchPolicy::CurrentOnly,
                 mempool_history_page_frontier: None,
             })
             .expect("failed balance refresh should retry after failed cooldown");
@@ -1414,7 +1429,7 @@ mod tests {
                 accumulator: &mut accumulator,
                 processed_for_account: &mut processed_for_account,
                 single_address_progress: None,
-                mempool_history_policy: MempoolHistoryPolicy::LegacyRepair,
+                transaction_fetch_policy: TransactionFetchPolicy::LegacyRepair,
                 mempool_history_page_frontier: None,
             })
             .expect("rate-limited skip should not error");
@@ -1482,7 +1497,7 @@ mod tests {
             accumulator: &mut accumulator,
             processed_for_account: &mut processed_for_account,
             single_address_progress: None,
-            mempool_history_policy: MempoolHistoryPolicy::Normal {
+            transaction_fetch_policy: TransactionFetchPolicy::Normal {
                 cap: TransactionCount::from_u32(1),
             },
             mempool_history_page_frontier: None,
@@ -1557,7 +1572,7 @@ mod tests {
             accumulator: &mut accumulator,
             processed_for_account: &mut processed_for_account,
             single_address_progress: None,
-            mempool_history_policy: MempoolHistoryPolicy::LegacyRepair,
+            transaction_fetch_policy: TransactionFetchPolicy::LegacyRepair,
             mempool_history_page_frontier: None,
         })
         .expect("pending refresh should not error");
@@ -1634,7 +1649,7 @@ mod tests {
                 accumulator: &mut accumulator,
                 processed_for_account: &mut processed_for_account,
                 single_address_progress: None,
-                mempool_history_policy: MempoolHistoryPolicy::LegacyRepair,
+                transaction_fetch_policy: TransactionFetchPolicy::LegacyRepair,
                 mempool_history_page_frontier: None,
             })
             .expect("backfill-cursor bypass should not error");

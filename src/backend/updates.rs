@@ -38,25 +38,41 @@ fn parse_semver(raw: &str) -> Option<semver::Version> {
 #[cfg(feature = "server")]
 fn is_newer_version(latest: &str, current: &str) -> bool {
     match (parse_semver(latest), parse_semver(current)) {
-        (Some(latest), Some(current)) => latest > current,
+        (Some(latest), Some(current)) => latest.cmp_precedence(&current).is_gt(),
         _ => false,
     }
 }
 
 #[cfg(feature = "server")]
+fn canonical_release_url(raw: &str) -> Option<String> {
+    parse_semver(raw)
+        .map(|version| format!("https://github.com/BitGarth/bitgarth/releases/tag/v{version}"))
+}
+
+#[cfg(feature = "server")]
 fn status_from_state(state: crate::db::AppUpdateState) -> UpdateStatus {
+    status_from_state_for_channel(state, crate::channel::channel_id())
+}
+
+#[cfg(feature = "server")]
+fn status_from_state_for_channel(state: crate::db::AppUpdateState, channel: &str) -> UpdateStatus {
     let current = env!("CARGO_PKG_VERSION").to_string();
     let available = state
         .latest_seen
         .as_deref()
         .is_some_and(|latest| is_newer_version(latest, &current));
 
+    let release_url = if matches!(channel, "docker" | "umbrel" | "hosted") {
+        state.release_url
+    } else {
+        state.latest_seen.as_deref().and_then(canonical_release_url)
+    };
     UpdateStatus {
         available,
         latest: state.latest_seen,
         current,
-        channel: crate::channel::channel().as_header_value().to_string(),
-        release_url: state.release_url,
+        channel: channel.to_string(),
+        release_url,
         update_check_enabled: state.update_check_enabled,
         last_checked_at: state.last_checked_at.map(|dt| dt.to_rfc3339()),
     }
@@ -124,14 +140,13 @@ pub(crate) async fn refresh_update_status(force: bool) -> Result<UpdateStatus, U
             Ok(response) => {
                 let crate::payments::client::LatestAppVersionResponse {
                     latest,
-                    image: _image,
                     release_url,
                     published_at,
                 } = response;
                 if parse_semver(&latest).is_some() {
                     save_successful_update_check(
                         &latest,
-                        &release_url,
+                        release_url.as_deref(),
                         published_at.as_deref(),
                         Utc::now(),
                     )
@@ -180,5 +195,53 @@ mod tests {
         assert!(is_newer_version("v0.1.5", "0.1.4"));
         assert!(!is_newer_version("0.1.5-alpha.1", "0.1.4"));
         assert!(!is_newer_version("not-a-version", "0.1.4"));
+        assert!(!is_newer_version("0.3.2+build2", "0.3.2+build1"));
+        assert!(!is_newer_version("0.3.1", "0.3.1"));
+    }
+
+    #[test]
+    fn canonical_links_require_stable_versions() {
+        for raw in ["0.3.9", "v0.3.9"] {
+            assert_eq!(
+                canonical_release_url(raw).as_deref(),
+                Some("https://github.com/BitGarth/bitgarth/releases/tag/v0.3.9")
+            );
+        }
+        for raw in [
+            "vv0.3.9",
+            "0.3.9-rc.1",
+            "../evil",
+            "https://evil.invalid/",
+            "",
+        ] {
+            assert_eq!(canonical_release_url(raw), None);
+        }
+    }
+
+    #[test]
+    fn generic_status_uses_trusted_link_and_actual_channel() {
+        let state = crate::db::AppUpdateState {
+            update_check_enabled: true,
+            last_checked_at: None,
+            latest_seen: Some("v9.9.9".to_string()),
+            release_url: Some("https://evil.invalid/".to_string()),
+            published_at: None,
+        };
+        let status = status_from_state_for_channel(state.clone(), "web");
+        assert_eq!(status.channel, "web");
+        assert!(status.available);
+        assert_eq!(
+            status.release_url.as_deref(),
+            Some("https://github.com/BitGarth/bitgarth/releases/tag/v9.9.9")
+        );
+        let invalid = status_from_state_for_channel(
+            crate::db::AppUpdateState {
+                latest_seen: Some("9.9.9-rc.1".to_string()),
+                ..state
+            },
+            "custom",
+        );
+        assert!(!invalid.available);
+        assert_eq!(invalid.release_url, None);
     }
 }

@@ -64,6 +64,7 @@ pub(crate) struct ExportAccountRow {
     pub(crate) wallet_id: WalletId,
     pub(crate) boundary_mode: ExportAccountBoundaryMode,
     pub(crate) created_at: DateTime<Utc>,
+    pub(crate) manual_admitted_at: Option<DateTime<Utc>>,
     pub(crate) commodity: ExportCommodity,
     pub(crate) native_asset_id: Option<SyncedAssetId>,
     pub(crate) native_network: Option<Network>,
@@ -380,7 +381,8 @@ pub(crate) fn load_all_accounts_for_export(
                     export_rows.manual_asset_source,
                     export_rows.manual_precision_source,
                     export_rows.manual_coingecko_platform_id,
-                    export_rows.manual_provider_platform_asset_ref
+                    export_rows.manual_provider_platform_asset_ref,
+                    export_rows.manual_admitted_at
                  FROM (
                      SELECT
                         a.id AS id,
@@ -417,7 +419,8 @@ pub(crate) fn load_all_accounts_for_export(
                         NULL AS manual_precision_source,
                         NULL AS manual_coingecko_platform_id,
                         NULL AS manual_provider_platform_asset_ref,
-                        a.created_at AS created_at
+                        a.created_at AS created_at,
+                        NULL AS manual_admitted_at
                      FROM digital_asset_accounts a
                      JOIN wallets w ON w.id = a.wallet_id
                      UNION ALL
@@ -449,7 +452,8 @@ pub(crate) fn load_all_accounts_for_export(
                         a.precision_source AS manual_precision_source,
                         a.coingecko_platform_id AS manual_coingecko_platform_id,
                         a.provider_platform_asset_ref AS manual_provider_platform_asset_ref,
-                        a.created_at AS created_at
+                        a.created_at AS created_at,
+                        a.admitted_at AS manual_admitted_at
                      FROM manual_asset_accounts a
                      JOIN wallets w ON w.id = a.wallet_id
                  ) export_rows
@@ -484,6 +488,7 @@ pub(crate) fn load_all_accounts_for_export(
                     row.get::<_, Option<String>>(19)?,
                     row.get::<_, Option<String>>(20)?,
                     row.get::<_, Option<String>>(21)?,
+                    row.get::<_, Option<String>>(22)?,
                 ))
             })
             .map_err(|err| {
@@ -515,6 +520,7 @@ pub(crate) fn load_all_accounts_for_export(
                 manual_precision_source_raw,
                 manual_coingecko_platform_id_raw,
                 manual_provider_platform_asset_ref_raw,
+                manual_admitted_at_raw,
             ) = row_result
                 .map_err(|err| DbError::new(format!("Failed to map export account row: {err}")))?;
 
@@ -551,6 +557,15 @@ pub(crate) fn load_all_accounts_for_export(
                 .map_err(|err| {
                     DbError::new(format!("Invalid export account created_at in DB: {err}"))
                 })?;
+            let manual_admitted_at = manual_admitted_at_raw
+                .map(|raw| {
+                    DateTime::parse_from_rfc3339(&raw)
+                        .map(|value| value.with_timezone(&Utc))
+                        .map_err(|err| {
+                            DbError::new(format!("Invalid manual admission in DB: {err}"))
+                        })
+                })
+                .transpose()?;
             let (
                 commodity,
                 native_asset_id,
@@ -670,6 +685,7 @@ pub(crate) fn load_all_accounts_for_export(
                 wallet_id,
                 boundary_mode,
                 created_at,
+                manual_admitted_at,
                 commodity,
                 native_asset_id,
                 native_network,
@@ -933,14 +949,15 @@ pub(crate) fn load_all_native_api_balance_assertion_rows_for_export(
                 "SELECT
                     da.account_id,
                     da.id,
-                    tss.last_completed_at,
+                    tss.api_confirmed_balance_observed_at,
                     tss.api_confirmed_balance_hi,
-                    tss.api_confirmed_balance_lo
+                    tss.api_confirmed_balance_lo,
+                    tss.last_result
                  FROM digital_asset_addresses da
-                 JOIN transaction_sync_state tss
+                 LEFT JOIN transaction_sync_state tss
                    ON tss.scope = 'address'
                   AND tss.address_id = da.id
-                 WHERE tss.last_result = 'success'
+                 WHERE da.account_id IS NOT NULL
                  ORDER BY da.account_id ASC, da.id ASC",
             )
             .map_err(|err| {
@@ -957,6 +974,7 @@ pub(crate) fn load_all_native_api_balance_assertion_rows_for_export(
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<i64>>(3)?,
                     row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                 ))
             })
             .map_err(|err| {
@@ -970,12 +988,18 @@ pub(crate) fn load_all_native_api_balance_assertion_rows_for_export(
             NativeApiBalanceAssertionAggregate,
         > = std::collections::HashMap::new();
         for row_result in rows {
-            let (account_id_raw, address_id_raw, completed_at_raw, balance_hi, balance_lo) =
-                row_result.map_err(|err| {
-                    DbError::new(format!(
-                        "Failed to map native API balance export row: {err}"
-                    ))
-                })?;
+            let (
+                account_id_raw,
+                address_id_raw,
+                observed_at_raw,
+                balance_hi,
+                balance_lo,
+                last_result,
+            ) = row_result.map_err(|err| {
+                DbError::new(format!(
+                    "Failed to map native API balance export row: {err}"
+                ))
+            })?;
             let account_id = WalletAccountId::from_str(&account_id_raw).map_err(|err| {
                 DbError::new(format!(
                     "Invalid native API balance export account_id in DB: {err}"
@@ -986,16 +1010,26 @@ pub(crate) fn load_all_native_api_balance_assertion_rows_for_export(
                 .or_insert_with(NativeApiBalanceAssertionAggregate::empty);
             entry.address_count = entry.address_count.saturating_add(1);
 
-            let (Some(completed_at_raw), Some(balance)) = (
-                completed_at_raw,
+            if entry.address_count > 1 {
+                entry.complete = false;
+                continue;
+            }
+
+            if last_result.as_deref() != Some("success") {
+                entry.complete = false;
+                continue;
+            }
+
+            let (Some(observed_at_raw), Some(balance)) = (
+                observed_at_raw,
                 parse_optional_split_amount_if_present(balance_hi, balance_lo, "api_balance")?,
             ) else {
                 entry.complete = false;
                 continue;
             };
-            let completed_at = parse_datetime(&completed_at_raw).map_err(|err| {
+            let observed_at = parse_datetime(&observed_at_raw).map_err(|err| {
                 DbError::new(format!(
-                    "Invalid native API balance export completed_at in DB: {err}"
+                    "Invalid native API balance export observed_at in DB: {err}"
                 ))
             })?;
 
@@ -1004,12 +1038,7 @@ pub(crate) fn load_all_native_api_balance_assertion_rows_for_export(
                 balance,
                 "native API balance assertion",
             )?;
-            if entry
-                .asserted_at
-                .is_none_or(|current| completed_at > current)
-            {
-                entry.asserted_at = Some(completed_at);
-            }
+            entry.asserted_at = Some(observed_at);
 
             tracing::trace!(
                 account_id = %account_id,
@@ -1021,7 +1050,7 @@ pub(crate) fn load_all_native_api_balance_assertion_rows_for_export(
         let mut result = by_account
             .into_iter()
             .filter_map(|(account_id, aggregate)| {
-                if !aggregate.complete {
+                if !aggregate.complete || aggregate.address_count != 1 {
                     return None;
                 }
                 let asserted_at = aggregate.asserted_at?;
@@ -1054,6 +1083,101 @@ mod tests {
     use crate::wallets::IdentitySource;
     use chrono::Utc;
     use rusqlite::params;
+
+    #[test]
+    fn native_api_balance_export_requires_one_address_observation() {
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        with_user_db_mut(user_id, |conn| -> Result<(), DbError> {
+            conn.execute_batch(
+                "INSERT INTO wallets
+                     (id, label, label_key, identity_source, created_at, updated_at)
+                 VALUES ('01J00000000000000000000001', 'Export Wallet', 'export wallet',
+                         'user_provided', '2026-02-20T09:00:00Z', '2026-02-20T09:00:00Z');
+                 INSERT INTO digital_asset_accounts
+                     (id, wallet_id, label, label_key, asset_id, network, account_kind, created_at, updated_at)
+                 VALUES ('01J00000000000000000000002', '01J00000000000000000000001',
+                         'HD Account', 'hd account', 'bitcoin', 'mainnet', 'hd_pubkey',
+                         '2026-02-20T09:00:00Z', '2026-02-20T09:00:00Z'),
+                        ('01J00000000000000000000003', '01J00000000000000000000001',
+                         'Single Account', 'single account', 'bitcoin', 'mainnet', 'single_address',
+                         '2026-02-20T09:00:00Z', '2026-02-20T09:00:00Z');
+                 INSERT INTO digital_asset_addresses
+                     (id, account_id, asset_id, network, address, address_normalized,
+                      address_scheme, derivation_change, derivation_index, source_type,
+                      created_at, updated_at)
+                 VALUES ('01J00000000000000000000004', '01J00000000000000000000002',
+                         'bitcoin', 'mainnet', '1BoatSLRHtKNngkdXEeobR76b53LETtpyT',
+                         '1BoatSLRHtKNngkdXEeobR76b53LETtpyT', 'legacy', 0, 0, 'derived',
+                         '2026-02-20T09:00:00Z', '2026-02-20T09:00:00Z'),
+                        ('01J00000000000000000000005', '01J00000000000000000000002',
+                         'bitcoin', 'mainnet', '1dice8EMZmqKvrGE4Qc9bUFf9PX3xaYDp',
+                         '1dice8EMZmqKvrGE4Qc9bUFf9PX3xaYDp', 'legacy', 0, 1, 'derived',
+                         '2026-02-20T09:00:00Z', '2026-02-20T09:00:00Z'),
+                        ('01J00000000000000000000006', '01J00000000000000000000003',
+                         'bitcoin', 'mainnet', '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa',
+                         '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa', 'legacy', NULL, NULL,
+                         'user_provided', '2026-02-20T09:00:00Z', '2026-02-20T09:00:00Z');
+                 INSERT INTO transaction_sync_state
+                     (id, scope, address_id, last_run_id, last_started_at, last_completed_at,
+                      last_result, new_tx_count, updated_tx_count, api_confirmed_balance_hi,
+                      api_confirmed_balance_lo, api_confirmed_balance_observed_at,
+                      created_at, updated_at)
+                 VALUES ('01J00000000000000000000007', 'address',
+                         '01J00000000000000000000004', 'run-1', '2026-02-20T10:00:00Z',
+                         '2026-02-20T10:00:00Z', 'success', 0, 0, 0, 11,
+                         '2026-02-20T10:00:00Z', '2026-02-20T10:00:00Z', '2026-02-20T10:00:00Z'),
+                        ('01J00000000000000000000008', 'address',
+                         '01J00000000000000000000005', 'run-2', '2026-02-20T11:00:00Z',
+                         '2026-02-20T11:00:00Z', 'success', 0, 0, 0, 13,
+                         '2026-02-20T11:00:00Z', '2026-02-20T11:00:00Z', '2026-02-20T11:00:00Z'),
+                        ('01J00000000000000000000009', 'address',
+                         '01J00000000000000000000006', 'run-3', '2026-02-20T12:00:00Z',
+                         '2026-02-20T12:00:00Z', 'success', 0, 0, 0, 7,
+                         '2026-02-20T12:00:00Z', '2026-02-20T12:00:00Z', '2026-02-20T12:00:00Z');",
+            )
+            .map_err(|err| DbError::new(format!("API balance export fixture failed: {err}")))
+        })
+        .expect("fixture should persist");
+
+        let rows = load_all_native_api_balance_assertion_rows_for_export(user_id)
+            .expect("assertions should load");
+        assert_eq!(rows.len(), 1, "multi-address snapshots are not coherent");
+        assert_eq!(rows[0].account_id.to_string(), "01J00000000000000000000003");
+        assert_eq!(rows[0].asserted_on.to_string(), "2026-02-20");
+        assert_eq!(rows[0].asserted_balance.value(), 7);
+
+        with_user_db_mut(user_id, |conn| -> Result<(), DbError> {
+            conn.execute(
+                "UPDATE transaction_sync_state
+                 SET api_confirmed_balance_observed_at = '2026-02-21T11:00:00Z'
+                 WHERE address_id = '01J00000000000000000000005'",
+                [],
+            )
+            .map(|_| ())
+            .map_err(|err| DbError::new(format!("second observation update failed: {err}")))
+        })
+        .expect("second observation should move to another UTC date");
+        let rows = load_all_native_api_balance_assertion_rows_for_export(user_id)
+            .expect("assertions should reload");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].account_id.to_string(), "01J00000000000000000000003");
+
+        with_user_db_mut(user_id, |conn| -> Result<(), DbError> {
+            conn.execute(
+                "DELETE FROM transaction_sync_state
+                 WHERE address_id = '01J00000000000000000000005'",
+                [],
+            )
+            .map(|_| ())
+            .map_err(|err| DbError::new(format!("second observation delete failed: {err}")))
+        })
+        .expect("second address should remain without a sync state");
+        let rows = load_all_native_api_balance_assertion_rows_for_export(user_id)
+            .expect("assertions should reload with an unsynced address");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].account_id.to_string(), "01J00000000000000000000003");
+    }
 
     #[test]
     fn export_accounts_load_native_asset_and_network_context() {

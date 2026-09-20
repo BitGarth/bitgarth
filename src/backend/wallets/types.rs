@@ -146,30 +146,12 @@ pub(crate) struct AccountTransactionCountsView {
     pub(crate) total: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct NativeAccountSyncSlotView {
-    pub(crate) selected: bool,
-    pub(crate) active: bool,
-    pub(crate) can_select: bool,
-    pub(crate) limit: u16,
-    pub(crate) selected_at: Option<String>,
-    pub(crate) selected_under_tier: Option<String>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ManualSyncMode {
     TransactionHistory,
     BalanceRefresh,
     Unavailable,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ManualSyncSlotEffect {
-    AlreadySelected,
-    WillSelectAvailableSlot,
-    NoCapacity,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,10 +164,7 @@ pub(crate) enum ManualSyncDisabledReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct NativeAccountManualSyncView {
     pub(crate) mode: ManualSyncMode,
-    pub(crate) slot_effect: ManualSyncSlotEffect,
     pub(crate) disabled_reason: Option<ManualSyncDisabledReason>,
-    pub(crate) used_slots: u16,
-    pub(crate) slot_limit: u16,
     pub(crate) next_tier_display_name: Option<String>,
 }
 
@@ -213,7 +192,7 @@ pub(crate) struct NativeAccountView {
     pub(crate) balance: WalletBalanceView,
     pub(crate) transaction_counts: AccountTransactionCountsView,
     pub(crate) has_derived_addresses: bool,
-    pub(crate) sync_slot: NativeAccountSyncSlotView,
+    pub(crate) account_mode: crate::account_mode::NativeAccountMode,
     pub(crate) manual_sync: NativeAccountManualSyncView,
     #[serde(default, skip_serializing)]
     pub(crate) addresses: AddressesView,

@@ -369,9 +369,19 @@ fn product_options_response(tiers: Vec<Value>) -> Value {
     })
 }
 
+fn free_tier_json(accounts: u16) -> Value {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/payments/v4-product-options.json"
+    ))
+    .expect("Central v4 fixture");
+    let mut free = fixture["tiers"][0].clone();
+    free["capabilities"]["limits"]["accounts"]["balance_sync"] = json!(accounts);
+    free
+}
+
 fn product_options_response_with_free_accounts(accounts: u16) -> Value {
     product_options_response(vec![
-        tier_json("free", "Free", accounts, 0, Vec::new()),
+        free_tier_json(accounts),
         tier_json("basic", "Basic", 10, 10000, Vec::new()),
         tier_json(
             "premium",
@@ -402,7 +412,7 @@ fn product_options_response_with_upgrade_required(mut response: Value) -> Value 
 
 fn default_product_options_response() -> Value {
     let mut response = product_options_response(vec![
-        tier_json("free", "Free", 50, 0, Vec::new()),
+        free_tier_json(50),
         tier_json("basic", "Basic", 10, 10000, Vec::new()),
         tier_json(
             "premium",
@@ -860,13 +870,13 @@ fn assert_free_entitlement_state(state: &PaymentStateView) {
         .capabilities
         .limits
         .accounts
-        .total;
+        .balance_sync;
 
     assert_eq!(state.tier, "free");
     assert_eq!(state.tier_display_name, "Free");
     assert_eq!(state.sync_account_slots_limit, expected_free_account_limit);
-    assert!(!state.historical_backfill_enabled);
-    assert_eq!(state.historical_backfill_transactions_per_account, 0);
+    assert!(state.historical_backfill_enabled);
+    assert_eq!(state.historical_backfill_transactions_per_account, 1000);
     assert!(state.paid_through.is_none());
 }
 
@@ -967,7 +977,7 @@ async fn wait_for_free_tier_cache_accounts(expected: u16) {
     loop {
         if let Some(cached) =
             crate::db::load_free_tier_entitlement_cache().expect("free tier cache should load")
-            && cached.capabilities.limits.accounts.total == expected
+            && cached.capabilities.limits.accounts.balance_sync == expected
         {
             return;
         }
@@ -1311,7 +1321,7 @@ async fn payment_catalog_fetch_updates_free_tier_cache() {
     let cached = crate::db::load_free_tier_entitlement_cache()
         .expect("cache load should succeed")
         .expect("cache should be populated");
-    assert_eq!(cached.capabilities.limits.accounts.total, 20);
+    assert_eq!(cached.capabilities.limits.accounts.balance_sync, 20);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1332,7 +1342,7 @@ async fn product_options_upgrade_required_still_updates_free_tier_cache() {
     let cached = crate::db::load_free_tier_entitlement_cache()
         .expect("cache load should succeed")
         .expect("cache should be populated");
-    assert_eq!(cached.capabilities.limits.accounts.total, 20);
+    assert_eq!(cached.capabilities.limits.accounts.balance_sync, 20);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1354,7 +1364,7 @@ async fn start_premium_order_updates_free_tier_cache() {
     let cached = crate::db::load_free_tier_entitlement_cache()
         .expect("cache load should succeed")
         .expect("cache should be populated");
-    assert_eq!(cached.capabilities.limits.accounts.total, 21);
+    assert_eq!(cached.capabilities.limits.accounts.balance_sync, 21);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1506,6 +1516,26 @@ async fn payment_page_returns_compatibility_when_options_are_loaded() {
     assert_eq!(
         page.app_compatibility.expect("compatibility").detail,
         "Install a newer build."
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn payment_catalog_426_builds_upgrade_view_before_tier_parsing() {
+    let server = setup_test_server();
+    let _key_guard = set_signing_public_key_override_for_test(TEST_PUBLIC_KEY_B64);
+    let mock = MockCentral::start(expected_signing_key_hash().expect("hash should derive")).await;
+    mock.reject_signing_key();
+    let _central_guard = central_guard(&mock);
+    let _user_id = registered_user_id(&server).await;
+
+    let response = server.get("/_app/user/payments/catalog").await;
+    response.assert_status_ok();
+    let page: crate::payments::views::PaymentCatalogView = response.json();
+    assert!(page.tiers.is_empty());
+    assert!(page.options.is_empty());
+    assert_eq!(
+        page.app_compatibility.expect("upgrade view").status,
+        crate::payments::views::AppCompatibilityStatusView::UpgradeRequired
     );
 }
 

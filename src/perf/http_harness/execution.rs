@@ -700,16 +700,17 @@ fn validate_large_wallets_dataset(
             counts.account_count
         )));
     }
-    if manifest.address_count != Some(counts.account_count) {
+    if manifest.address_count != Some(counts.native_account_count) {
         return Err(PerfError::HttpClient(format!(
             "wallets-large-read expected {} addresses but observed {}",
             manifest.address_count.unwrap_or_default(),
-            counts.account_count
+            counts.native_account_count
         )));
     }
     Ok(vec![
         format!("wallet_count={}", counts.wallet_count),
         format!("account_count={}", counts.account_count),
+        format!("native_account_count={}", counts.native_account_count),
     ])
 }
 

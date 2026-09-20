@@ -412,6 +412,8 @@ pub(crate) fn persist_mempool_address_observation_success(
                      reported_tx_count = ?4,
                      api_confirmed_balance_hi = ?5,
                      api_confirmed_balance_lo = ?6,
+                     api_confirmed_balance_observed_at = CASE
+                         WHEN ?5 IS NULL THEN NULL ELSE ?1 END,
                      consecutive_failure_count = 0,
                      updated_at = ?1
                  WHERE scope = ?7
@@ -452,10 +454,13 @@ fn insert_address_sync_completion(
         .map(split_api_confirmed_balance)
         .transpose()?
         .map_or((None, None), |(hi, lo)| (Some(hi), Some(lo)));
+    let balance_observed_at = completion
+        .api_confirmed_balance
+        .map(|_| completed_at.as_str());
     conn.execute(
         "INSERT INTO transaction_sync_state
-         (id, scope, address_id, last_run_id, last_started_at, last_completed_at, last_result, last_error, last_tip_height, new_tx_count, updated_tx_count, api_confirmed_balance_hi, api_confirmed_balance_lo, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+         (id, scope, address_id, last_run_id, last_started_at, last_completed_at, last_result, last_error, last_tip_height, new_tx_count, updated_tx_count, api_confirmed_balance_hi, api_confirmed_balance_lo, api_confirmed_balance_observed_at, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             Ulid::new().to_string(),
             super::ADDRESS_SYNC_SCOPE,
@@ -470,6 +475,7 @@ fn insert_address_sync_completion(
             i64::from(completion.updated_tx_count.value()),
             balance_hi,
             balance_lo,
+            balance_observed_at,
             started_at,
             completed_at,
         ],
@@ -505,6 +511,8 @@ pub(crate) fn mark_address_sync_completed_success(
                      updated_tx_count = ?8,
                      api_confirmed_balance_hi = COALESCE(?9, api_confirmed_balance_hi),
                      api_confirmed_balance_lo = COALESCE(?10, api_confirmed_balance_lo),
+                     api_confirmed_balance_observed_at = CASE
+                         WHEN ?9 IS NOT NULL THEN ?3 ELSE api_confirmed_balance_observed_at END,
                      consecutive_failure_count = 0,
                      updated_at = ?11
                  WHERE scope = ?12
@@ -1073,6 +1081,37 @@ pub(crate) fn update_address_etherscan_backfill_cursor(
             ));
         }
 
+        Ok(())
+    })
+}
+
+pub(crate) fn commit_etherscan_transaction_tip(
+    user_id: UserId,
+    address_id: DigitalAssetAddressId,
+    tip: ChainTipHeight,
+) -> Result<(), DbError> {
+    with_user_db_mut(user_id, |conn| {
+        let changed = conn
+            .execute(
+                "UPDATE transaction_sync_state
+                 SET etherscan_transaction_tip_height = ?1,
+                     updated_at = ?2
+                 WHERE scope = ?3 AND address_id = ?4",
+                params![
+                    tip.value(),
+                    Utc::now().to_rfc3339(),
+                    super::ADDRESS_SYNC_SCOPE,
+                    address_id.to_string(),
+                ],
+            )
+            .map_err(|err| {
+                DbError::new(format!("Failed to commit etherscan transaction tip: {err}"))
+            })?;
+        if changed == 0 {
+            return Err(DbError::new(
+                "Failed to commit etherscan transaction tip: sync state row missing",
+            ));
+        }
         Ok(())
     })
 }

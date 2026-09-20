@@ -76,6 +76,7 @@ pub(crate) struct ManualAssetAccountRow {
     pub precision_source: String,
     pub coingecko_platform_id: Option<String>,
     pub provider_platform_asset_ref: Option<String>,
+    pub admitted_at: chrono::DateTime<chrono::Utc>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -503,7 +504,7 @@ fn load_manual_asset_accounts_batched(
             "SELECT id, wallet_id, label, asset_id, network_id, unit_code, decimal_precision,
                     symbol, asset_name, network_name, coingecko_id, asset_source,
                     precision_source, coingecko_platform_id, provider_platform_asset_ref,
-                    created_at, updated_at
+                    created_at, updated_at, admitted_at
              FROM manual_asset_accounts
              ORDER BY created_at",
         )
@@ -528,6 +529,7 @@ fn load_manual_asset_accounts_batched(
                 row.get::<_, Option<String>>(14)?,
                 row.get::<_, String>(15)?,
                 row.get::<_, String>(16)?,
+                row.get::<_, Option<String>>(17)?,
             ))
         })
         .map_err(|e| DbError::new(format!("Failed to query manual asset accounts: {e}")))?;
@@ -551,6 +553,7 @@ fn load_manual_asset_accounts_batched(
             provider_platform_asset_ref,
             created_at_raw,
             updated_at_raw,
+            admitted_at_raw,
         ) = row_result
             .map_err(|e| DbError::new(format!("Failed to read manual asset account row: {e}")))?;
 
@@ -580,6 +583,10 @@ fn load_manual_asset_accounts_batched(
             .map_err(|e| DbError::new(format!("Invalid manual asset created_at in DB: {e}")))?;
         let updated_at = parse_datetime(&updated_at_raw)
             .map_err(|e| DbError::new(format!("Invalid manual asset updated_at in DB: {e}")))?;
+        let admitted_at_raw = admitted_at_raw
+            .ok_or_else(|| DbError::new("Missing manual asset admitted_at in DB"))?;
+        let admitted_at = parse_datetime(&admitted_at_raw)
+            .map_err(|e| DbError::new(format!("Invalid manual asset admitted_at in DB: {e}")))?;
 
         Ok(ManualAssetAccountRow {
             account_id,
@@ -597,6 +604,7 @@ fn load_manual_asset_accounts_batched(
             precision_source,
             coingecko_platform_id,
             provider_platform_asset_ref,
+            admitted_at,
             created_at,
             updated_at,
         })
@@ -831,9 +839,9 @@ mod tests {
                  (id, wallet_id, label, label_key, asset_id, network_id, decimal_precision,
                   unit_code, symbol, asset_name, network_name, coingecko_id, asset_source,
                   precision_source, coingecko_platform_id, provider_platform_asset_ref,
-                  created_at, updated_at) \
+                  created_at, updated_at, admitted_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, 6, ?7, NULL, ?8, ?9, ?10,
-                         'bitgarth_catalog', 'bitgarth_catalog', NULL, NULL, ?11, ?12)",
+                         'bitgarth_catalog', 'bitgarth_catalog', NULL, NULL, ?11, ?12, ?13)",
                 rusqlite::params![
                     account_id.to_string(),
                     wallet_id.to_string(),
@@ -847,6 +855,7 @@ mod tests {
                     fixture.coingecko_id,
                     &timestamp,
                     &timestamp,
+                    crate::db::account_admission::format_admission_timestamp(now),
                 ],
             )
             .map_err(|e| DbError::new(format!("Failed to insert manual asset account: {e}")))?;
@@ -946,6 +955,23 @@ mod tests {
         let manual_ada = manual_ada.unwrap();
         assert_eq!(manual_ada.unit_code.as_str(), "ADA");
         assert_eq!(manual_ada.decimal_precision.as_u8(), 6);
+    }
+
+    #[test]
+    fn wallet_loader_rejects_manual_asset_without_admission_timestamp() {
+        let (user_id, _) = setup_user_with_wallet_manual_ada();
+        with_user_db_mut(user_id, |conn| -> Result<(), DbError> {
+            conn.execute("UPDATE manual_asset_accounts SET admitted_at = NULL", [])
+                .map_err(|err| DbError::new(format!("failed to clear admission: {err}")))?;
+            Ok(())
+        })
+        .expect("fixture admission should clear");
+
+        let err = load_wallet_summary_bundle(user_id).expect_err("missing admission should fail");
+        assert!(
+            err.to_string()
+                .contains("Missing manual asset admitted_at in DB")
+        );
     }
 
     #[test]

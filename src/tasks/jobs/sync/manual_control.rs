@@ -4,7 +4,6 @@ use crate::db::{
     SyncAddress, cleanup_raw_sync_history_with_compaction, refresh_account_integration_sync_state,
 };
 use crate::models::SyncHistoryRetentionDays;
-use crate::payments::types::EntitlementTier;
 use crate::transactions::{
     RateLimitedIntegration, SyncErrorMessage, SyncIntegrationId, TransactionCount,
     TransactionSyncRunId,
@@ -27,8 +26,8 @@ use super::executor::{
     AddressSyncExecutor, LiveAddressSyncExecutor, recover_interrupted_mempool_account,
 };
 use super::gate::{
-    MempoolHistoryPolicy, SyncSingleAddressControlRequest, integration_for_asset,
-    load_account_transaction_count_for_history_policy, sync_single_address_with_controls,
+    SyncSingleAddressControlRequest, TransactionFetchPolicy, integration_for_asset,
+    load_account_transaction_count_for_fetch_policy, sync_single_address_with_controls,
 };
 use super::integrations::unfinished_backfill_state;
 use super::planner::{SyncPlannerInput, pick_next_address_index};
@@ -99,24 +98,25 @@ fn run_manual_sync_control_with_executor(
     let bitcoin_history_repair_account_ids = HashSet::new();
     let mut stopped_early = false;
     let mut error_message = None::<String>;
-    let mempool_history_policy = MempoolHistoryPolicy::normal(
+    let transaction_fetch_policy = TransactionFetchPolicy::normal(
         historical_backfill_enabled,
         TransactionCount::from_u32(historical_backfill_transactions_per_account),
     );
 
     for _ in 0..iteration_budget {
         let mut accumulator = CycleAccumulator::new(1);
-        let account_transaction_count = load_account_transaction_count_for_history_policy(
+        let account_transaction_count = load_account_transaction_count_for_fetch_policy(
             run.user_id,
             native_account_id,
-            mempool_history_policy,
+            transaction_fetch_policy,
         )?;
         let account_transaction_counts =
             HashMap::from([(native_account_id, account_transaction_count)]);
         let run_excluded_address_ids = HashSet::new();
         let planner_input = SyncPlannerInput {
             now_utc: run.clock.utc_now(),
-            mempool_history_policy,
+            transaction_fetch_policy,
+            native_account_modes: None,
             account_transaction_counts: &account_transaction_counts,
             pending_address_ids: &pending_address_ids,
             known_activity_address_ids: &known_activity_address_ids,
@@ -179,7 +179,7 @@ fn run_manual_sync_control_with_executor(
                 accumulator: &mut accumulator,
                 processed_for_account: &mut processed_for_account,
                 single_address_progress,
-                mempool_history_policy,
+                transaction_fetch_policy,
                 mempool_history_page_frontier: None,
             })?;
         let delta = super::cycle::CycleAccumulatorSnapshot::from_accumulator(&accumulator);
@@ -305,12 +305,12 @@ pub(crate) fn run_manual_sync_control(
     let clock = SystemSyncClock;
     let now_utc = clock.utc_now();
     let entitlements = crate::payments::entitlements::load_feature_entitlements(user_id, now_utc)?;
-    let active_accounts = crate::db::account_limits::sync_eligible_native_account_ids_for_user(
-        user_id,
-        usize::from(entitlements.sync_account_slots_limit),
-        entitlements.tier == EntitlementTier::Free,
-    )?;
-    let addresses = if active_accounts.contains(&native_account_id) {
+    let modes = crate::db::account_limits::native_account_modes_for_user(user_id, &entitlements)?;
+    let mode = modes
+        .get(&native_account_id)
+        .copied()
+        .unwrap_or(crate::account_limits::NativeAccountMode::Inactive);
+    let addresses = if mode != crate::account_limits::NativeAccountMode::Inactive {
         get_sync_addresses_for_account(user_id, native_account_id)?
     } else {
         Vec::new()
@@ -355,7 +355,8 @@ pub(crate) fn run_manual_sync_control(
         known_activity_address_ids,
         clients,
         executor: &mut executor,
-        historical_backfill_enabled: entitlements.historical_backfill_enabled,
+        historical_backfill_enabled: entitlements.historical_backfill_enabled
+            && mode == crate::account_limits::NativeAccountMode::Transactions,
         historical_backfill_transactions_per_account: entitlements
             .historical_backfill_transactions_per_account,
     });
@@ -527,7 +528,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "server")]
-    fn mempool_history_policy_manual_uses_canonical_count_for_history_cap() {
+    fn transaction_fetch_policy_manual_uses_canonical_count_for_history_cap() {
         for (canonical_count, cap, expected_history_enabled) in [
             (0_u32, 1_u32, true),
             (1_u32, 1_u32, false),
@@ -575,7 +576,7 @@ mod tests {
                 .expect("manual sync should finish");
 
                 assert_eq!(
-                    executor.historical_backfill_enabled_calls,
+                    executor.transaction_page_permitted_calls,
                     vec![expected_history_enabled]
                 );
             });

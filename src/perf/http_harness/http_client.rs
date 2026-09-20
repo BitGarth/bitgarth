@@ -19,6 +19,7 @@ pub(super) struct PerfSession {
 pub(super) struct WalletReadCounts {
     pub(super) wallet_count: u32,
     pub(super) account_count: u32,
+    pub(super) native_account_count: u32,
 }
 
 pub(super) fn build_perf_client(user_id: UserId) -> Result<TracedBlockingClient, PerfError> {
@@ -251,17 +252,31 @@ pub(super) fn fetch_wallet_counts(session: &PerfSession) -> Result<WalletReadCou
     })?;
     let wallet_count = u32::try_from(wallet_entries.len())
         .map_err(|_| PerfError::Json("wallet count exceeded u32".to_string()))?;
-    let account_count = wallet_entries.iter().try_fold(0_u32, |total, wallet| {
-        let accounts = wallet["accounts"].as_array().ok_or_else(|| {
-            PerfError::Json("wallet entry did not contain an accounts array".to_string())
-        })?;
-        let count = u32::try_from(accounts.len())
-            .map_err(|_| PerfError::Json("account count exceeded u32".to_string()))?;
-        Ok::<u32, PerfError>(total.saturating_add(count))
-    })?;
+    let (account_count, native_account_count) =
+        wallet_entries
+            .iter()
+            .try_fold((0_u32, 0_u32), |(total, native_total), wallet| {
+                let accounts = wallet["accounts"].as_array().ok_or_else(|| {
+                    PerfError::Json("wallet entry did not contain an accounts array".to_string())
+                })?;
+                let count = u32::try_from(accounts.len())
+                    .map_err(|_| PerfError::Json("account count exceeded u32".to_string()))?;
+                let native_count = u32::try_from(
+                    accounts
+                        .iter()
+                        .filter(|account| account["kind"] == "native")
+                        .count(),
+                )
+                .map_err(|_| PerfError::Json("native account count exceeded u32".to_string()))?;
+                Ok::<_, PerfError>((
+                    total.saturating_add(count),
+                    native_total.saturating_add(native_count),
+                ))
+            })?;
     Ok(WalletReadCounts {
         wallet_count,
         account_count,
+        native_account_count,
     })
 }
 

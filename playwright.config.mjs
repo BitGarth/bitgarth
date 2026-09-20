@@ -67,7 +67,7 @@ const webServerCommand = [
   "BGTRACES=fs",
   `BITGARTH_PROJECT_DIR=${shellQuote(e2eProjectDir)}`,
   `BITGARTH_CENTRAL_BASE_URL=http://127.0.0.1:${MOCK_CENTRAL_PORT}`,
-  "BITGARTH_CHANNEL=docker",
+  `BITGARTH_CHANNEL=${shellQuote(process.env.BITGARTH_E2E_CHANNEL ?? "docker")}`,
   "BITGARTH_PAYMENT_SIGNING_PUBLIC_KEY_B64=O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik",
   "BITGARTH_INSTANCE_NOTICE_INFO=" +
     shellQuote(

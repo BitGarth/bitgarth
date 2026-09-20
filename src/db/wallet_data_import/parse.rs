@@ -21,6 +21,7 @@ const WALLET_DATA_VERSION_V2: u16 = 2;
 const WALLET_DATA_VERSION_V3: u16 = 3;
 const WALLET_DATA_VERSION_V4: u16 = 4;
 const WALLET_DATA_VERSION_V5: u16 = 5;
+const WALLET_DATA_VERSION_V6: u16 = 6;
 
 fn supported_wallet_data_version(version: u16) -> bool {
     matches!(
@@ -30,6 +31,7 @@ fn supported_wallet_data_version(version: u16) -> bool {
             | WALLET_DATA_VERSION_V3
             | WALLET_DATA_VERSION_V4
             | WALLET_DATA_VERSION_V5
+            | WALLET_DATA_VERSION_V6
     )
 }
 
@@ -103,7 +105,8 @@ struct WalletDataImportDigitalAssetAccount {
 #[serde(deny_unknown_fields)]
 pub(super) struct WalletDataImportSyncSlot {
     pub(super) selected_at: DateTime<Utc>,
-    pub(super) selected_under_tier: EntitlementTier,
+    #[serde(rename = "selected_under_tier")]
+    _selected_under_tier: EntitlementTier,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,6 +149,8 @@ struct WalletDataImportManualAssetAccount {
     asset_instance_id: ManualAssetInstanceIdView,
     #[serde(default)]
     created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    admitted_at: Option<DateTime<Utc>>,
     unit_code: Option<String>,
     decimal_precision: Option<u8>,
     symbol: Option<String>,
@@ -226,6 +231,7 @@ pub(super) struct ParsedImportedBalanceAssertion {
 pub(super) struct ParsedImportedManualAccount {
     pub(super) label: Label,
     pub(super) created_at: Option<DateTime<Utc>>,
+    pub(super) admitted_at: Option<DateTime<Utc>>,
     pub(super) snapshot: ParsedImportedManualAssetSnapshot,
     pub(super) assertions: Vec<ParsedImportedBalanceAssertion>,
 }
@@ -267,7 +273,7 @@ pub(super) fn parse_payload(
         )
     })?;
 
-    if header.version > WALLET_DATA_VERSION_V5 {
+    if header.version > WALLET_DATA_VERSION_V6 {
         return Err(WalletDataImportDbError::Validation(
             super::NEWER_VERSION_MESSAGE.to_string(),
         ));
@@ -285,7 +291,7 @@ pub(super) fn parse_payload(
         ))
     })?;
 
-    if payload.version > WALLET_DATA_VERSION_V5 {
+    if payload.version > WALLET_DATA_VERSION_V6 {
         return Err(WalletDataImportDbError::Validation(
             super::NEWER_VERSION_MESSAGE.to_string(),
         ));
@@ -874,6 +880,7 @@ fn parse_imported_structured_manual_account(
         } else {
             None
         },
+        admitted_at: account.admitted_at,
         snapshot,
         assertions,
     })

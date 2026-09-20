@@ -32,6 +32,7 @@ pub(crate) struct SyncAddress {
     pub(crate) last_completed_at: Option<DateTime<Utc>>,
     pub(crate) last_result: Option<TransactionSyncResult>,
     pub(crate) last_tip_height: Option<ChainTipHeight>,
+    pub(crate) etherscan_transaction_tip_height: Option<ChainTipHeight>,
     pub(crate) mempool_backfill_cursor_txid: Option<MempoolCursorTxid>,
     pub(crate) mempool_expected_tx_count: Option<TransactionCount>,
     pub(crate) mempool_history_proof: Option<MempoolHistoryProof>,
@@ -294,7 +295,7 @@ pub(crate) struct AddressSyncSuccess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AddressApiConfirmedBalanceRow {
     pub(crate) address_id: DigitalAssetAddressId,
-    pub(crate) last_completed_at: Option<DateTime<Utc>>,
+    pub(crate) observed_at: Option<DateTime<Utc>>,
     pub(crate) api_confirmed_balance: Option<ApiConfirmedBalance>,
 }
 

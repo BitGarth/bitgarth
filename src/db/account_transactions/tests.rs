@@ -27,11 +27,11 @@ use crate::transactions::{
     ChainTipHeight, MempoolCursorTxid, SyncIntegrationId, TrackedAddress, TransactionCount,
     TransactionSyncRunId, TxHash,
 };
-use crate::wallets::{SyncedAssetId, DigitalAssetAccountId, Network, TransactionFilters};
 #[cfg(feature = "server")]
 use crate::wallets::{
     BtcAddress, Label, RawBtcAddress, TransactionSortDirection, WALLET_LABEL_MAX_LENGTH,
 };
+use crate::wallets::{DigitalAssetAccountId, Network, SyncedAssetId, TransactionFilters};
 use chrono::{DateTime, NaiveDate, Utc};
 #[cfg(feature = "server")]
 use rusqlite::params;
@@ -78,7 +78,7 @@ fn api_balance_row(
 ) -> crate::db::transaction_sync::AddressApiConfirmedBalanceRow {
     crate::db::transaction_sync::AddressApiConfirmedBalanceRow {
         address_id,
-        last_completed_at: None,
+        observed_at: None,
         api_confirmed_balance,
     }
 }
@@ -824,7 +824,8 @@ fn parse_wallet_label(value: &str) -> Label {
 
 #[cfg(feature = "server")]
 #[test]
-fn load_account_transactions_pages_uses_address_success_date_when_completed_account_retains_cursor() {
+fn load_account_transactions_pages_uses_address_success_date_when_completed_account_retains_cursor()
+{
     let _runtime = acquire_test_runtime().expect("test runtime should initialize");
     let user_id = UserId::new();
     initialize_user_db_for_test(user_id).expect("user db should initialize");
@@ -941,7 +942,10 @@ fn load_account_transactions_pages_uses_address_success_date_when_completed_acco
     .expect("account integration state should load");
     assert_eq!(
         persisted_row,
-        (Some(address_completed.to_rfc3339()), Some("success".to_string()))
+        (
+            Some(address_completed.to_rfc3339()),
+            Some("success".to_string())
+        )
     );
 
     let pages = page_query::load_account_transactions_pages(
@@ -1002,6 +1006,7 @@ fn resolve_native_balance_at_boundary_returns_known_amount_for_partial_backfill_
                 last_successful_sync_date: Some(last_successful_sync_date),
                 balance_reliability: BalanceReliability::finalized(),
                 bitcoin_history_coverage: None,
+                bitcoin_history_observed_tip: None,
             },
         )
     })
@@ -1039,6 +1044,7 @@ fn resolve_native_balance_at_boundary_returns_known_amount_for_from_inside_histo
                 last_successful_sync_date: Some(last_successful_sync_date),
                 balance_reliability: BalanceReliability::finalized(),
                 bitcoin_history_coverage: None,
+                bitcoin_history_observed_tip: None,
             },
         )
     })
@@ -1076,6 +1082,7 @@ fn resolve_native_balance_at_boundary_returns_synthetic_opening_for_early_from()
                 last_successful_sync_date: Some(last_successful_sync_date),
                 balance_reliability: BalanceReliability::finalized(),
                 bitcoin_history_coverage: None,
+                bitcoin_history_observed_tip: None,
             },
         )
     })
@@ -1113,6 +1120,7 @@ fn resolve_native_balance_at_boundary_returns_unknown_for_early_to() {
                 last_successful_sync_date: Some(last_successful_sync_date),
                 balance_reliability: BalanceReliability::finalized(),
                 bitcoin_history_coverage: None,
+                bitcoin_history_observed_tip: None,
             },
         )
     })
@@ -1158,6 +1166,7 @@ fn resolve_native_balance_at_boundary_preserves_account_model_zero_behavior() {
                 last_successful_sync_date: None,
                 balance_reliability: BalanceReliability::finalized(),
                 bitcoin_history_coverage: None,
+                bitcoin_history_observed_tip: None,
             },
         )
     })

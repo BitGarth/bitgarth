@@ -140,6 +140,8 @@ pub(crate) struct SyncRunPreload {
     pub(crate) known_activity_address_ids: HashSet<DigitalAssetAddressId>,
     pub(crate) pending_address_ids: HashSet<DigitalAssetAddressId>,
     pub(crate) bitcoin_history_repair_account_ids: HashSet<DigitalAssetAccountId>,
+    pub(crate) native_account_modes:
+        Option<HashMap<DigitalAssetAccountId, crate::account_limits::NativeAccountMode>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,7 +232,7 @@ pub(crate) struct IntegrationIterationContext<'a> {
     pub(crate) raw_sync_run_id: SyncRunId,
     pub(crate) source_connection_id: &'a SourceConnectionId,
     pub(crate) is_backfill_active: bool,
-    pub(crate) historical_backfill_enabled: bool,
+    pub(crate) transaction_page_permitted: bool,
     pub(crate) legacy_mempool_history_repair: bool,
     pub(crate) mempool_history_page_frontier: Option<crate::db::HdMempoolHistoryFrontierUpdate>,
 }

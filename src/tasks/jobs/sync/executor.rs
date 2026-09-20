@@ -32,7 +32,7 @@ pub(super) struct AddressSyncExecutionRequest<'a> {
     pub(super) clients: SyncClients<'a>,
     pub(super) single_address_progress: Option<SingleAddressProgressPlan>,
     pub(super) allow_known_confirmed_early_exit: bool,
-    pub(super) historical_backfill_enabled: bool,
+    pub(super) transaction_page_permitted: bool,
     pub(super) legacy_mempool_history_repair: bool,
     pub(super) mempool_history_page_frontier: Option<crate::db::HdMempoolHistoryFrontierUpdate>,
 }
@@ -240,7 +240,7 @@ impl AddressSyncExecutor for LiveAddressSyncExecutor {
                     raw_sync_run_id: raw_sync_run.sync_run_id,
                     source_connection_id: &raw_sync_run.source_connection_id,
                     is_backfill_active: sync_plan.is_backfill_active,
-                    historical_backfill_enabled: request.historical_backfill_enabled,
+                    transaction_page_permitted: request.transaction_page_permitted,
                     legacy_mempool_history_repair: request.legacy_mempool_history_repair,
                     mempool_history_page_frontier: request.mempool_history_page_frontier,
                 })
@@ -426,7 +426,7 @@ mod tests {
             },
             single_address_progress: None,
             allow_known_confirmed_early_exit: false,
-            historical_backfill_enabled: true,
+            transaction_page_permitted: true,
             legacy_mempool_history_repair: false,
             mempool_history_page_frontier: None,
         });

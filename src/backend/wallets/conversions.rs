@@ -8,11 +8,10 @@ use crate::account_limits::{
 use crate::amounts::{UnsignedAmount, format_unsigned_amount};
 use crate::asset_capabilities::{asset_instance, synced_asset_instance, synced_asset_instance_id};
 use crate::balance_reliability::{BalanceProvisionalReason, BalanceReliability};
-use crate::db::{
-    AccountSyncSlotRecord, ManualAssetAccountRow, ManualAssetBalanceState, WalletReportBalanceState,
-};
+use crate::db::{ManualAssetAccountRow, ManualAssetBalanceState, WalletReportBalanceState};
 use crate::payments::types::EntitlementTier;
-use crate::transactions::{AddressBalanceSummary, NativeBalanceState};
+use crate::tasks::TransactionFetchPolicy;
+use crate::transactions::{AddressBalanceSummary, NativeBalanceState, TransactionCount};
 use crate::wallets::WalletAccountId;
 
 #[cfg(test)]
@@ -25,10 +24,9 @@ use super::types::{
     AccountBalanceStateView, AccountLimitView, AccountReferenceKind, AccountStateView,
     AccountTransactionCountsView, AccountTransactionView, AccountView, AddressView, AddressesView,
     BalanceAmountView, ManualAssetAccountView, ManualSyncDisabledReason, ManualSyncMode,
-    ManualSyncSlotEffect, NativeAccountManualSyncView, NativeAccountSyncSlotView,
-    NativeAccountView, SyncedAccountCapacityView, WalletAggregateBalanceView,
-    WalletBalanceContextView, WalletBalanceView, WalletError, WalletReportAccountRow,
-    WalletReportBalanceStateView, WalletView,
+    NativeAccountManualSyncView, NativeAccountView, SyncedAccountCapacityView,
+    WalletAggregateBalanceView, WalletBalanceContextView, WalletBalanceView, WalletError,
+    WalletReportAccountRow, WalletReportBalanceStateView, WalletView,
 };
 
 // ============ Conversion Functions ============
@@ -202,34 +200,6 @@ pub(super) fn zero_balance_summary(
     ))
 }
 
-pub(crate) fn native_account_sync_slot_view(
-    account_id: crate::wallets::DigitalAssetAccountId,
-    sync_slots: &HashMap<crate::wallets::DigitalAssetAccountId, AccountSyncSlotRecord>,
-    active_sync_slot_account_ids: &HashSet<crate::wallets::DigitalAssetAccountId>,
-    limit: u16,
-    free_balance_unavailable_account_ids: &HashSet<crate::wallets::DigitalAssetAccountId>,
-) -> NativeAccountSyncSlotView {
-    let selected_count = sync_slots
-        .keys()
-        .filter(|account_id| !free_balance_unavailable_account_ids.contains(account_id))
-        .count();
-    let selected = sync_slots.get(&account_id);
-    let active = active_sync_slot_account_ids.contains(&account_id);
-    let balance_sync_available_on_free =
-        !free_balance_unavailable_account_ids.contains(&account_id);
-
-    NativeAccountSyncSlotView {
-        selected: selected.is_some(),
-        active,
-        can_select: balance_sync_available_on_free
-            && selected.is_none()
-            && selected_count < usize::from(limit),
-        limit,
-        selected_at: selected.map(|record| record.selected_at.to_rfc3339()),
-        selected_under_tier: selected.map(|record| record.selected_under_tier.as_str().to_string()),
-    }
-}
-
 pub(crate) struct WalletAccountData<'a> {
     pub manual_asset_accounts: &'a [ManualAssetAccountRow],
     pub address_balances: &'a HashMap<String, AddressBalanceSummary>,
@@ -260,10 +230,10 @@ pub(crate) fn next_tier_display_name(tier: &EntitlementTier) -> Option<String> {
 
 #[derive(Clone)]
 pub(crate) struct NativeAccountManualSyncContext<'a> {
-    pub(crate) sync_slots:
-        &'a HashMap<crate::wallets::DigitalAssetAccountId, AccountSyncSlotRecord>,
-    pub(crate) active_sync_slot_account_ids: &'a HashSet<crate::wallets::DigitalAssetAccountId>,
-    pub(crate) slot_limit: u16,
+    pub(crate) account_modes: &'a HashMap<
+        crate::wallets::DigitalAssetAccountId,
+        crate::account_limits::NativeAccountMode,
+    >,
     pub(crate) tier: EntitlementTier,
     pub(crate) historical_backfill_enabled: bool,
     pub(crate) historical_backfill_transactions_per_account: u32,
@@ -276,42 +246,38 @@ pub(crate) fn native_account_manual_sync_view(
     transaction_count: u32,
     context: NativeAccountManualSyncContext<'_>,
 ) -> NativeAccountManualSyncView {
-    let sync_available = !context
-        .free_balance_unavailable_account_ids
-        .contains(&account_id);
-    let has_slot = context.sync_slots.contains_key(&account_id);
-    let used_slots = u16::try_from(context.active_sync_slot_account_ids.len()).unwrap_or(u16::MAX);
-    let has_capacity = used_slots < context.slot_limit;
-
-    let mode = if !sync_available {
+    let account_mode = context
+        .account_modes
+        .get(&account_id)
+        .copied()
+        .unwrap_or(crate::account_limits::NativeAccountMode::Inactive);
+    let mode = if account_mode == crate::account_limits::NativeAccountMode::Inactive {
         ManualSyncMode::Unavailable
-    } else if context.historical_backfill_enabled
-        && transaction_count <= context.historical_backfill_transactions_per_account
+    } else if account_mode == crate::account_limits::NativeAccountMode::Transactions
+        && TransactionFetchPolicy::normal(
+            context.historical_backfill_enabled,
+            TransactionCount::from_u32(context.historical_backfill_transactions_per_account),
+        )
+        .permits_transaction_page(TransactionCount::from_u32(transaction_count))
     {
         ManualSyncMode::TransactionHistory
     } else {
         ManualSyncMode::BalanceRefresh
     };
 
-    let (slot_effect, disabled_reason) = if !sync_available {
-        (
-            ManualSyncSlotEffect::NoCapacity,
-            Some(ManualSyncDisabledReason::SyncUnavailableOnPlan),
-        )
-    } else if has_slot {
-        (ManualSyncSlotEffect::AlreadySelected, None)
-    } else if has_capacity {
-        (ManualSyncSlotEffect::WillSelectAvailableSlot, None)
-    } else {
-        (ManualSyncSlotEffect::NoCapacity, None)
-    };
-
     NativeAccountManualSyncView {
         mode,
-        slot_effect,
-        disabled_reason,
-        used_slots,
-        slot_limit: context.slot_limit,
+        disabled_reason: (account_mode == crate::account_limits::NativeAccountMode::Inactive)
+            .then_some(
+                if context
+                    .free_balance_unavailable_account_ids
+                    .contains(&account_id)
+                {
+                    ManualSyncDisabledReason::SyncUnavailableOnPlan
+                } else {
+                    ManualSyncDisabledReason::AccountInactive
+                },
+            ),
         next_tier_display_name: next_tier_display_name(&context.tier),
     }
 }
@@ -690,11 +656,16 @@ pub(super) fn convert_wallet_to_view(
             let has_derived_addresses =
                 account_reference_kind == AccountReferenceKind::ExtendedPubkey;
 
+            let account_mode = sync
+                .account_modes
+                .get(&account.id)
+                .copied()
+                .unwrap_or(crate::account_limits::NativeAccountMode::Inactive);
+
             let mut manual_sync =
                 native_account_manual_sync_view(account.id, transaction_counts.total, sync.clone());
             if account_state == AccountStateView::Inactive {
                 manual_sync.mode = ManualSyncMode::Unavailable;
-                manual_sync.slot_effect = ManualSyncSlotEffect::NoCapacity;
                 manual_sync.disabled_reason = Some(ManualSyncDisabledReason::AccountInactive);
             }
 
@@ -717,13 +688,7 @@ pub(super) fn convert_wallet_to_view(
                 )?,
                 transaction_counts,
                 has_derived_addresses,
-                sync_slot: native_account_sync_slot_view(
-                    account.id,
-                    sync.sync_slots,
-                    sync.active_sync_slot_account_ids,
-                    sync.slot_limit,
-                    sync.free_balance_unavailable_account_ids,
-                ),
+                account_mode,
                 manual_sync,
                 addresses: AddressesView { receive, change },
                 transactions: recent_transactions,

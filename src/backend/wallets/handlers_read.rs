@@ -5,10 +5,9 @@ use std::collections::HashMap;
 use crate::balance_reliability::BalanceReliability;
 #[cfg(feature = "server")]
 use crate::db::{
-    WalletReportLoadError, active_sync_slot_account_ids,
-    get_wallet_by_fingerprint as get_wallet_by_fingerprint_db, list_wallets,
-    load_account_addresses_page as load_account_addresses_page_db, load_account_sync_slot_map,
-    load_account_sync_slots, load_account_transaction_counts as load_account_transaction_counts_db,
+    WalletReportLoadError, get_wallet_by_fingerprint as get_wallet_by_fingerprint_db, list_wallets,
+    load_account_addresses_page as load_account_addresses_page_db,
+    load_account_transaction_counts as load_account_transaction_counts_db,
     load_account_transaction_history as load_account_transaction_history_db,
     load_all_account_balances as load_all_account_balances_db,
     load_holdings_report as load_holdings_report_db,
@@ -353,13 +352,9 @@ pub(crate) async fn get_wallets() -> Result<WalletsResponse, WalletError> {
     let entitlements =
         crate::payments::entitlements::load_feature_entitlements(user_id, Utc::now())
             .map_err(|e| internal_error("wallets", e))?;
-    let classified_accounts = crate::db::account_limits::classify_supported_accounts_for_user(
-        user_id,
-        usize::from(entitlements.sync_account_slots_limit),
-    )
-    .map_err(|e| internal_error("wallets", e))?;
-    let sync_slot_records =
-        load_account_sync_slots(user_id).map_err(|e| internal_error("wallets", e))?;
+    let (classified_accounts, account_modes) =
+        crate::db::account_limits::load_account_mode_snapshot_for_user(user_id, &entitlements)
+            .map_err(|e| internal_error("wallets", e))?;
     let (
         wallets,
         manual_asset_accounts,
@@ -377,19 +372,10 @@ pub(crate) async fn get_wallets() -> Result<WalletsResponse, WalletError> {
     );
     let free_balance_unavailable_account_ids =
         free_balance_unavailable_account_ids(&wallets, &entitlements.tier);
-    let active_sync_slot_records = sync_slot_records
-        .iter()
-        .filter(|record| !free_balance_unavailable_account_ids.contains(&record.account_id))
-        .cloned()
-        .collect::<Vec<_>>();
-    let active_sync_slots = active_sync_slot_account_ids(
-        &active_sync_slot_records,
-        entitlements.sync_account_slots_limit,
-    );
-    let sync_slot_map = sync_slot_records
-        .into_iter()
-        .map(|record| (record.account_id, record))
-        .collect::<HashMap<_, _>>();
+    let active_native_count = account_modes
+        .values()
+        .filter(|mode| **mode != crate::account_limits::NativeAccountMode::Inactive)
+        .count();
 
     let wallet_views: Result<Vec<WalletView>, WalletError> = wallets
         .into_iter()
@@ -418,9 +404,7 @@ pub(crate) async fn get_wallets() -> Result<WalletsResponse, WalletError> {
                     account_tx_counts: &account_tx_counts,
                 },
                 &NativeAccountManualSyncContext {
-                    sync_slots: &sync_slot_map,
-                    active_sync_slot_account_ids: &active_sync_slots,
-                    slot_limit: entitlements.sync_account_slots_limit,
+                    account_modes: &account_modes,
                     tier: entitlements.tier.clone(),
                     historical_backfill_enabled: entitlements.historical_backfill_enabled,
                     historical_backfill_transactions_per_account: entitlements
@@ -453,7 +437,7 @@ pub(crate) async fn get_wallets() -> Result<WalletsResponse, WalletError> {
         None
     };
 
-    let used_slots = u16::try_from(active_sync_slots.len()).unwrap_or(u16::MAX);
+    let used_slots = u16::try_from(active_native_count).unwrap_or(u16::MAX);
     let active_account_count = classified_accounts
         .iter()
         .filter(|account| account.state == AccountActivationState::Active)
@@ -462,13 +446,19 @@ pub(crate) async fn get_wallets() -> Result<WalletsResponse, WalletError> {
         .iter()
         .filter(|account| account.state == AccountActivationState::Inactive)
         .count();
+    let total_account_limit = match entitlements.account_allowance_policy {
+        crate::payments::types::AccountAllowancePolicy::LegacyCombined { total } => total,
+        crate::payments::types::AccountAllowancePolicy::Independent(allowances) => allowances
+            .balance_sync()
+            .saturating_add(allowances.manual()),
+    };
     Ok(WalletsResponse {
         wallets: wallet_views,
         value_summary,
         account_limit: account_limit_view(
             active_account_count,
             inactive_account_count,
-            entitlements.sync_account_slots_limit,
+            total_account_limit,
         ),
         sync_capacity: synced_account_capacity_view(
             used_slots,
@@ -1043,14 +1033,9 @@ pub(crate) async fn get_wallet_by_fingerprint(
     let entitlements =
         crate::payments::entitlements::load_feature_entitlements(user_id, Utc::now())
             .map_err(|e| internal_error("wallets", e))?;
-    let classified_accounts = crate::db::account_limits::classify_supported_accounts_for_user(
-        user_id,
-        usize::from(entitlements.sync_account_slots_limit),
-    )
-    .map_err(|e| internal_error("wallets", e))?;
-    let sync_slot_map =
-        load_account_sync_slot_map(user_id).map_err(|e| internal_error("wallets", e))?;
-    let sync_slot_records = sync_slot_map.values().cloned().collect::<Vec<_>>();
+    let (classified_accounts, account_modes) =
+        crate::db::account_limits::load_account_mode_snapshot_for_user(user_id, &entitlements)
+            .map_err(|e| internal_error("wallets", e))?;
     let (
         wallets,
         manual_asset_accounts,
@@ -1066,15 +1051,6 @@ pub(crate) async fn get_wallet_by_fingerprint(
     );
     let free_balance_unavailable_account_ids =
         free_balance_unavailable_account_ids(&wallets, &entitlements.tier);
-    let active_sync_slot_records = sync_slot_records
-        .iter()
-        .filter(|record| !free_balance_unavailable_account_ids.contains(&record.account_id))
-        .cloned()
-        .collect::<Vec<_>>();
-    let active_sync_slots = active_sync_slot_account_ids(
-        &active_sync_slot_records,
-        entitlements.sync_account_slots_limit,
-    );
     let Some(requested_wallet) = wallet else {
         return Ok(None);
     };
@@ -1111,9 +1087,7 @@ pub(crate) async fn get_wallet_by_fingerprint(
             account_tx_counts: &account_tx_counts,
         },
         &NativeAccountManualSyncContext {
-            sync_slots: &sync_slot_map,
-            active_sync_slot_account_ids: &active_sync_slots,
-            slot_limit: entitlements.sync_account_slots_limit,
+            account_modes: &account_modes,
             tier: entitlements.tier.clone(),
             historical_backfill_enabled: entitlements.historical_backfill_enabled,
             historical_backfill_transactions_per_account: entitlements

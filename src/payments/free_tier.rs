@@ -1,8 +1,9 @@
 #![cfg(feature = "server")]
 
+use super::account_allowances::AccountAllowances;
 use super::client::{CentralProductOptions, CentralTierCapabilities};
 use super::types::{
-    AccountLimits, CAPABILITY_SCHEMA_VERSION_V3, EntitlementCapabilities,
+    AccountAllowancePolicy, AccountLimits, CAPABILITY_SCHEMA_VERSION_V4, EntitlementCapabilities,
     EntitlementCapabilityLimits, EntitlementFeatureFlags, EntitlementSource, EntitlementTier,
     FeatureEntitlements, HistoryLimits,
 };
@@ -16,7 +17,20 @@ const BAKED_FREE_TIER_DEFAULTS: &str =
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FreeTierAccounts {
-    pub(crate) total: u16,
+    pub(crate) balance_sync: u16,
+    pub(crate) transaction_history_sync: u16,
+    pub(crate) manual: u16,
+}
+
+impl FreeTierAccounts {
+    pub(crate) fn validated(self) -> Option<AccountAllowances> {
+        AccountAllowances::try_new(
+            self.balance_sync,
+            self.transaction_history_sync,
+            self.manual,
+        )
+        .ok()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,12 +85,14 @@ pub(crate) fn baked_free_tier_snapshot() -> FreeTierSnapshot {
     let snapshot: FreeTierSnapshot = match serde_json::from_str(BAKED_FREE_TIER_DEFAULTS) {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            eprintln!("baked free tier defaults must be valid canonical v3 JSON: {error}");
+            eprintln!("baked free tier defaults must be valid canonical v4 JSON: {error}");
             std::process::exit(1);
         }
     };
-    if snapshot.capability_schema_version != CAPABILITY_SCHEMA_VERSION_V3 {
-        eprintln!("baked free tier defaults must be capability schema v3");
+    if snapshot.capability_schema_version != CAPABILITY_SCHEMA_VERSION_V4
+        || snapshot.capabilities.limits.accounts.validated().is_none()
+    {
+        eprintln!("baked free tier defaults must be valid capability schema v4");
         std::process::exit(1);
     }
     snapshot
@@ -96,10 +112,16 @@ pub(crate) fn free_entitlements_from_observation(
 ) -> FeatureEntitlements {
     let capabilities = EntitlementCapabilities {
         limits: EntitlementCapabilityLimits {
-            accounts: Some(AccountLimits {
-                total: observation.capabilities.limits.accounts.total,
+            accounts: Some(AccountLimits::Independent {
+                balance_sync: observation.capabilities.limits.accounts.balance_sync,
+                transaction_history_sync: observation
+                    .capabilities
+                    .limits
+                    .accounts
+                    .transaction_history_sync,
+                manual: observation.capabilities.limits.accounts.manual,
             }),
-            synced_accounts: observation.capabilities.limits.accounts.total,
+            synced_accounts: observation.capabilities.limits.accounts.balance_sync,
             history: HistoryLimits {
                 max_transactions_per_account: observation
                     .capabilities
@@ -134,18 +156,24 @@ pub(crate) fn free_entitlements_from_observation(
 pub(crate) fn free_capabilities_from_central(
     capabilities: &CentralTierCapabilities,
 ) -> Option<FreeTierCapabilities> {
-    if capabilities.capability_schema_version != CAPABILITY_SCHEMA_VERSION_V3 {
+    if capabilities.capability_schema_version != CAPABILITY_SCHEMA_VERSION_V4 {
         tracing::warn!(
             capability_schema_version = capabilities.capability_schema_version,
-            "payments: ignoring non-v3 free tier capabilities"
+            "payments: ignoring non-v4 free tier capabilities"
         );
         return None;
     }
 
+    let AccountAllowancePolicy::Independent(allowances) = capabilities.account_allowance_policy
+    else {
+        return None;
+    };
     Some(FreeTierCapabilities {
         limits: FreeTierLimits {
             accounts: FreeTierAccounts {
-                total: capabilities.sync_account_slots,
+                balance_sync: allowances.balance_sync(),
+                transaction_history_sync: allowances.transaction_history_sync(),
+                manual: allowances.manual(),
             },
             history: FreeTierHistory {
                 max_transactions_per_account: capabilities
@@ -171,7 +199,7 @@ pub(crate) fn free_observation_from_central_capabilities(
 ) -> Option<FreeTierObservation> {
     Some(FreeTierObservation {
         observed_at,
-        capability_schema_version: CAPABILITY_SCHEMA_VERSION_V3,
+        capability_schema_version: CAPABILITY_SCHEMA_VERSION_V4,
         capabilities: free_capabilities_from_central(capabilities)?,
     })
 }
@@ -188,7 +216,10 @@ pub(crate) fn newer_free_observation(
     baked: FreeTierObservation,
     cached: FreeTierObservation,
 ) -> FreeTierObservation {
-    if cached.observed_at >= baked.observed_at {
+    if cached.capability_schema_version == CAPABILITY_SCHEMA_VERSION_V4
+        && cached.capabilities.limits.accounts.validated().is_some()
+        && cached.observed_at >= baked.observed_at
+    {
         cached
     } else {
         baked
@@ -228,7 +259,12 @@ pub(crate) fn record_free_tier_from_product_options(
 #[cfg(test)]
 pub(crate) fn free_tier_capabilities_for_test(accounts_total: u16) -> FreeTierCapabilities {
     let mut capabilities = baked_free_tier_snapshot().capabilities;
-    capabilities.limits.accounts.total = accounts_total;
+    capabilities.limits.accounts.balance_sync = accounts_total;
+    capabilities.limits.accounts.transaction_history_sync = capabilities
+        .limits
+        .accounts
+        .transaction_history_sync
+        .min(accounts_total);
     capabilities
 }
 
@@ -240,7 +276,7 @@ mod tests {
         CentralProductTier, CentralTierCapabilities, CentralTierPresentation,
     };
     use crate::payments::types::{
-        CAPABILITY_SCHEMA_VERSION_LEGACY, CAPABILITY_SCHEMA_VERSION_V3, EntitlementSource,
+        CAPABILITY_SCHEMA_VERSION_LEGACY, CAPABILITY_SCHEMA_VERSION_V4, EntitlementSource,
         EntitlementTier,
     };
 
@@ -254,9 +290,12 @@ mod tests {
 
     fn central_capabilities(account_total: u16) -> CentralTierCapabilities {
         CentralTierCapabilities {
-            capability_set_id: Some("free.v3".to_string()),
-            capability_schema_version: CAPABILITY_SCHEMA_VERSION_V3,
+            capability_set_id: Some("free.v4".to_string()),
+            capability_schema_version: CAPABILITY_SCHEMA_VERSION_V4,
             sync_account_slots: account_total,
+            account_allowance_policy: AccountAllowancePolicy::Independent(
+                AccountAllowances::try_new(account_total, 3, 1000).expect("test allowances"),
+            ),
             historical_backfill_transactions_per_account: 1234,
             historical_sync: true,
             transaction_history_sync: true,
@@ -264,7 +303,7 @@ mod tests {
             exchange_rates_current: true,
             exchange_rates_history: false,
             price_overrides: true,
-            balance_assertions: false,
+            balance_assertions: true,
             hledger_export: true,
             tax_reports: false,
         }
@@ -298,40 +337,57 @@ mod tests {
     }
 
     #[test]
-    fn baked_asset_parses_as_v3_with_accounts_total() {
+    fn baked_asset_parses_as_v4_with_independent_allowances() {
         let snapshot = baked_free_tier_snapshot();
 
         assert_eq!(
             snapshot.capability_schema_version,
-            CAPABILITY_SCHEMA_VERSION_V3
+            CAPABILITY_SCHEMA_VERSION_V4
         );
-        assert_eq!(snapshot.capabilities.limits.accounts.total, 50);
+        assert_eq!(snapshot.capabilities.limits.accounts.balance_sync, 50);
+        assert_eq!(
+            snapshot
+                .capabilities
+                .limits
+                .accounts
+                .transaction_history_sync,
+            3
+        );
+        assert_eq!(snapshot.capabilities.limits.accounts.manual, 1000);
         assert_eq!(
             snapshot
                 .capabilities
                 .limits
                 .history
                 .max_transactions_per_account,
-            0
+            1000
+        );
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/payments/v4-product-options.json"
+        ))
+        .expect("Central fixture");
+        assert_eq!(
+            serde_json::to_value(snapshot.capabilities).expect("snapshot capabilities"),
+            fixture["tiers"][0]["capabilities"]
         );
     }
 
     #[test]
     fn test_capabilities_only_override_baked_account_total() {
         let mut expected = baked_free_tier_snapshot().capabilities;
-        expected.limits.accounts.total = 17;
+        expected.limits.accounts.balance_sync = 17;
 
         assert_eq!(free_tier_capabilities_for_test(17), expected);
     }
 
     #[test]
-    fn strict_snapshot_rejects_missing_accounts_total() {
+    fn strict_snapshot_rejects_missing_account_allowance() {
         let invalid = r#"{
           "captured_at": "2026-06-30T00:00:00Z",
-          "capability_schema_version": 3,
+          "capability_schema_version": 4,
           "capabilities": {
             "limits": {
-              "accounts": {},
+              "accounts": { "balance_sync": 50, "manual": 1000 },
               "history": { "max_transactions_per_account": 0 }
             },
             "features": {
@@ -357,21 +413,34 @@ mod tests {
 
         assert!(!json.contains("synced_accounts"));
         assert!(!json.contains("historical_sync"));
+        assert!(!json.contains("stored_total"));
+        assert!(!json.contains("\"total\""));
         assert!(json.contains("transaction_history_sync"));
     }
 
     #[test]
-    fn central_capabilities_convert_to_canonical_v3_entitlements() {
+    fn central_capabilities_convert_to_canonical_v4_entitlements() {
         let observation = free_observation_from_central_capabilities(
             &central_capabilities(42),
             observed_at("2026-06-30T12:00:00Z"),
         )
-        .expect("v3 free capabilities convert");
+        .expect("v4 free capabilities convert");
         let entitlements = free_entitlements_from_observation(observation);
 
         assert_eq!(entitlements.tier, EntitlementTier::Free);
         assert_eq!(entitlements.sync_account_slots_limit, 42);
         assert!(entitlements.historical_backfill_enabled);
+        assert!(entitlements.balance_sync_enabled);
+        assert!(entitlements.transaction_history_sync_enabled);
+        assert!(entitlements.balance_assertions);
+        assert!(entitlements.hledger_export);
+        assert!(entitlements.exchange_rates_current);
+        assert_eq!(
+            entitlements.account_allowance_policy,
+            AccountAllowancePolicy::Independent(
+                AccountAllowances::try_new(42, 3, 1000).expect("test allowances")
+            )
+        );
         assert_eq!(
             entitlements.historical_backfill_transactions_per_account,
             1234
@@ -401,29 +470,29 @@ mod tests {
         let from_options =
             free_observation_from_product_options(&options, observed_at("2026-06-30T12:00:00Z"))
                 .expect("free tier found");
-        assert_eq!(from_options.capabilities.limits.accounts.total, 7);
+        assert_eq!(from_options.capabilities.limits.accounts.balance_sync, 7);
     }
 
     #[test]
     fn recency_rule_prefers_newer_cache_and_tie_prefers_cache() {
         let baked = FreeTierObservation {
             observed_at: observed_at("2026-06-30T00:00:00Z"),
-            capability_schema_version: CAPABILITY_SCHEMA_VERSION_V3,
+            capability_schema_version: CAPABILITY_SCHEMA_VERSION_V4,
             capabilities: free_tier_capabilities_for_test(20),
         };
         let older_cached = FreeTierObservation {
             observed_at: observed_at("2026-06-29T23:59:59Z"),
-            capability_schema_version: CAPABILITY_SCHEMA_VERSION_V3,
+            capability_schema_version: CAPABILITY_SCHEMA_VERSION_V4,
             capabilities: free_tier_capabilities_for_test(19),
         };
         let tie_cached = FreeTierObservation {
             observed_at: baked.observed_at,
-            capability_schema_version: CAPABILITY_SCHEMA_VERSION_V3,
+            capability_schema_version: CAPABILITY_SCHEMA_VERSION_V4,
             capabilities: free_tier_capabilities_for_test(21),
         };
         let newer_cached = FreeTierObservation {
             observed_at: observed_at("2026-06-30T00:00:01Z"),
-            capability_schema_version: CAPABILITY_SCHEMA_VERSION_V3,
+            capability_schema_version: CAPABILITY_SCHEMA_VERSION_V4,
             capabilities: free_tier_capabilities_for_test(22),
         };
 
@@ -432,7 +501,7 @@ mod tests {
                 .capabilities
                 .limits
                 .accounts
-                .total,
+                .balance_sync,
             20
         );
         assert_eq!(
@@ -440,7 +509,7 @@ mod tests {
                 .capabilities
                 .limits
                 .accounts
-                .total,
+                .balance_sync,
             21
         );
         assert_eq!(
@@ -448,9 +517,26 @@ mod tests {
                 .capabilities
                 .limits
                 .accounts
-                .total,
+                .balance_sync,
             22
         );
+    }
+
+    #[test]
+    fn newer_legacy_or_unknown_cache_cannot_override_v4_baked_free() {
+        let baked = FreeTierObservation {
+            observed_at: observed_at("2026-06-30T00:00:00Z"),
+            capability_schema_version: CAPABILITY_SCHEMA_VERSION_V4,
+            capabilities: free_tier_capabilities_for_test(50),
+        };
+        for schema in [3, 5] {
+            let cached = FreeTierObservation {
+                observed_at: observed_at("2026-07-01T00:00:00Z"),
+                capability_schema_version: schema,
+                capabilities: free_tier_capabilities_for_test(500),
+            };
+            assert_eq!(newer_free_observation(baked.clone(), cached), baked);
+        }
     }
 
     #[test]

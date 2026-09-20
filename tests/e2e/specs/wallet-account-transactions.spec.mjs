@@ -56,14 +56,11 @@ test("paid limited Bitcoin history masks closing balances on desktop and mobile"
   await page.goto(`/wallets/account/${accountId}/transactions`);
   await expect(page.locator(".tx-header-opening-balance")).toHaveCount(1);
   await expect(page.locator(".tx-header-closing-balance")).toHaveCount(1);
-  const notice = page.getByTestId("transaction-history-coverage-notice");
-  await expect(notice).toContainText(
-    "This account has approximately 28 unsynced transactions and 2 synced transactions. The internal limit of transactions per account is 1 and we have not yet provided a way to sync more. Send us an email to let us know this should be a priority.",
+  const notice = page.getByTestId("transaction-sync-pause-notice");
+  await expect(notice).toHaveText(
+    "Transaction syncing is paused because this account reached its plan limit. Older or newer transactions may be missing. Balances continue to update independently.",
   );
-  await expect(notice.getByRole("link", { name: "Send us an email" })).toHaveAttribute(
-    "href",
-    "mailto:hello@bitgarth.app",
-  );
+  await expect(page.getByTestId("transaction-history-coverage-notice")).toHaveCount(0);
   await expect(page.locator(".tx-history-coverage")).toHaveCount(0);
   const pendingSection = page
     .getByRole("heading", { name: "Pending / Unconfirmed", exact: true })
@@ -120,15 +117,11 @@ test("free limited Bitcoin history shows the current provider balance", async ({
   expect(pollResponse.ok()).toBeTruthy();
 
   await page.goto(`/wallets/account/${accountId}/transactions`);
-  const notice = page.getByTestId("transaction-history-coverage-notice");
-  await expect(notice).toContainText(
-    "This account has approximately 28 unsynced transactions. Upgrade to sync transaction history.",
-    { timeout: 30_000 },
+  const notice = page.getByTestId("transaction-sync-pause-notice");
+  await expect(notice).toHaveText(
+    "Transaction syncing is not included for this account under your current allowance. Balances continue to update independently.",
   );
-  await expect(notice.getByRole("link", { name: "Upgrade" })).toHaveAttribute(
-    "href",
-    "/payments",
-  );
+  await expect(page.getByTestId("transaction-history-coverage-notice")).toHaveCount(0);
   await expect(page.locator(".tx-history-coverage")).toHaveCount(0);
   expect(history.current_balance_checked_at).toBeTruthy();
   const expectedCurrentBalanceTimestamp = formatDefaultUtcTimestamp(
@@ -232,17 +225,6 @@ function currentYearRangeForToday() {
     start: `${today.getUTCFullYear()}-01-01`,
     end: formatLocalDate(today),
   };
-}
-
-async function selectAccountSyncSlot(request, accountId) {
-  const response = await request.post("/_app/user/wallets/account/sync-slot/select", {
-    data: {
-      request: {
-        account_id: accountId,
-      },
-    },
-  });
-  expect(response.ok()).toBeTruthy();
 }
 
 async function activatePremiumForTransactionHistory(request) {
@@ -416,7 +398,7 @@ async function startDenseEtherscanServer(knownAddress, transactions) {
   };
 }
 
-async function createTransactionsAccount({ page, mockServers, premium = false }) {
+async function createTransactionsAccount({ page, mockServers, premium = false, priorAccounts = 0 }) {
   const denseTransactions = buildDenseEtherscanTransactions(55, TEST_ETH_ADDRESS);
   const denseEtherscan = await startDenseEtherscanServer(
     TEST_ETH_ADDRESS,
@@ -429,6 +411,18 @@ async function createTransactionsAccount({ page, mockServers, premium = false })
   }
   await saveEtherscanBaseUrl(page.request, denseEtherscan.baseUrl);
   await saveEtherscanApiKey(page.request, TEST_ETHERSCAN_API_KEY);
+  for (let index = 1; index <= priorAccounts; index++) {
+    const response = await page.request.post("/_app/user/wallets/ethereum/add", {
+      data: {
+        request: {
+          address: `0x${index.toString(16).padStart(40, "0")}`,
+          network: "mainnet",
+          wallet_label: `E2E Earlier Wallet ${index}`,
+        },
+      },
+    });
+    expect(response.ok(), await response.text()).toBeTruthy();
+  }
   const addAddressResponse = await page.request.post(
     "/_app/user/wallets/ethereum/add",
     {
@@ -445,9 +439,6 @@ async function createTransactionsAccount({ page, mockServers, premium = false })
   const addAddressPayload = await addAddressResponse.json();
   const accountId = addAddressPayload.account_id;
   expect(accountId).toBeTruthy();
-  if (premium) {
-    await selectAccountSyncSlot(page.request, accountId);
-  }
   await expect
     .poll(
       async () => {
@@ -500,7 +491,6 @@ test("wallet transactions page shows deterministic ordering and paging", async (
     const addAddressPayload = await addAddressResponse.json();
     const accountId = addAddressPayload.account_id;
     expect(accountId).toBeTruthy();
-    await selectAccountSyncSlot(page.request, accountId);
 
     const syncResponse = await page.request.post("/_app/user/transactions/sync", {
       data: { request: { source: "manual" } },
@@ -676,7 +666,6 @@ test("wallet transactions date toolbar keeps route-backed presets and status fil
     const addAddressPayload = await addAddressResponse.json();
     const accountId = addAddressPayload.account_id;
     expect(accountId).toBeTruthy();
-    await selectAccountSyncSlot(page.request, accountId);
 
     const syncResponse = await page.request.post("/_app/user/transactions/sync", {
       data: { request: { source: "manual" } },
@@ -745,7 +734,27 @@ test("wallet transactions date toolbar keeps route-backed presets and status fil
   }
 });
 
-test("upgrade transitions from locked history to transactions", async ({
+test("Free first Ethereum account syncs both history and current balance", async ({
+  page,
+  mockServers,
+}) => {
+  const { accountId, denseEtherscan } = await createTransactionsAccount({
+    page,
+    mockServers,
+  });
+  try {
+    await page.goto(`/wallets/account/${accountId}/transactions`);
+    await expect(page.getByTestId("account-mode")).toHaveText("Transaction syncing");
+    await expect(page.locator(".transactions-list .tx-card").first()).toBeVisible();
+    await expect(page.locator(".tx-header-current-balance")).toContainText(
+      "Current balance as of",
+    );
+  } finally {
+    await denseEtherscan.close();
+  }
+});
+
+test("upgrade moves a fourth Ethereum account from balances to transactions", async ({
   page,
   mockServers,
 }, testInfo) => {
@@ -753,16 +762,22 @@ test("upgrade transitions from locked history to transactions", async ({
   const { accountId, denseEtherscan } = await createTransactionsAccount({
     page,
     mockServers,
+    priorAccounts: 3,
   });
   try {
     await page.goto(`/wallets/account/${accountId}/transactions`);
+    await expect(page.getByTestId("account-mode")).toHaveText("Balance only");
     await expect(page.locator(".tx-header-current-balance")).toContainText(
       "Current balance as of",
       { timeout: 30_000 },
     );
+    await expect(page.getByTestId("transaction-sync-pause-notice")).toContainText(
+      "current allowance",
+    );
 
     await activatePremiumForTransactionHistory(page.request);
     await page.reload();
+    await expect(page.getByTestId("account-mode")).toHaveText("Transaction syncing");
     await expect(page.locator(".transactions-list .tx-card").first()).toBeVisible({
       timeout: 30_000,
     });

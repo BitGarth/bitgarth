@@ -1,4 +1,4 @@
-use super::gate::MempoolHistoryPolicy;
+use super::gate::TransactionFetchPolicy;
 use super::progress::publish_hd_account_progress_event;
 use super::{
     AddressSyncExecutor, ChainTipCache, CycleAccumulator, CycleAccumulatorSnapshot, RunContext,
@@ -335,7 +335,7 @@ fn run_hd_address_step(
         accumulator,
         processed_for_account,
         single_address_progress,
-        mempool_history_policy,
+        transaction_fetch_policy,
         mempool_history_page_frontier,
     } = control;
     let address_id = address.address_id;
@@ -351,7 +351,7 @@ fn run_hd_address_step(
             accumulator,
             processed_for_account,
             single_address_progress,
-            mempool_history_policy,
+            transaction_fetch_policy,
             mempool_history_page_frontier,
         })?;
     let after = CycleAccumulatorSnapshot::from_accumulator(accumulator);
@@ -515,10 +515,10 @@ pub(super) fn run_hd_chain_scan(
                     accumulator,
                     processed_for_account,
                     single_address_progress: None,
-                    mempool_history_policy: if historical_backfill_enabled {
-                        MempoolHistoryPolicy::LegacyRepair
+                    transaction_fetch_policy: if historical_backfill_enabled {
+                        TransactionFetchPolicy::LegacyRepair
                     } else {
-                        MempoolHistoryPolicy::CurrentOnly
+                        TransactionFetchPolicy::CurrentOnly
                     },
                     mempool_history_page_frontier: None,
                 },
@@ -604,10 +604,10 @@ pub(super) fn run_hd_chain_scan(
                         accumulator,
                         processed_for_account,
                         single_address_progress: None,
-                        mempool_history_policy: if historical_backfill_enabled {
-                            MempoolHistoryPolicy::LegacyRepair
+                        transaction_fetch_policy: if historical_backfill_enabled {
+                            TransactionFetchPolicy::LegacyRepair
                         } else {
-                            MempoolHistoryPolicy::CurrentOnly
+                            TransactionFetchPolicy::CurrentOnly
                         },
                         mempool_history_page_frontier: None,
                     },
@@ -679,6 +679,7 @@ pub(super) fn run_hd_chain_scan(
                     last_completed_at: None,
                     last_result: None,
                     last_tip_height: None,
+                    etherscan_transaction_tip_height: None,
                     mempool_backfill_cursor_txid: None,
                     mempool_expected_tx_count: None,
                     mempool_history_proof: None,
@@ -731,10 +732,10 @@ pub(super) fn run_hd_chain_scan(
                         accumulator,
                         processed_for_account,
                         single_address_progress: None,
-                        mempool_history_policy: if historical_backfill_enabled {
-                            MempoolHistoryPolicy::LegacyRepair
+                        transaction_fetch_policy: if historical_backfill_enabled {
+                            TransactionFetchPolicy::LegacyRepair
                         } else {
-                            MempoolHistoryPolicy::CurrentOnly
+                            TransactionFetchPolicy::CurrentOnly
                         },
                         mempool_history_page_frontier: None,
                     },
@@ -807,10 +808,10 @@ pub(super) fn run_hd_chain_scan(
                     accumulator,
                     processed_for_account,
                     single_address_progress: None,
-                    mempool_history_policy: if historical_backfill_enabled {
-                        MempoolHistoryPolicy::LegacyRepair
+                    transaction_fetch_policy: if historical_backfill_enabled {
+                        TransactionFetchPolicy::LegacyRepair
                     } else {
-                        MempoolHistoryPolicy::CurrentOnly
+                        TransactionFetchPolicy::CurrentOnly
                     },
                     mempool_history_page_frontier: None,
                 },
@@ -1116,6 +1117,7 @@ mod tests {
             last_completed_at: None,
             last_result: None,
             last_tip_height: None,
+            etherscan_transaction_tip_height: None,
             mempool_backfill_cursor_txid: None,
             mempool_expected_tx_count: None,
             mempool_history_proof: None,
@@ -2398,7 +2400,7 @@ mod hd_scan_integration_tests {
                         accumulator: &mut accumulator,
                         processed_for_account: &mut processed_for_account,
                         single_address_progress: None,
-                        mempool_history_policy: MempoolHistoryPolicy::CurrentOnly,
+                        transaction_fetch_policy: TransactionFetchPolicy::CurrentOnly,
                         mempool_history_page_frontier: None,
                     },
                     account_id,
@@ -2489,7 +2491,7 @@ mod hd_scan_integration_tests {
                     accumulator: &mut accumulator,
                     processed_for_account: &mut processed_for_account,
                     single_address_progress: None,
-                    mempool_history_policy: MempoolHistoryPolicy::LegacyRepair,
+                    transaction_fetch_policy: TransactionFetchPolicy::LegacyRepair,
                     mempool_history_page_frontier: None,
                 },
                 account_id,
@@ -2552,7 +2554,7 @@ mod hd_scan_integration_tests {
                     accumulator: &mut accumulator,
                     processed_for_account: &mut processed_for_account,
                     single_address_progress: None,
-                    mempool_history_policy: MempoolHistoryPolicy::CurrentOnly,
+                    transaction_fetch_policy: TransactionFetchPolicy::CurrentOnly,
                     mempool_history_page_frontier: None,
                 },
                 account_id,
@@ -2614,7 +2616,7 @@ mod hd_scan_integration_tests {
                     accumulator: &mut accumulator,
                     processed_for_account: &mut processed_for_account,
                     single_address_progress: None,
-                    mempool_history_policy: MempoolHistoryPolicy::LegacyRepair,
+                    transaction_fetch_policy: TransactionFetchPolicy::LegacyRepair,
                     mempool_history_page_frontier: None,
                 },
                 account_id,

@@ -20,15 +20,19 @@ pub(crate) enum BitcoinHistoryCoverageView {
     Syncing,
     Limited,
     Complete,
+    CompleteThrough { block_height: i64 },
 }
 
 impl BitcoinHistoryCoverageView {
-    pub(crate) const fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> String {
         match self {
-            Self::Unscanned => "Unscanned",
-            Self::Syncing => "Syncing",
-            Self::Limited => "Coverage limited",
-            Self::Complete => "Complete",
+            Self::Unscanned => "Unscanned".to_string(),
+            Self::Syncing => "Syncing".to_string(),
+            Self::Limited => "Coverage limited".to_string(),
+            Self::Complete => "Coverage boundary unknown".to_string(),
+            Self::CompleteThrough { block_height } => {
+                format!("Verified through block {block_height}")
+            }
         }
     }
 }
@@ -40,7 +44,11 @@ impl From<crate::db::BitcoinAccountHistoryCoverage> for BitcoinHistoryCoverageVi
             crate::db::BitcoinAccountHistoryCoverage::Unscanned => Self::Unscanned,
             crate::db::BitcoinAccountHistoryCoverage::Syncing => Self::Syncing,
             crate::db::BitcoinAccountHistoryCoverage::Limited => Self::Limited,
-            crate::db::BitcoinAccountHistoryCoverage::Complete { .. } => Self::Complete,
+            crate::db::BitcoinAccountHistoryCoverage::Complete { coverage_height } => {
+                Self::CompleteThrough {
+                    block_height: coverage_height.value(),
+                }
+            }
         }
     }
 }
@@ -152,5 +160,20 @@ mod tests {
             reliability.reasons(),
             &[BalanceProvisionalReason::PendingLedgerState]
         );
+    }
+
+    #[test]
+    fn completed_bitcoin_proof_keeps_its_height_when_tip_moves() {
+        let newer_observed_tip = 900_001;
+        let view = BitcoinHistoryCoverageView::CompleteThrough {
+            block_height: 900_000,
+        };
+        assert!(
+            matches!(view, BitcoinHistoryCoverageView::CompleteThrough { block_height } if block_height < newer_observed_tip)
+        );
+        assert_eq!(view.label(), "Verified through block 900000");
+        let legacy: BitcoinHistoryCoverageView =
+            serde_json::from_str("\"complete\"").expect("legacy coverage should parse");
+        assert_eq!(legacy.label(), "Coverage boundary unknown");
     }
 }

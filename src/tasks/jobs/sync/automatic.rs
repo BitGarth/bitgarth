@@ -7,7 +7,6 @@ use crate::db::{
     refresh_account_integration_sync_state,
 };
 use crate::models::{SyncHistoryRetentionDays, UserId};
-use crate::payments::types::EntitlementTier;
 use crate::tasks::{TriggerSource, publish_transaction_sync_event};
 use crate::transactions::{
     AddressCount, AggregateSyncResult, RateLimitedIntegration, SyncErrorMessage, SyncIntegrationId,
@@ -38,8 +37,8 @@ use super::cycle::{
 use super::error::UserTransactionMonitorError;
 use super::executor::{AddressSyncExecutor, recover_interrupted_mempool_account};
 use super::gate::{
-    MempoolHistoryPolicy, SyncSingleAddressControlRequest, default_api_provider_for_asset,
-    integration_for_asset, load_account_transaction_count_for_history_policy, requires_provider,
+    SyncSingleAddressControlRequest, TransactionFetchPolicy, default_api_provider_for_asset,
+    integration_for_asset, load_account_transaction_count_for_fetch_policy, requires_provider,
     sync_single_address_with_controls,
 };
 use super::hd_scan::{AddressDerivationProvider, HdBundleScanRequest, run_hd_bundle_scan};
@@ -79,6 +78,10 @@ fn load_sync_run_preload(user_id: UserId) -> Result<SyncRunPreload, UserTransact
         bitcoin_history_repair_account_ids: load_pending_bitcoin_history_repair_account_ids(
             user_id,
         )?,
+        native_account_modes: Some(crate::db::account_limits::native_account_modes_for_user(
+            user_id,
+            &entitlements,
+        )?),
     })
 }
 
@@ -99,28 +102,34 @@ fn load_pending_bitcoin_history_repair_account_ids(
     )
 }
 
-fn mempool_history_policy_for_preload(preload: &SyncRunPreload) -> MempoolHistoryPolicy {
+fn transaction_fetch_policy_for_preload(preload: &SyncRunPreload) -> TransactionFetchPolicy {
     if !preload.bitcoin_history_repair_account_ids.is_empty() {
-        return MempoolHistoryPolicy::LegacyRepair;
+        return TransactionFetchPolicy::LegacyRepair;
     }
-    normal_mempool_history_policy_for_preload(preload)
+    normal_transaction_fetch_policy_for_preload(preload)
 }
 
-fn normal_mempool_history_policy_for_preload(preload: &SyncRunPreload) -> MempoolHistoryPolicy {
-    MempoolHistoryPolicy::normal(
+fn normal_transaction_fetch_policy_for_preload(preload: &SyncRunPreload) -> TransactionFetchPolicy {
+    TransactionFetchPolicy::normal(
         preload.historical_backfill_enabled,
         TransactionCount::from_u32(preload.historical_backfill_transactions_per_account),
     )
 }
 
-fn mempool_history_policy_for_account(
+fn transaction_fetch_policy_for_account(
     preload: &SyncRunPreload,
     account_id: Option<DigitalAssetAccountId>,
-) -> MempoolHistoryPolicy {
+) -> TransactionFetchPolicy {
     if account_id.is_some_and(|id| preload.bitcoin_history_repair_account_ids.contains(&id)) {
-        MempoolHistoryPolicy::LegacyRepair
+        TransactionFetchPolicy::LegacyRepair
+    } else if preload.native_account_modes.as_ref().is_some_and(|modes| {
+        !account_id.is_some_and(|id| {
+            modes.get(&id) == Some(&crate::account_limits::NativeAccountMode::Transactions)
+        })
+    }) {
+        TransactionFetchPolicy::CurrentOnly
     } else {
-        normal_mempool_history_policy_for_preload(preload)
+        normal_transaction_fetch_policy_for_preload(preload)
     }
 }
 
@@ -168,7 +177,8 @@ fn planner_input_for_preload<'a>(
 ) -> SyncPlannerInput<'a> {
     SyncPlannerInput {
         now_utc,
-        mempool_history_policy: mempool_history_policy_for_preload(preload),
+        transaction_fetch_policy: transaction_fetch_policy_for_preload(preload),
+        native_account_modes: preload.native_account_modes.as_ref(),
         account_transaction_counts,
         pending_address_ids: &preload.pending_address_ids,
         known_activity_address_ids: &preload.known_activity_address_ids,
@@ -181,7 +191,7 @@ fn load_account_transaction_counts_for_workset(
     user_id: UserId,
     non_hd_addresses: &[SyncAddress],
     hd_bundles: &[AccountSyncBundle],
-    policy: MempoolHistoryPolicy,
+    policy: TransactionFetchPolicy,
 ) -> Result<HashMap<DigitalAssetAccountId, TransactionCount>, UserTransactionMonitorError> {
     let mut account_ids = HashSet::new();
     for address in non_hd_addresses {
@@ -197,7 +207,7 @@ fn load_account_transaction_counts_for_workset(
     for account_id in account_ids {
         counts.insert(
             account_id,
-            load_account_transaction_count_for_history_policy(user_id, account_id, policy)?,
+            load_account_transaction_count_for_fetch_policy(user_id, account_id, policy)?,
         );
     }
     Ok(counts)
@@ -212,7 +222,7 @@ struct HdMempoolHistoryBreadthRoundRequest<'a> {
     chain_tip_cache: &'a mut ChainTipCache,
     accumulator: &'a mut CycleAccumulator,
     sync_executor: &'a mut dyn AddressSyncExecutor,
-    policy: MempoolHistoryPolicy,
+    policy: TransactionFetchPolicy,
 }
 
 fn run_hd_mempool_history_breadth_round(
@@ -273,7 +283,7 @@ fn run_hd_mempool_history_breadth_round(
                 accumulator,
                 processed_for_account: &mut processed_for_account,
                 single_address_progress: None,
-                mempool_history_policy: policy,
+                transaction_fetch_policy: policy,
                 mempool_history_page_frontier: Some(crate::db::HdMempoolHistoryFrontierUpdate {
                     account_id: bundle.account_id,
                     next_address_id,
@@ -288,7 +298,7 @@ fn run_hd_mempool_history_breadth_round(
         if processed_for_account == processed_before {
             return Ok((false, completed_address_ids));
         }
-        let stored_count = load_account_transaction_count_for_history_policy(
+        let stored_count = load_account_transaction_count_for_fetch_policy(
             run.user_id,
             bundle.account_id,
             policy,
@@ -325,12 +335,12 @@ pub(super) fn run_sync_cycle(
         sync_executor,
         derivation_provider,
     } = request;
-    let mempool_history_policy = mempool_history_policy_for_preload(preload);
+    let transaction_fetch_policy = transaction_fetch_policy_for_preload(preload);
     let account_transaction_counts = load_account_transaction_counts_for_workset(
         run.user_id,
         &non_hd_addresses,
         &hd_bundles,
-        mempool_history_policy,
+        transaction_fetch_policy,
     )?;
     let run_excluded_address_ids = HashSet::new();
     let planner_input = planner_input_for_preload(
@@ -366,8 +376,8 @@ pub(super) fn run_sync_cycle(
         }
 
         let account_id = address.account_id;
-        let account_mempool_history_policy =
-            mempool_history_policy_for_account(preload, account_id);
+        let account_transaction_fetch_policy =
+            transaction_fetch_policy_for_account(preload, account_id);
         let asset_id = address.asset_id;
         let network = address.network;
         let single_address_progress = build_single_address_progress_plan(
@@ -420,7 +430,7 @@ pub(super) fn run_sync_cycle(
                 accumulator: &mut accumulator,
                 processed_for_account: &mut processed_non_hd,
                 single_address_progress,
-                mempool_history_policy: account_mempool_history_policy,
+                transaction_fetch_policy: account_transaction_fetch_policy,
                 mempool_history_page_frontier: None,
             })?;
         let completed_at = run.clock.instant_now();
@@ -553,8 +563,8 @@ pub(super) fn run_sync_cycle(
         let started_at = run.clock.instant_now();
         let counters_before = CycleAccumulatorSnapshot::from_accumulator(&accumulator);
         let account_id = bundle.account_id;
-        let account_mempool_history_policy =
-            mempool_history_policy_for_account(preload, Some(account_id));
+        let account_transaction_fetch_policy =
+            transaction_fetch_policy_for_account(preload, Some(account_id));
         let asset_id = bundle.asset_id;
         let network = bundle.network;
         let start = crate::db::mark_account_integration_sync_started(
@@ -576,7 +586,7 @@ pub(super) fn run_sync_cycle(
                 chain_tip_cache: &mut chain_tip_cache,
                 accumulator: &mut accumulator,
                 sync_executor,
-                policy: account_mempool_history_policy,
+                policy: account_transaction_fetch_policy,
             })?;
         if !history_interrupted {
             run_hd_bundle_scan(HdBundleScanRequest {
@@ -591,8 +601,8 @@ pub(super) fn run_sync_cycle(
                 sync_executor,
                 derivation_provider,
                 historical_backfill_enabled: matches!(
-                    account_mempool_history_policy,
-                    MempoolHistoryPolicy::LegacyRepair
+                    account_transaction_fetch_policy,
+                    TransactionFetchPolicy::LegacyRepair
                 ),
             })?;
         }
@@ -701,22 +711,25 @@ pub(super) fn empty_sync_summary(
 fn address_has_unfinished_work(
     address: &SyncAddress,
     bitcoin_history_repair_account_ids: &HashSet<DigitalAssetAccountId>,
-    mempool_history_page_permitted: bool,
+    transaction_page_permitted: bool,
 ) -> bool {
     let repair_owned = address
         .account_id
         .is_some_and(|account_id| bitcoin_history_repair_account_ids.contains(&account_id));
-    let has_unfinished_backfill = match default_api_provider_for_asset(address.asset_id) {
-        SyncProviderId::MempoolSpace => {
-            mempool_history_page_permitted && unfinished_backfill_state(address).is_some()
-        }
-        SyncProviderId::Etherscan => unfinished_backfill_state(address).is_some(),
-    };
+    let has_unfinished_backfill =
+        transaction_page_permitted && has_unfinished_transaction_work(address);
 
     (matches!(address.last_result, Some(TransactionSyncResult::Failure))
         && (repair_owned || address.consecutive_failure_count.value() < ADDRESS_FAILURE_THRESHOLD))
         || is_first_sync(address.last_tip_height)
         || has_unfinished_backfill
+}
+
+fn has_unfinished_transaction_work(address: &SyncAddress) -> bool {
+    unfinished_backfill_state(address).is_some()
+        || (default_api_provider_for_asset(address.asset_id) == SyncProviderId::Etherscan
+            && address.last_tip_height.is_some()
+            && address.etherscan_transaction_tip_height != address.last_tip_height)
 }
 
 fn scope_matches_address(scope: TransactionSyncScope, address: &SyncAddress) -> bool {
@@ -773,8 +786,7 @@ fn load_active_native_accounts_for_entitlements(
     Ok(
         crate::db::account_limits::sync_eligible_native_account_ids_for_user(
             user_id,
-            usize::from(entitlements.sync_account_slots_limit),
-            entitlements.tier == EntitlementTier::Free,
+            entitlements,
         )?,
     )
 }
@@ -815,16 +827,14 @@ fn reload_has_unfinished_sync_work(user_id: UserId) -> Result<bool, UserTransact
     Ok(!reload_unfinished_sync_integrations(user_id)?.is_empty())
 }
 
-fn load_mempool_history_page_permission(
+fn load_transaction_page_permission(
     user_id: UserId,
     address: &SyncAddress,
     bitcoin_history_repair_account_ids: &HashSet<DigitalAssetAccountId>,
-    normal_policy: MempoolHistoryPolicy,
+    normal_policy: TransactionFetchPolicy,
     stored_counts: &mut HashMap<DigitalAssetAccountId, TransactionCount>,
 ) -> Result<bool, UserTransactionMonitorError> {
-    if default_api_provider_for_asset(address.asset_id) != SyncProviderId::MempoolSpace
-        || unfinished_backfill_state(address).is_none()
-    {
+    if !has_unfinished_transaction_work(address) {
         return Ok(false);
     }
     let Some(account_id) = address.account_id else {
@@ -837,7 +847,7 @@ fn load_mempool_history_page_permission(
     let stored_count = match stored_counts.get(&account_id).copied() {
         Some(stored_count) => stored_count,
         None => {
-            let stored_count = load_account_transaction_count_for_history_policy(
+            let stored_count = load_account_transaction_count_for_fetch_policy(
                 user_id,
                 account_id,
                 normal_policy,
@@ -854,8 +864,15 @@ fn reload_unfinished_sync_integrations(
 ) -> Result<HashSet<SyncIntegrationId>, UserTransactionMonitorError> {
     let now = Utc::now();
     let entitlements = crate::payments::entitlements::load_feature_entitlements(user_id, now)?;
-    let mut active_accounts = load_active_native_accounts_for_entitlements(user_id, &entitlements)?;
-    let normal_policy = MempoolHistoryPolicy::normal(
+    let native_modes =
+        crate::db::account_limits::native_account_modes_for_user(user_id, &entitlements)?;
+    let mut active_accounts = native_modes
+        .iter()
+        .filter_map(|(id, mode)| {
+            (*mode != crate::account_limits::NativeAccountMode::Inactive).then_some(*id)
+        })
+        .collect::<HashSet<_>>();
+    let normal_policy = TransactionFetchPolicy::normal(
         entitlements.historical_backfill_enabled,
         TransactionCount::from_u32(entitlements.historical_backfill_transactions_per_account),
     );
@@ -874,11 +891,18 @@ fn reload_unfinished_sync_integrations(
     let mut stored_counts = HashMap::new();
 
     for address in &non_hd_addresses {
-        let page_permitted = load_mempool_history_page_permission(
+        let account_policy = if address.account_id.is_some_and(|id| {
+            native_modes.get(&id) == Some(&crate::account_limits::NativeAccountMode::Transactions)
+        }) {
+            normal_policy
+        } else {
+            TransactionFetchPolicy::CurrentOnly
+        };
+        let page_permitted = load_transaction_page_permission(
             user_id,
             address,
             &bitcoin_history_repair_account_ids,
-            normal_policy,
+            account_policy,
             &mut stored_counts,
         )?;
         if address_has_unfinished_work(address, &bitcoin_history_repair_account_ids, page_permitted)
@@ -893,11 +917,18 @@ fn reload_unfinished_sync_integrations(
             .iter()
             .chain(bundle.internal_addresses.iter())
         {
-            let page_permitted = load_mempool_history_page_permission(
+            let account_policy = if native_modes.get(&bundle.account_id)
+                == Some(&crate::account_limits::NativeAccountMode::Transactions)
+            {
+                normal_policy
+            } else {
+                TransactionFetchPolicy::CurrentOnly
+            };
+            let page_permitted = load_transaction_page_permission(
                 user_id,
                 address,
                 &bitcoin_history_repair_account_ids,
-                normal_policy,
+                account_policy,
                 &mut stored_counts,
             )?;
             if address_has_unfinished_work(
@@ -1482,6 +1513,7 @@ pub(super) fn empty_sync_run_preload() -> SyncRunPreload {
         known_activity_address_ids: HashSet::new(),
         pending_address_ids: HashSet::new(),
         bitcoin_history_repair_account_ids: HashSet::new(),
+        native_account_modes: None,
     }
 }
 
@@ -1587,7 +1619,7 @@ mod tests {
         clock: &FakeClock,
         address: &mut SyncAddress,
         response_bodies: Vec<String>,
-        policy: MempoolHistoryPolicy,
+        policy: TransactionFetchPolicy,
     ) -> Vec<String> {
         let server = start_historical_sync_mempool_server(response_bodies);
         let http_counters = SyncHttpCounters::new();
@@ -1623,7 +1655,7 @@ mod tests {
             accumulator: &mut accumulator,
             processed_for_account: &mut processed_for_account,
             single_address_progress: None,
-            mempool_history_policy: policy,
+            transaction_fetch_policy: policy,
             mempool_history_page_frontier: None,
         })
         .expect("controlled address cycle should succeed");
@@ -2052,7 +2084,7 @@ mod tests {
                 observed_at: DateTime::parse_from_rfc3339("2100-01-01T00:00:00Z")
                     .expect("entitlement time should parse")
                     .with_timezone(&Utc),
-                capability_schema_version: crate::payments::types::CAPABILITY_SCHEMA_VERSION_V3,
+                capability_schema_version: crate::payments::types::CAPABILITY_SCHEMA_VERSION_V4,
                 capabilities,
             },
         )
@@ -2714,21 +2746,21 @@ mod tests {
     }
 
     #[test]
-    fn mempool_history_policy_automatic_does_not_use_provider_count_as_admission() {
+    fn transaction_fetch_policy_automatic_does_not_use_provider_count_as_admission() {
         let mut preload = empty_sync_run_preload();
 
         preload.historical_backfill_enabled = false;
         assert_eq!(
-            mempool_history_policy_for_preload(&preload),
-            MempoolHistoryPolicy::CurrentOnly,
+            transaction_fetch_policy_for_preload(&preload),
+            TransactionFetchPolicy::CurrentOnly,
         );
 
         preload.historical_backfill_enabled = true;
         preload.historical_backfill_transactions_per_account = 10_000;
-        let policy = mempool_history_policy_for_preload(&preload);
+        let policy = transaction_fetch_policy_for_preload(&preload);
         assert_eq!(
             policy,
-            MempoolHistoryPolicy::Normal {
+            TransactionFetchPolicy::Normal {
                 cap: TransactionCount::from_u32(10_000),
             },
         );
@@ -2815,7 +2847,7 @@ mod tests {
                     chain_tip_cache: &mut chain_tip_cache,
                     accumulator: &mut accumulator,
                     sync_executor: &mut executor,
-                    policy: MempoolHistoryPolicy::Normal {
+                    policy: TransactionFetchPolicy::Normal {
                         cap: TransactionCount::from_u32(100),
                     },
                 })
@@ -2898,7 +2930,7 @@ mod tests {
                     chain_tip_cache: &mut first_chain_tip_cache,
                     accumulator: &mut first_accumulator,
                     sync_executor: &mut first_executor,
-                    policy: MempoolHistoryPolicy::Normal {
+                    policy: TransactionFetchPolicy::Normal {
                         cap: TransactionCount::from_u32(1),
                     },
                 })
@@ -2983,7 +3015,7 @@ mod tests {
                 chain_tip_cache: &mut second_chain_tip_cache,
                 accumulator: &mut second_accumulator,
                 sync_executor: &mut second_executor,
-                policy: MempoolHistoryPolicy::Normal {
+                policy: TransactionFetchPolicy::Normal {
                     cap: TransactionCount::from_u32(2),
                 },
             })
@@ -3134,7 +3166,7 @@ mod tests {
     }
 
     #[test]
-    fn task5_persisted_capped_stats_restart_from_first_page_when_cap_rises() {
+    fn task5_capped_stats_retain_cursor_until_cap_rise_restarts_first_page() {
         with_rate_limiter_isolated(|| {
             let clock = FakeClock::new(test_utc_now());
             let capped_run = make_run_context(&clock);
@@ -3210,7 +3242,7 @@ mod tests {
                 chain_tip_cache: &mut capped_chain_tip_cache,
                 accumulator: &mut capped_accumulator,
                 sync_executor: &mut capped_executor,
-                policy: MempoolHistoryPolicy::Normal {
+                policy: TransactionFetchPolicy::Normal {
                     cap: TransactionCount::from_u32(1),
                 },
             })
@@ -3231,11 +3263,11 @@ mod tests {
                     .find(|candidate| candidate.address_id == address.address_id)
                     .expect("capped address should persist");
             assert_eq!(capped_address.mempool_history_proof, Some(old_proof));
-            assert_eq!(capped_address.mempool_backfill_cursor_txid, None);
             assert_eq!(
-                capped_address.mempool_expected_tx_count,
-                Some(TransactionCount::from_u32(2))
+                capped_address.mempool_backfill_cursor_txid,
+                Some(stale_cursor)
             );
+            assert_eq!(capped_address.mempool_expected_tx_count, None);
 
             clock.sleep(Duration::from_secs(91));
             let raised_run = next_run_for_user(&clock, capped_run.user_id);
@@ -3271,7 +3303,7 @@ mod tests {
                 chain_tip_cache: &mut raised_chain_tip_cache,
                 accumulator: &mut raised_accumulator,
                 sync_executor: &mut raised_executor,
-                policy: MempoolHistoryPolicy::Normal {
+                policy: TransactionFetchPolicy::Normal {
                     cap: TransactionCount::from_u32(2),
                 },
             })
@@ -3288,6 +3320,14 @@ mod tests {
                     format!("GET /api/address/{} HTTP/1.1", address.address.as_str()),
                     format!("GET /api/address/{}/txs HTTP/1.1", address.address.as_str()),
                 ]
+            );
+            assert_eq!(
+                crate::db::load_canonical_confirmed_account_transaction_count(
+                    raised_run.user_id,
+                    account_id,
+                )
+                .expect("newest transaction should persist after restart"),
+                TransactionCount::from_u32(2),
             );
         });
     }
@@ -3370,7 +3410,7 @@ mod tests {
                 chain_tip_cache: &mut chain_tip_cache,
                 accumulator: &mut accumulator,
                 sync_executor: &mut executor,
-                policy: MempoolHistoryPolicy::Normal {
+                policy: TransactionFetchPolicy::Normal {
                     cap: TransactionCount::from_u32(1),
                 },
             })
@@ -3441,7 +3481,7 @@ mod tests {
                 accumulator: &mut accumulator,
                 processed_for_account: &mut processed_for_account,
                 single_address_progress: None,
-                mempool_history_policy: MempoolHistoryPolicy::Normal {
+                transaction_fetch_policy: TransactionFetchPolicy::Normal {
                     cap: TransactionCount::from_u32(10),
                 },
                 mempool_history_page_frontier: None,
@@ -3501,7 +3541,7 @@ mod tests {
                 None,
             );
             persist_sync_addresses_for_test(first_run, std::slice::from_ref(&address));
-            let capped_policy = MempoolHistoryPolicy::Normal {
+            let capped_policy = TransactionFetchPolicy::Normal {
                 cap: TransactionCount::from_u32(5),
             };
             let first_page = mempool_page_json_with_count(&address, 6);
@@ -3621,7 +3661,7 @@ mod tests {
             );
 
             let mut stored_counts = HashMap::new();
-            let page_permitted = load_mempool_history_page_permission(
+            let page_permitted = load_transaction_page_permission(
                 capped_run.user_id,
                 &capped_address,
                 &HashSet::new(),
@@ -3637,10 +3677,10 @@ mod tests {
             ));
 
             stored_counts.clear();
-            let raised_policy = MempoolHistoryPolicy::Normal {
+            let raised_policy = TransactionFetchPolicy::Normal {
                 cap: TransactionCount::from_u32(7),
             };
-            let page_permitted = load_mempool_history_page_permission(
+            let page_permitted = load_transaction_page_permission(
                 capped_run.user_id,
                 &capped_address,
                 &HashSet::new(),
@@ -3691,6 +3731,104 @@ mod tests {
             assert_eq!(
                 resumed_address.mempool_backfill_cursor_txid.as_ref(),
                 Some(&expected_cursor)
+            );
+        });
+    }
+
+    #[test]
+    fn full_page_crossing_transaction_cap_stops_before_next_fetch() {
+        with_rate_limiter_isolated(|| {
+            let clock = FakeClock::new(test_utc_now());
+            let run = make_run_context(&clock);
+            let account_id = DigitalAssetAccountId::new();
+            let mut address = make_sync_address(
+                "bc1qcrossingtransactioncap",
+                SyncedAssetId::Bitcoin,
+                Network::Mainnet,
+                Some(account_id),
+                None,
+                None,
+                None,
+            );
+            persist_sync_addresses_for_test(run, std::slice::from_ref(&address));
+            crate::db::with_user_db_mut(run.user_id, |conn| {
+                for index in 1..=999_u32 {
+                    let id = ulid::Ulid::new().to_string();
+                    conn.execute(
+                        "INSERT INTO chain_transactions
+                         (id, asset_id, network, tx_hash, status, block_height, created_at, updated_at)
+                         VALUES (?1, 'bitcoin', 'mainnet', ?2, ?3,
+                                 CASE WHEN ?3 = 'pending' THEN NULL ELSE 1 END, ?4, ?4)",
+                        rusqlite::params![
+                            id,
+                            format!("{index:064x}"),
+                            if index == 1 { "pending" } else { "confirmed" },
+                            run.started_at.to_rfc3339(),
+                        ],
+                    )
+                    .map_err(|error| crate::db::DbError::new(error.to_string()))?;
+                    for output_index in 0..if index == 2 { 2 } else { 1 } {
+                        conn.execute(
+                            "INSERT INTO transaction_outputs
+                             (id, tx_id, output_index, address_id, raw_address, script_pubkey_hex,
+                              value_amount_hi, value_amount_lo, created_at, updated_at)
+                             VALUES (?1, ?2, ?3, ?4, NULL, '00', 0, 1, ?5, ?5)",
+                            rusqlite::params![
+                                ulid::Ulid::new().to_string(),
+                                id,
+                                output_index,
+                                address.address_id.to_string(),
+                                run.started_at.to_rfc3339(),
+                            ],
+                        )
+                        .map_err(|error| crate::db::DbError::new(error.to_string()))?;
+                    }
+                }
+                Ok::<(), crate::db::DbError>(())
+            })
+            .expect("canonical fixture should persist");
+            assert_eq!(
+                crate::db::load_canonical_account_transaction_count_bounded(
+                    run.user_id,
+                    account_id,
+                    TransactionCount::from_u32(1003),
+                )
+                .expect("canonical count should load"),
+                TransactionCount::from_u32(999),
+                "pending and duplicate outputs count by transaction identity",
+            );
+
+            let hashes = (978..=1002_u32)
+                .rev()
+                .map(|index| format!("{index:064x}"))
+                .collect::<Vec<_>>();
+            let entries = hashes
+                .iter()
+                .map(|hash| (hash.as_str(), 1, 1))
+                .collect::<Vec<_>>();
+            let page = btc_page_json(&address, &entries);
+            let requests = run_live_single_address_cycle(
+                run,
+                &clock,
+                &mut address,
+                vec![btc_stats_json(1002, 1002, 0), page],
+                TransactionFetchPolicy::normal(true, TransactionCount::from_u32(1000)),
+            );
+            assert_eq!(
+                requests,
+                vec![
+                    format!("GET /api/address/{} HTTP/1.1", address.address.as_str()),
+                    format!("GET /api/address/{}/txs HTTP/1.1", address.address.as_str()),
+                ],
+            );
+            assert_eq!(
+                crate::db::load_canonical_account_transaction_count_bounded(
+                    run.user_id,
+                    account_id,
+                    TransactionCount::from_u32(1003),
+                )
+                .expect("crossing count should load"),
+                TransactionCount::from_u32(1002),
             );
         });
     }
@@ -4255,7 +4393,7 @@ mod tests {
 
             assert_eq!(summary.addresses_synced.value(), 1);
             assert_eq!(executor.calls, vec![address.address_id]);
-            assert_eq!(executor.historical_backfill_enabled_calls, vec![false]);
+            assert_eq!(executor.transaction_page_permitted_calls, vec![false]);
         });
     }
 
@@ -4271,24 +4409,51 @@ mod tests {
             .insert(repair_account_id);
 
         assert_eq!(
-            mempool_history_policy_for_account(&preload, Some(repair_account_id)),
-            MempoolHistoryPolicy::LegacyRepair
+            transaction_fetch_policy_for_account(&preload, Some(repair_account_id)),
+            TransactionFetchPolicy::LegacyRepair
         );
         assert_eq!(
-            mempool_history_policy_for_account(&preload, Some(normal_account_id)),
-            MempoolHistoryPolicy::Normal {
+            transaction_fetch_policy_for_account(&preload, Some(normal_account_id)),
+            TransactionFetchPolicy::Normal {
                 cap: TransactionCount::from_u32(1)
             }
         );
     }
 
     #[test]
+    fn balance_only_account_never_fetches_transaction_pages() {
+        let balance_only = DigitalAssetAccountId::new();
+        let transactions = DigitalAssetAccountId::new();
+        let mut preload = empty_sync_run_preload();
+        preload.native_account_modes = Some(HashMap::from([
+            (
+                balance_only,
+                crate::account_limits::NativeAccountMode::BalanceOnly,
+            ),
+            (
+                transactions,
+                crate::account_limits::NativeAccountMode::Transactions,
+            ),
+        ]));
+        assert_eq!(
+            transaction_fetch_policy_for_account(&preload, Some(balance_only)),
+            TransactionFetchPolicy::CurrentOnly
+        );
+        assert!(matches!(
+            transaction_fetch_policy_for_account(&preload, Some(transactions)),
+            TransactionFetchPolicy::Normal { .. }
+        ));
+    }
+
+    #[test]
     fn prioritize_non_hd_addresses_orders_by_urgency_tier() {
+        let bitcoin_account_id = DigitalAssetAccountId::new();
+        let ethereum_account_id = DigitalAssetAccountId::new();
         let mut unfinished = make_sync_address(
             "bc1qpriorityunfinished",
             SyncedAssetId::Bitcoin,
             Network::Mainnet,
-            None,
+            Some(bitcoin_account_id),
             None,
             None,
             None,
@@ -4306,7 +4471,7 @@ mod tests {
             "0x4444444444444444444444444444444444444444",
             SyncedAssetId::Ethereum,
             Network::Mainnet,
-            None,
+            Some(ethereum_account_id),
             None,
             None,
             None,
@@ -4318,7 +4483,7 @@ mod tests {
             "0x5555555555555555555555555555555555555555",
             SyncedAssetId::Ethereum,
             Network::Mainnet,
-            None,
+            Some(ethereum_account_id),
             None,
             None,
             None,
@@ -4329,7 +4494,7 @@ mod tests {
             "bc1qpriorityrecent",
             SyncedAssetId::Bitcoin,
             Network::Mainnet,
-            None,
+            Some(bitcoin_account_id),
             None,
             None,
             None,
@@ -4341,7 +4506,7 @@ mod tests {
             "bc1qprioritycold",
             SyncedAssetId::Bitcoin,
             Network::Mainnet,
-            None,
+            Some(bitcoin_account_id),
             None,
             None,
             None,
@@ -4351,6 +4516,16 @@ mod tests {
 
         let mut addresses = vec![cold, first_sync, recent, pending, unfinished];
         let mut preload = empty_sync_run_preload();
+        preload.native_account_modes = Some(HashMap::from([
+            (
+                bitcoin_account_id,
+                crate::account_limits::NativeAccountMode::Transactions,
+            ),
+            (
+                ethereum_account_id,
+                crate::account_limits::NativeAccountMode::Transactions,
+            ),
+        ]));
         preload.pending_address_ids.insert(pending_id);
         preload.known_activity_address_ids.insert(recent_id);
 
@@ -4466,7 +4641,7 @@ mod tests {
     }
 
     #[test]
-    fn etherscan_cursor_remains_unfinished_without_mempool_permission() {
+    fn etherscan_cursor_is_not_runnable_when_transaction_page_is_capped() {
         let mut address = make_sync_address(
             "0x7777777777777777777777777777777777777777",
             SyncedAssetId::Ethereum,
@@ -4481,10 +4656,25 @@ mod tests {
         address.etherscan_backfill_end_block =
             Some(crate::transactions::EthereumBlockNumber::try_new(50).expect("valid block"));
 
-        assert!(address_has_unfinished_work(
+        assert!(!address_has_unfinished_work(
             &address,
             &HashSet::new(),
             false
+        ));
+        assert!(address_has_unfinished_work(&address, &HashSet::new(), true));
+
+        address.etherscan_backfill_end_block = None;
+        assert!(!address_has_unfinished_work(
+            &address,
+            &HashSet::new(),
+            false
+        ));
+        assert!(address_has_unfinished_work(&address, &HashSet::new(), true));
+        address.etherscan_transaction_tip_height = address.last_tip_height;
+        assert!(!address_has_unfinished_work(
+            &address,
+            &HashSet::new(),
+            true
         ));
     }
 
@@ -4771,7 +4961,7 @@ mod tests {
                 accumulator: &mut accumulator_b,
                 processed_for_account: &mut processed_b,
                 single_address_progress: None,
-                mempool_history_policy: MempoolHistoryPolicy::Normal {
+                transaction_fetch_policy: TransactionFetchPolicy::Normal {
                     cap: TransactionCount::from_u32(2),
                 },
                 mempool_history_page_frontier: None,
@@ -4847,7 +5037,7 @@ mod tests {
                 accumulator: &mut accumulator_next,
                 processed_for_account: &mut processed_next,
                 single_address_progress: None,
-                mempool_history_policy: MempoolHistoryPolicy::Normal {
+                transaction_fetch_policy: TransactionFetchPolicy::Normal {
                     cap: TransactionCount::from_u32(2),
                 },
                 mempool_history_page_frontier: None,
@@ -4941,7 +5131,7 @@ mod tests {
                 accumulator: &mut accumulator_third,
                 processed_for_account: &mut processed_third,
                 single_address_progress: None,
-                mempool_history_policy: MempoolHistoryPolicy::Normal {
+                transaction_fetch_policy: TransactionFetchPolicy::Normal {
                     cap: TransactionCount::from_u32(2),
                 },
                 mempool_history_page_frontier: None,

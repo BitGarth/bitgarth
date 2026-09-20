@@ -1,7 +1,7 @@
 use crate::balance_reliability::{BalanceProvisionalReason, BalanceReliability};
 use crate::db::error::DbError;
 use crate::models::parse_datetime;
-use crate::transactions::TransactionCount;
+use crate::transactions::{ChainTipHeight, TransactionCount};
 use crate::wallets::DigitalAssetAccountId;
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
@@ -15,6 +15,7 @@ pub(crate) struct AccountBalanceReliabilityContext {
     pub(crate) balance_reliability: BalanceReliability,
     pub(crate) bitcoin_history_coverage:
         Option<crate::db::transaction_sync::BitcoinAccountHistoryCoverage>,
+    pub(crate) bitcoin_history_observed_tip: Option<ChainTipHeight>,
 }
 
 pub(crate) fn load_latest_successful_sync_date(
@@ -59,6 +60,28 @@ fn resolve_bitcoin_history_coverage_for_cap(
         return crate::db::transaction_sync::BitcoinAccountHistoryCoverage::Limited;
     }
     coverage
+}
+
+fn load_bitcoin_history_observed_tip(
+    conn: &rusqlite::Connection,
+    account_id: DigitalAssetAccountId,
+) -> Result<Option<ChainTipHeight>, DbError> {
+    let height: Option<i64> = conn
+        .query_row(
+            "SELECT MAX(tss.last_tip_height)
+             FROM digital_asset_addresses a
+             JOIN transaction_sync_state tss ON tss.address_id = a.id
+             WHERE a.account_id = ?1 AND tss.scope = ?2",
+            params![account_id.to_string(), ADDRESS_SYNC_SCOPE],
+            |row| row.get(0),
+        )
+        .map_err(|err| DbError::new(format!("Failed to load Bitcoin observed tip: {err}")))?;
+    height
+        .map(|height| {
+            ChainTipHeight::try_new(height)
+                .map_err(|err| DbError::new(format!("Invalid Bitcoin observed tip: {err}")))
+        })
+        .transpose()
 }
 
 fn load_account_integration_last_successful_sync_date(
@@ -179,6 +202,15 @@ pub(crate) fn load_account_balance_reliability_context_for_history(
     let has_active_backfill = load_account_has_active_backfill(conn, account_id)?;
     let mut bitcoin_history_coverage =
         crate::db::account_transactions::load_bitcoin_account_history_coverage(conn, account_id)?;
+    let bitcoin_history_observed_tip = if matches!(
+        bitcoin_history_coverage,
+        Some(crate::db::transaction_sync::BitcoinAccountHistoryCoverage::Complete { .. })
+    ) {
+        load_bitcoin_history_observed_tip(conn, account_id)?
+    } else {
+        None
+    };
+    let mut at_history_cap = false;
     if let (Some(coverage), Some(history_cap)) = (bitcoin_history_coverage, history_cap)
         && !crate::db::account_transactions::load_bitcoin_history_repair_pending(conn, account_id)?
     {
@@ -188,36 +220,49 @@ pub(crate) fn load_account_balance_reliability_context_for_history(
                 account_id,
                 history_cap,
             )?;
+        at_history_cap = count.value() >= history_cap.value();
         bitcoin_history_coverage = Some(resolve_bitcoin_history_coverage_for_cap(
             coverage,
             count,
             history_cap,
         ));
     }
-    let coverage_reason = bitcoin_history_coverage.and_then(|coverage| match coverage {
-        crate::db::transaction_sync::BitcoinAccountHistoryCoverage::Unscanned
-        | crate::db::transaction_sync::BitcoinAccountHistoryCoverage::Syncing => {
-            Some(BalanceProvisionalReason::HistoricalBackfillInProgress)
-        }
-        crate::db::transaction_sync::BitcoinAccountHistoryCoverage::Limited => {
-            Some(BalanceProvisionalReason::HistoricalCoverageLimited)
-        }
-        crate::db::transaction_sync::BitcoinAccountHistoryCoverage::Complete { .. } => None,
-    });
+    let complete_proof_is_older_than_tip = matches!(
+        (bitcoin_history_coverage, bitcoin_history_observed_tip),
+        (
+            Some(crate::db::transaction_sync::BitcoinAccountHistoryCoverage::Complete { coverage_height }),
+            Some(observed_tip)
+        ) if coverage_height.value() < observed_tip.value()
+    );
+    let coverage_reason = if complete_proof_is_older_than_tip {
+        Some(if at_history_cap {
+            BalanceProvisionalReason::HistoricalCoverageLimited
+        } else {
+            BalanceProvisionalReason::HistoricalBackfillInProgress
+        })
+    } else {
+        bitcoin_history_coverage.and_then(|coverage| match coverage {
+            crate::db::transaction_sync::BitcoinAccountHistoryCoverage::Unscanned
+            | crate::db::transaction_sync::BitcoinAccountHistoryCoverage::Syncing => {
+                Some(BalanceProvisionalReason::HistoricalBackfillInProgress)
+            }
+            crate::db::transaction_sync::BitcoinAccountHistoryCoverage::Limited => {
+                Some(BalanceProvisionalReason::HistoricalCoverageLimited)
+            }
+            crate::db::transaction_sync::BitcoinAccountHistoryCoverage::Complete { .. } => None,
+        })
+    };
     let coverage_reliability = BalanceReliability::from_reasons(coverage_reason);
 
     Ok(AccountBalanceReliabilityContext {
         last_successful_sync_date,
         balance_reliability: derive_account_balance_reliability(
             last_successful_sync_date,
-            has_active_backfill
-                && !matches!(
-                    bitcoin_history_coverage,
-                    Some(crate::db::transaction_sync::BitcoinAccountHistoryCoverage::Limited)
-                ),
+            has_active_backfill && !at_history_cap,
         )
         .combine(&coverage_reliability),
         bitcoin_history_coverage,
+        bitcoin_history_observed_tip,
     })
 }
 

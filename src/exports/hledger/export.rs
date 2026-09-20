@@ -2832,8 +2832,8 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO transaction_sync_state
-                 (id, scope, address_id, last_run_id, last_started_at, last_completed_at, last_result, last_error, last_tip_height, new_tx_count, updated_tx_count, api_confirmed_balance_hi, api_confirmed_balance_lo, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 (id, scope, address_id, last_run_id, last_started_at, last_completed_at, last_result, last_error, last_tip_height, new_tx_count, updated_tx_count, api_confirmed_balance_hi, api_confirmed_balance_lo, api_confirmed_balance_observed_at, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     Ulid::new().to_string(),
                     "address",
@@ -2848,6 +2848,7 @@ mod tests {
                     0_i64,
                     hi,
                     lo,
+                    &timestamp,
                     &timestamp,
                     &timestamp,
                 ],
@@ -2956,6 +2957,15 @@ mod tests {
             UnsignedAmount::from_u128(2_441_190_093_160_u128),
             now,
         );
+        connection
+            .execute(
+                "UPDATE transaction_sync_state SET last_completed_at = ?1 WHERE address_id = ?2",
+                params![
+                    fixed_time(21, 10).to_rfc3339(),
+                    response.address_id.to_string()
+                ],
+            )
+            .expect("later transaction-only sync time should persist");
         drop(connection);
 
         let hledger_dir = temp_root.hledger_dir(user_id);

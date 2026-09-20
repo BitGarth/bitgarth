@@ -416,9 +416,8 @@ async function main() {
       appServer = await startAppServer({
         BITGARTH_CENTRAL_BASE_URL: mockCentral.baseUrl,
         BITGARTH_COINGECKO_BASE_URL: mockCoingecko.baseUrl,
-        // Deliberately no BITGARTH_CHANNEL: an unknown channel keeps the
-        // software-update indicator dormant so the showcase images stay clean,
-        // while payment product-options still resolve from mock Central.
+        // Hosted suppresses software-update notices in showcase captures.
+        BITGARTH_CHANNEL: "hosted",
         BITGARTH_PAYMENT_SIGNING_PUBLIC_KEY_B64: PAYMENT_SIGNING_PUBLIC_KEY_B64,
       });
       baseUrl = appServer.url;

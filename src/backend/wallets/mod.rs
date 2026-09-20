@@ -35,10 +35,9 @@ pub(crate) use types::{
     AccountBalanceStateView, AccountCreationStateView, AccountLimitNoticeView,
     AccountReferenceKind, AccountStateView, AccountTransactionCountsView, AccountView,
     BalanceAmountView, CustomAccountView, FiatAmountView, HoldingsReportResponse,
-    ManualAssetAccountView, ManualSyncDisabledReason, ManualSyncMode, ManualSyncSlotEffect,
-    NativeAccountManualSyncView, NativeAccountSyncSlotView, NativeAccountView,
-    NativeBalanceStateView, ValidateXpubResponse, WalletBalanceView, WalletError,
-    WalletReportAccountRow, WalletReportBalanceStateView, WalletReportResponse,
+    ManualAssetAccountView, ManualSyncDisabledReason, ManualSyncMode, NativeAccountManualSyncView,
+    NativeAccountView, NativeBalanceStateView, ValidateXpubResponse, WalletBalanceView,
+    WalletError, WalletReportAccountRow, WalletReportBalanceStateView, WalletReportResponse,
     WalletValueSummaryView, WalletView, WalletsValueSummaryView,
 };
 

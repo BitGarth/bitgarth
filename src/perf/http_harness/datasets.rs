@@ -3,12 +3,12 @@ use super::scenarios::PerfScenarioDefinition;
 use super::{PerfError, PerfRunId};
 use crate::amounts::UnsignedAmount;
 use crate::db::{
-    AddEthAddressDbResult, AddressSyncSuccess, ProviderTransferKey, SyncAccountTransactionRecord,
-    SyncAccountTransferRecord, SyncTransactionInputRecord, SyncTransactionOutputRecord,
-    SyncTransactionRecord, add_bitcoin_address, add_ethereum_address,
+    AddEthAddressDbResult, AddressSyncSuccess, DbError, ProviderTransferKey,
+    SyncAccountTransactionRecord, SyncAccountTransferRecord, SyncTransactionInputRecord,
+    SyncTransactionOutputRecord, SyncTransactionRecord, add_bitcoin_address, add_ethereum_address,
     mark_address_sync_completed_failure, mark_address_sync_completed_success,
     rebuild_account_transaction_ledger, reconcile_account_transactions,
-    reconcile_address_transactions,
+    reconcile_address_transactions, with_user_db_mut,
 };
 use crate::ethereum::{EthAddress, RawEthAddress, TransferKind};
 use crate::models::UserId;
@@ -18,7 +18,7 @@ use crate::transactions::{
 };
 use crate::wallets::{
     BtcAddress, DigitalAssetAccountId, DigitalAssetAddressId, Label, Network, RawBtcAddress,
-    SyncedAssetId, WALLET_LABEL_MAX_LENGTH,
+    SyncedAssetId, WALLET_LABEL_MAX_LENGTH, WalletAccountId, WalletId,
 };
 use chrono::{Duration as ChronoDuration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
@@ -28,8 +28,9 @@ const DATASET_MANIFEST_FILENAME: &str = "perf-dataset.json";
 pub(super) const DEFAULT_PASSWORD: &str = "SecurePass123";
 
 pub(super) const SYNC_LEDGER_REBUILD_ITERATIONS: u32 = 12;
-pub(super) const LARGE_WALLETS_WALLET_COUNT: u32 = 24;
-pub(super) const LARGE_WALLETS_ACCOUNTS_PER_WALLET: u32 = 3;
+pub(super) const LARGE_WALLETS_WALLET_COUNT: u32 = 100;
+pub(super) const LARGE_WALLETS_ACCOUNTS_PER_WALLET: u32 = 50;
+const LARGE_WALLETS_MANUAL_ACCOUNTS_PER_WALLET: u32 = 10;
 pub(super) const LARGE_ACCOUNT_TRANSACTIONS_CONFIRMED_COUNT: u32 = 180;
 pub(super) const LARGE_ACCOUNT_TRANSACTIONS_PENDING_COUNT: u32 = 24;
 const LARGE_ACCOUNT_TRANSACTIONS_PRIMARY_ADDRESS_INDEX: u64 = 4_096;
@@ -422,12 +423,81 @@ fn seed_large_wallets_dataset(
     wallet_count: u32,
     accounts_per_wallet: u32,
 ) -> Result<WalletDatasetCounts, PerfError> {
-    let seeded_accounts = seed_wallet_accounts(user_id, wallet_count, accounts_per_wallet)?;
-    let account_count = u32::try_from(seeded_accounts.len())
-        .map_err(|_| PerfError::io("perf seeded account count exceeded u32"))?;
+    let native_per_wallet = accounts_per_wallet
+        .checked_sub(LARGE_WALLETS_MANUAL_ACCOUNTS_PER_WALLET)
+        .ok_or_else(|| PerfError::usage("perf manual account count exceeds wallet size"))?;
+    let observed_at = perf_seed_timestamp()?;
+    let created_at = observed_at.to_rfc3339();
+    let account_count = wallet_count.saturating_mul(accounts_per_wallet);
+    let address_count = wallet_count.saturating_mul(native_per_wallet);
+    with_user_db_mut(user_id, |conn| -> Result<(), DbError> {
+        let seed = (|| -> rusqlite::Result<()> {
+            let tx = conn.transaction()?;
+            let mut native_index = 0_i64;
+            let mut manual_index = 0_i64;
+            for wallet_index in 0..wallet_count {
+                let wallet_id = WalletId::new();
+                let wallet_label = format!("Perf Wallet {:03}", wallet_index + 1);
+                tx.execute(
+                    "INSERT INTO wallets (id, label, label_key, identity_source, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 'user_provided', ?4, ?4)",
+                    rusqlite::params![wallet_id.to_string(), wallet_label, wallet_label.to_ascii_lowercase(), created_at],
+                )?;
+                for slot in 0..native_per_wallet {
+                    let account_id = DigitalAssetAccountId::new();
+                    let address_id = DigitalAssetAddressId::new();
+                    let label = format!("ETH {:02}", slot + 1);
+                    let address = generated_eth_address_value(u64::try_from(native_index + 1).unwrap_or_default());
+                    let admitted_at = (observed_at + ChronoDuration::microseconds(native_index))
+                        .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+                    tx.execute(
+                        "INSERT INTO digital_asset_accounts
+                         (id, wallet_id, label, label_key, asset_id, network, account_kind, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, 'ethereum', 'mainnet', 'single_address', ?5, ?5)",
+                        rusqlite::params![account_id.to_string(), wallet_id.to_string(), label, label.to_ascii_lowercase(), created_at],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO digital_asset_addresses
+                         (id, account_id, asset_id, network, address, address_normalized, address_scheme, source_type, created_at, updated_at)
+                         VALUES (?1, ?2, 'ethereum', 'mainnet', ?3, ?3, 'standard', 'user_provided', ?4, ?4)",
+                        rusqlite::params![address_id.to_string(), account_id.to_string(), address, created_at],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO account_sync_slots (account_id, selected_at, selected_under_tier)
+                         VALUES (?1, ?2, 'free')",
+                        rusqlite::params![account_id.to_string(), admitted_at],
+                    )?;
+                    native_index += 1;
+                }
+                for slot in 0..LARGE_WALLETS_MANUAL_ACCOUNTS_PER_WALLET {
+                    let account_id = WalletAccountId::new();
+                    let label = format!("Manual {:02}", slot + 1);
+                    let admitted_at = (observed_at + ChronoDuration::microseconds(manual_index))
+                        .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+                    tx.execute(
+                        "INSERT INTO manual_asset_accounts
+                         (id, wallet_id, label, label_key, asset_id, network_id, decimal_precision,
+                          unit_code, asset_name, network_name, coingecko_id, asset_source,
+                          precision_source, created_at, updated_at, admitted_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 6, 'TOK', 'Perf Token', 'Perf Network',
+                                 'cardano', 'coingecko_discovery', 'coingecko_platform', ?7, ?7, ?8)",
+                        rusqlite::params![
+                            account_id.to_string(), wallet_id.to_string(), label, label.to_ascii_lowercase(),
+                            format!("perf-asset-{wallet_index:03}-{slot:02}"),
+                            format!("perf-network-{wallet_index:03}-{slot:02}"),
+                            created_at, admitted_at,
+                        ],
+                    )?;
+                    manual_index += 1;
+                }
+            }
+            tx.commit()
+        })();
+        seed.map_err(|err| DbError::from_rusqlite_error("Failed to seed large wallets dataset", err))
+    }).map_err(|err| PerfError::io(format!("failed to seed perf wallets: {err}")))?;
     Ok(WalletDatasetCounts {
         account_count,
-        address_count: account_count,
+        address_count,
     })
 }
 
@@ -619,20 +689,6 @@ fn seed_mixed_sync_state_for_address_ids(
         }
     }
     Ok(())
-}
-
-fn seed_wallet_accounts(
-    user_id: UserId,
-    wallet_count: u32,
-    accounts_per_wallet: u32,
-) -> Result<Vec<AddEthAddressDbResult>, PerfError> {
-    seed_wallet_accounts_with_seed_range(
-        user_id,
-        wallet_count,
-        accounts_per_wallet,
-        "Perf Wallet",
-        1,
-    )
 }
 
 fn seed_wallet_accounts_with_seed_range(
@@ -905,6 +961,43 @@ pub(super) fn read_dataset_manifest(
 #[cfg(all(test, not(bitgarth_db_unit_only)))]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "db-tests")]
+    #[test]
+    fn large_wallet_dataset_seeds_five_thousand_mixed_accounts_offline() {
+        let _runtime = crate::db::acquire_test_runtime().expect("test runtime");
+        let user_id = UserId::new();
+        crate::db::initialize_user_db_for_test(user_id).expect("user DB should initialize");
+        let counts = seed_large_wallets_dataset(
+            user_id,
+            LARGE_WALLETS_WALLET_COUNT,
+            LARGE_WALLETS_ACCOUNTS_PER_WALLET,
+        )
+        .expect("large wallet fixture should seed");
+        assert_eq!(counts.account_count, 5_000);
+        assert_eq!(counts.address_count, 4_000);
+        let persisted =
+            crate::db::with_user_db(user_id, |conn| -> Result<(i64, i64, i64, i64), DbError> {
+                let count = |table| {
+                    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .map_err(|err| DbError::new(err.to_string()))
+                };
+                Ok((
+                    count("digital_asset_accounts")?,
+                    count("manual_asset_accounts")?,
+                    count("digital_asset_addresses")?,
+                    count("account_sync_slots")?,
+                ))
+            })
+            .expect("fixture counts should load");
+        assert_eq!(persisted, (4_000, 1_000, 4_000, 4_000));
+        let summary = crate::db::load_wallet_summary_bundle(user_id)
+            .expect("large wallet fixture should load");
+        assert_eq!(summary.wallets.len(), 100);
+        assert_eq!(summary.manual_asset_accounts.len(), 1_000);
+    }
 
     #[test]
     fn generated_eth_address_values_parse_and_differ() {

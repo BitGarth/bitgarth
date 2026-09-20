@@ -1,3 +1,4 @@
+use super::account_allowances::AccountAllowances;
 #[cfg(feature = "server")]
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
@@ -288,6 +289,7 @@ impl<'de> Deserialize<'de> for EntitlementTier {
 
 pub(crate) const CAPABILITY_SCHEMA_VERSION_LEGACY: u16 = 2;
 pub(crate) const CAPABILITY_SCHEMA_VERSION_V3: u16 = 3;
+pub(crate) const CAPABILITY_SCHEMA_VERSION_V4: u16 = 4;
 const FREE_SYNCED_ACCOUNTS: u16 = 5;
 const FREE_MAX_TRANSACTIONS_PER_ACCOUNT: u32 = 0;
 
@@ -318,8 +320,35 @@ impl Default for HistoryLimits {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct AccountLimits {
-    pub(crate) total: u16,
+#[serde(untagged)]
+pub(crate) enum AccountLimits {
+    Independent {
+        balance_sync: u16,
+        transaction_history_sync: u16,
+        manual: u16,
+    },
+    LegacyCombined {
+        total: u16,
+    },
+}
+
+impl AccountLimits {
+    pub(crate) fn validated_v4(self) -> Option<AccountAllowances> {
+        match self {
+            Self::Independent {
+                balance_sync,
+                transaction_history_sync,
+                manual,
+            } => AccountAllowances::try_new(balance_sync, transaction_history_sync, manual).ok(),
+            Self::LegacyCombined { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AccountAllowancePolicy {
+    LegacyCombined { total: u16 },
+    Independent(AccountAllowances),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -408,7 +437,7 @@ impl EntitlementCapabilities {
     ) -> Self {
         Self {
             limits: EntitlementCapabilityLimits {
-                accounts: Some(AccountLimits {
+                accounts: Some(AccountLimits::LegacyCombined {
                     total: total_accounts,
                 }),
                 synced_accounts: FREE_SYNCED_ACCOUNTS,
@@ -438,11 +467,18 @@ impl EntitlementCapabilities {
         )
     }
 
-    pub(crate) const fn account_limit_for_schema(&self, capability_schema_version: u16) -> u16 {
+    pub(crate) fn account_limit_for_schema(&self, capability_schema_version: u16) -> u16 {
         match capability_schema_version {
             CAPABILITY_SCHEMA_VERSION_LEGACY => self.limits.synced_accounts,
             CAPABILITY_SCHEMA_VERSION_V3 => match self.limits.accounts {
-                Some(accounts) => accounts.total,
+                Some(AccountLimits::LegacyCombined { total }) => total,
+                _ => FREE_SYNCED_ACCOUNTS,
+            },
+            CAPABILITY_SCHEMA_VERSION_V4 => match self.limits.accounts {
+                Some(accounts) => match accounts.validated_v4() {
+                    Some(allowances) => allowances.balance_sync(),
+                    None => FREE_SYNCED_ACCOUNTS,
+                },
                 None => FREE_SYNCED_ACCOUNTS,
             },
             _ => FREE_SYNCED_ACCOUNTS,
@@ -456,15 +492,16 @@ impl EntitlementCapabilities {
         match capability_schema_version {
             CAPABILITY_SCHEMA_VERSION_LEGACY => self.features.historical_sync,
             CAPABILITY_SCHEMA_VERSION_V3 => self.features.transaction_history_sync,
+            CAPABILITY_SCHEMA_VERSION_V4 => self.features.transaction_history_sync,
             _ => false,
         }
     }
 
     pub(crate) const fn transaction_limit_for_schema(&self, capability_schema_version: u16) -> u32 {
         match capability_schema_version {
-            CAPABILITY_SCHEMA_VERSION_LEGACY | CAPABILITY_SCHEMA_VERSION_V3 => {
-                self.limits.history.max_transactions_per_account
-            }
+            CAPABILITY_SCHEMA_VERSION_LEGACY
+            | CAPABILITY_SCHEMA_VERSION_V3
+            | CAPABILITY_SCHEMA_VERSION_V4 => self.limits.history.max_transactions_per_account,
             _ => FREE_MAX_TRANSACTIONS_PER_ACCOUNT,
         }
     }
@@ -520,12 +557,18 @@ pub(crate) enum EntitlementSource {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FeatureEntitlements {
     pub(crate) tier: EntitlementTier,
+    pub(crate) account_allowance_policy: AccountAllowancePolicy,
     pub(crate) sync_account_slots_limit: u16,
+    pub(crate) balance_sync_enabled: bool,
+    pub(crate) transaction_history_sync_enabled: bool,
     pub(crate) historical_backfill_enabled: bool,
     pub(crate) historical_backfill_transactions_per_account: u32,
     pub(crate) tax_reports: bool,
     pub(crate) exchange_rates_history: bool,
     pub(crate) price_overrides: bool,
+    pub(crate) balance_assertions: bool,
+    pub(crate) hledger_export: bool,
+    pub(crate) exchange_rates_current: bool,
     pub(crate) subscription_valid_until: Option<DateTime<Utc>>,
     pub(crate) token_expires_at: Option<DateTime<Utc>>,
     pub(crate) source: EntitlementSource,
@@ -554,8 +597,17 @@ impl FeatureEntitlements {
     ) -> Self {
         let schema_supported = matches!(
             capability_schema_version,
-            CAPABILITY_SCHEMA_VERSION_LEGACY | CAPABILITY_SCHEMA_VERSION_V3
+            CAPABILITY_SCHEMA_VERSION_LEGACY
+                | CAPABILITY_SCHEMA_VERSION_V3
+                | CAPABILITY_SCHEMA_VERSION_V4
         );
+        let schema_supported = schema_supported
+            && (capability_schema_version != CAPABILITY_SCHEMA_VERSION_V4
+                || capabilities
+                    .limits
+                    .accounts
+                    .and_then(AccountLimits::validated_v4)
+                    .is_some());
         let (tier, capabilities, subscription_valid_until, token_expires_at, source) =
             if schema_supported {
                 (
@@ -575,28 +627,54 @@ impl FeatureEntitlements {
                 )
             };
 
-        let (tax_reports, exchange_rates_history, price_overrides) =
-            if capability_schema_version == CAPABILITY_SCHEMA_VERSION_V3 {
-                (
-                    capabilities.features.tax_reports,
-                    capabilities.features.exchange_rates_history,
-                    capabilities.features.price_overrides,
-                )
-            } else {
-                (false, false, false)
-            };
+        let (tax_reports, exchange_rates_history, price_overrides) = if matches!(
+            capability_schema_version,
+            CAPABILITY_SCHEMA_VERSION_V3 | CAPABILITY_SCHEMA_VERSION_V4
+        ) {
+            (
+                capabilities.features.tax_reports,
+                capabilities.features.exchange_rates_history,
+                capabilities.features.price_overrides,
+            )
+        } else {
+            (false, false, false)
+        };
+
+        let account_allowance_policy = if capability_schema_version == CAPABILITY_SCHEMA_VERSION_V4
+        {
+            capabilities
+                .limits
+                .accounts
+                .and_then(AccountLimits::validated_v4)
+                .map(AccountAllowancePolicy::Independent)
+                .unwrap_or(AccountAllowancePolicy::LegacyCombined {
+                    total: FREE_SYNCED_ACCOUNTS,
+                })
+        } else {
+            AccountAllowancePolicy::LegacyCombined {
+                total: capabilities.account_limit_for_schema(capability_schema_version),
+            }
+        };
+        let transaction_history_sync_enabled =
+            capabilities.transaction_history_enabled_for_schema(capability_schema_version);
 
         Self {
             tier,
+            account_allowance_policy,
             sync_account_slots_limit: capabilities
                 .account_limit_for_schema(capability_schema_version),
-            historical_backfill_enabled: capabilities
-                .transaction_history_enabled_for_schema(capability_schema_version),
+            balance_sync_enabled: capability_schema_version == CAPABILITY_SCHEMA_VERSION_LEGACY
+                || capabilities.features.balance_sync,
+            transaction_history_sync_enabled,
+            historical_backfill_enabled: transaction_history_sync_enabled,
             historical_backfill_transactions_per_account: capabilities
                 .transaction_limit_for_schema(capability_schema_version),
             tax_reports,
             exchange_rates_history,
             price_overrides,
+            balance_assertions: capabilities.features.balance_assertions,
+            hledger_export: capabilities.features.hledger_export,
+            exchange_rates_current: capabilities.features.exchange_rates_current,
             subscription_valid_until,
             token_expires_at,
             source,
@@ -905,7 +983,7 @@ mod capability_tests {
     fn v3_capabilities_use_accounts_total_and_transaction_history_sync() {
         let capabilities = EntitlementCapabilities {
             limits: EntitlementCapabilityLimits {
-                accounts: Some(AccountLimits { total: 10 }),
+                accounts: Some(AccountLimits::LegacyCombined { total: 10 }),
                 synced_accounts: 2,
                 history: HistoryLimits {
                     max_transactions_per_account: 5000,
@@ -945,7 +1023,7 @@ mod capability_tests {
     fn v3_capabilities_project_report_and_price_features() {
         let capabilities = EntitlementCapabilities {
             limits: EntitlementCapabilityLimits {
-                accounts: Some(AccountLimits { total: 10 }),
+                accounts: Some(AccountLimits::LegacyCombined { total: 10 }),
                 synced_accounts: 2,
                 history: HistoryLimits {
                     max_transactions_per_account: 5000,
@@ -1038,7 +1116,7 @@ mod capability_tests {
     fn unknown_capability_schema_fails_closed_to_free_capabilities() {
         let capabilities = EntitlementCapabilities {
             limits: EntitlementCapabilityLimits {
-                accounts: Some(AccountLimits { total: 50 }),
+                accounts: Some(AccountLimits::LegacyCombined { total: 50 }),
                 synced_accounts: 50,
                 history: HistoryLimits {
                     max_transactions_per_account: 100000,
@@ -1059,7 +1137,7 @@ mod capability_tests {
 
         let entitlements = FeatureEntitlements::from_capabilities(
             EntitlementTier::Premium,
-            CAPABILITY_SCHEMA_VERSION_V3 + 1,
+            CAPABILITY_SCHEMA_VERSION_V4 + 1,
             capabilities,
             Some("2027-05-08T12:00:00Z".parse().unwrap()),
             Some("2026-05-15T12:00:00Z".parse().unwrap()),
@@ -1079,7 +1157,7 @@ mod capability_tests {
     fn unknown_capability_schema_drops_report_and_price_features() {
         let capabilities = EntitlementCapabilities {
             limits: EntitlementCapabilityLimits {
-                accounts: Some(AccountLimits { total: 50 }),
+                accounts: Some(AccountLimits::LegacyCombined { total: 50 }),
                 synced_accounts: 50,
                 history: HistoryLimits {
                     max_transactions_per_account: 100000,
@@ -1100,7 +1178,7 @@ mod capability_tests {
 
         let entitlements = FeatureEntitlements::from_capabilities(
             EntitlementTier::Premium,
-            CAPABILITY_SCHEMA_VERSION_V3 + 1,
+            CAPABILITY_SCHEMA_VERSION_V4 + 1,
             capabilities,
             None,
             None,

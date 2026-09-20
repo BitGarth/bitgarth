@@ -1,42 +1,27 @@
 use crate::account_limits::{
-    AccountActivationState, ClassifiedAccount, SupportedAccountKind, SupportedAccountLimitRecord,
+    AccountActivationState, ClassifiedAccount, NativeAccountMode, NativeAccountModeRecord,
+    SupportedAccountKind, SupportedAccountLimitRecord, classify_native_account_modes,
     classify_supported_accounts, would_exceed_supported_account_hard_cap,
 };
+use crate::asset_capabilities::{sync_provider, synced_asset_instance, synced_asset_instance_id};
 use crate::db::DbError;
 use crate::db::user_db::with_user_db;
 use crate::models::UserId;
-use crate::wallets::{DigitalAssetAccountId, WalletAccountId};
+use crate::payments::types::{AccountAllowancePolicy, FeatureEntitlements};
+use crate::wallets::{DigitalAssetAccountId, SyncedAssetId, WalletAccountId};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, Transaction};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct NativeAccountSyncEligibility {
-    pub(crate) account_active: bool,
-    pub(crate) provider_or_plan_supports_requested_sync: bool,
-}
-
-impl NativeAccountSyncEligibility {
-    pub(crate) fn eligible(self) -> bool {
-        crate::account_limits::native_account_sync_eligible(
-            if self.account_active {
-                AccountActivationState::Active
-            } else {
-                AccountActivationState::Inactive
-            },
-            true,
-            self.provider_or_plan_supports_requested_sync,
-        )
-    }
-}
-
+#[cfg(test)]
 pub(crate) fn load_supported_account_limit_records(
     user_id: UserId,
 ) -> Result<Vec<SupportedAccountLimitRecord>, DbError> {
     with_user_db(user_id, query_supported_account_limit_records)
 }
 
+#[cfg(test)]
 pub(crate) fn classify_supported_accounts_for_user(
     user_id: UserId,
     active_limit: usize,
@@ -45,12 +30,192 @@ pub(crate) fn classify_supported_accounts_for_user(
     Ok(classify_supported_accounts(records, active_limit))
 }
 
-pub(crate) fn classify_supported_accounts_in_tx(
-    tx: &Transaction<'_>,
-    active_limit: usize,
+pub(crate) fn native_account_modes_for_user(
+    user_id: UserId,
+    entitlements: &FeatureEntitlements,
+) -> Result<HashMap<DigitalAssetAccountId, NativeAccountMode>, DbError> {
+    with_user_db(user_id, |conn| {
+        query_native_account_modes(conn, entitlements)
+    })
+}
+
+pub(crate) fn classify_supported_accounts_for_entitlements(
+    user_id: UserId,
+    entitlements: &FeatureEntitlements,
 ) -> Result<Vec<ClassifiedAccount>, DbError> {
-    let records = query_supported_account_limit_records(tx)?;
-    Ok(classify_supported_accounts(records, active_limit))
+    with_user_db(user_id, |conn| {
+        classify_accounts_in_conn(conn, entitlements)
+    })
+}
+
+pub(crate) fn load_account_mode_snapshot_for_user(
+    user_id: UserId,
+    entitlements: &FeatureEntitlements,
+) -> Result<
+    (
+        Vec<ClassifiedAccount>,
+        HashMap<DigitalAssetAccountId, NativeAccountMode>,
+    ),
+    DbError,
+> {
+    with_user_db(user_id, |conn| {
+        let modes = query_native_account_modes(conn, entitlements)?;
+        let accounts = classify_accounts_in_conn_with_modes(conn, entitlements, &modes)?;
+        Ok((accounts, modes))
+    })
+}
+
+pub(crate) fn classify_supported_accounts_for_entitlements_in_tx(
+    tx: &Transaction<'_>,
+    entitlements: &FeatureEntitlements,
+) -> Result<Vec<ClassifiedAccount>, DbError> {
+    classify_accounts_in_conn(tx, entitlements)
+}
+
+fn classify_accounts_in_conn(
+    conn: &Connection,
+    entitlements: &FeatureEntitlements,
+) -> Result<Vec<ClassifiedAccount>, DbError> {
+    let modes = query_native_account_modes(conn, entitlements)?;
+    classify_accounts_in_conn_with_modes(conn, entitlements, &modes)
+}
+
+fn classify_accounts_in_conn_with_modes(
+    conn: &Connection,
+    entitlements: &FeatureEntitlements,
+    modes: &HashMap<DigitalAssetAccountId, NativeAccountMode>,
+) -> Result<Vec<ClassifiedAccount>, DbError> {
+    let AccountAllowancePolicy::Independent(allowances) = entitlements.account_allowance_policy
+    else {
+        return Ok(classify_supported_accounts(
+            query_supported_account_limit_records(conn)?,
+            usize::from(entitlements.sync_account_slots_limit),
+        ));
+    };
+    let mut accounts = modes
+        .iter()
+        .map(|(id, mode)| ClassifiedAccount {
+            account_id: (*id).into(),
+            kind: SupportedAccountKind::Native,
+            state: if *mode == NativeAccountMode::Inactive {
+                AccountActivationState::Inactive
+            } else {
+                AccountActivationState::Active
+            },
+        })
+        .collect::<Vec<_>>();
+    let mut stmt = conn
+        .prepare("SELECT id, admitted_at FROM manual_asset_accounts ORDER BY admitted_at, id")
+        .map_err(|err| {
+            DbError::from_rusqlite_error("Failed to prepare manual admission query", err)
+        })?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|err| DbError::from_rusqlite_error("Failed to query manual admissions", err))?;
+    for (index, row) in rows.enumerate() {
+        let (id, _) = row
+            .map_err(|err| DbError::from_rusqlite_error("Failed to read manual admission", err))?;
+        accounts.push(ClassifiedAccount {
+            account_id: WalletAccountId::from_str(&id)
+                .map_err(|err| DbError::new(format!("Invalid manual account id: {err}")))?,
+            kind: SupportedAccountKind::ManualAsset,
+            state: if index < usize::from(allowances.manual()) {
+                AccountActivationState::Active
+            } else {
+                AccountActivationState::Inactive
+            },
+        });
+    }
+    Ok(accounts)
+}
+
+fn query_native_account_modes(
+    conn: &Connection,
+    entitlements: &FeatureEntitlements,
+) -> Result<HashMap<DigitalAssetAccountId, NativeAccountMode>, DbError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT a.id, a.asset_id, s.selected_at
+         FROM digital_asset_accounts a
+         LEFT JOIN account_sync_slots s ON s.account_id = a.id
+         ORDER BY s.selected_at, a.id",
+        )
+        .map_err(|err| DbError::from_rusqlite_error("Failed to prepare native mode query", err))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(|err| DbError::from_rusqlite_error("Failed to query native modes", err))?;
+    let mut records = Vec::new();
+    for row in rows {
+        let (id, asset, admitted_at) =
+            row.map_err(|err| DbError::from_rusqlite_error("Failed to read native mode", err))?;
+        let admitted_at =
+            admitted_at.ok_or_else(|| DbError::new("Missing native account admission"))?;
+        let asset = SyncedAssetId::from_str(&asset)
+            .ok_or_else(|| DbError::new("Invalid native account asset"))?;
+        let capabilities = sync_provider(
+            synced_asset_instance(synced_asset_instance_id(asset)).default_sync_provider,
+        )
+        .capabilities;
+        records.push(NativeAccountModeRecord {
+            account_id: DigitalAssetAccountId::from_str(&id)
+                .map_err(|err| DbError::new(format!("Invalid native account id: {err}")))?,
+            admitted_at: admitted_at
+                .parse::<DateTime<Utc>>()
+                .map_err(|err| DbError::new(format!("Invalid native admitted_at: {err}")))?,
+            supports_balance_sync: capabilities.supports_balance_only_sync
+                || capabilities.supports_transaction_sync,
+            supports_transaction_sync: capabilities.supports_transaction_sync,
+        });
+    }
+    let AccountAllowancePolicy::Independent(allowances) = entitlements.account_allowance_policy
+    else {
+        let classified = classify_supported_accounts(
+            query_supported_account_limit_records(conn)?,
+            usize::from(entitlements.sync_account_slots_limit),
+        );
+        let states = classified
+            .into_iter()
+            .map(|account| (account.account_id, account.state))
+            .collect::<HashMap<_, _>>();
+        return Ok(records
+            .into_iter()
+            .map(|record| {
+                let active = states.get(&WalletAccountId::from(record.account_id))
+                    == Some(&AccountActivationState::Active)
+                    && record.supports_balance_sync;
+                let mode = if !active || !entitlements.balance_sync_enabled {
+                    NativeAccountMode::Inactive
+                } else if record.supports_transaction_sync
+                    && entitlements.transaction_history_sync_enabled
+                {
+                    NativeAccountMode::Transactions
+                } else {
+                    NativeAccountMode::BalanceOnly
+                };
+                (record.account_id, mode)
+            })
+            .collect());
+    };
+    let mut modes = classify_native_account_modes(records, allowances);
+    if !entitlements.balance_sync_enabled {
+        modes
+            .values_mut()
+            .for_each(|mode| *mode = NativeAccountMode::Inactive);
+    } else if !entitlements.transaction_history_sync_enabled {
+        modes
+            .values_mut()
+            .filter(|mode| **mode == NativeAccountMode::Transactions)
+            .for_each(|mode| *mode = NativeAccountMode::BalanceOnly);
+    }
+    Ok(modes)
 }
 
 pub(crate) fn ensure_supported_account_hard_cap_before_insert_in_tx(
@@ -87,72 +252,22 @@ pub(crate) fn account_state_for(
 
 pub(crate) fn native_account_sync_eligible_for_user(
     user_id: UserId,
-    active_limit: usize,
+    entitlements: &FeatureEntitlements,
     account_id: DigitalAssetAccountId,
-    requires_free_balance_support: bool,
 ) -> Result<bool, DbError> {
-    Ok(native_account_sync_eligibility_for_user(
-        user_id,
-        active_limit,
-        account_id,
-        requires_free_balance_support,
-    )?
-    .eligible())
-}
-
-pub(crate) fn native_account_sync_eligibility_for_user(
-    user_id: UserId,
-    active_limit: usize,
-    account_id: DigitalAssetAccountId,
-    requires_free_balance_support: bool,
-) -> Result<NativeAccountSyncEligibility, DbError> {
-    let classified = classify_supported_accounts_for_user(user_id, active_limit)?;
-    let state = account_state_for(&classified, &WalletAccountId::from(account_id));
-    let provider_or_plan_supports_requested_sync = !requires_free_balance_support
-        || super::sync_slots::account_supports_free_balance_sync(user_id, account_id)?;
-    Ok(NativeAccountSyncEligibility {
-        account_active: state == AccountActivationState::Active,
-        provider_or_plan_supports_requested_sync,
-    })
+    Ok(native_account_modes_for_user(user_id, entitlements)?
+        .get(&account_id)
+        .is_some_and(|mode| *mode != NativeAccountMode::Inactive))
 }
 
 pub(crate) fn sync_eligible_native_account_ids_for_user(
     user_id: UserId,
-    active_limit: usize,
-    requires_free_balance_support: bool,
+    entitlements: &FeatureEntitlements,
 ) -> Result<HashSet<DigitalAssetAccountId>, DbError> {
-    classify_supported_accounts_for_user(user_id, active_limit)?
+    Ok(native_account_modes_for_user(user_id, entitlements)?
         .into_iter()
-        .filter(|account| {
-            account.kind == SupportedAccountKind::Native
-                && account.state == AccountActivationState::Active
-        })
-        .map(|account| {
-            DigitalAssetAccountId::from_str(&account.account_id.to_string())
-                .map_err(|err| DbError::new(format!("Invalid native account id: {err}")))
-        })
-        .filter_map(|account_id| match account_id {
-            Ok(account_id) => {
-                let provider_or_plan_supports_requested_sync = !requires_free_balance_support
-                    || match super::sync_slots::account_supports_free_balance_sync(
-                        user_id, account_id,
-                    ) {
-                        Ok(supports) => supports,
-                        Err(err) => return Some(Err(err)),
-                    };
-                if crate::account_limits::native_account_sync_eligible(
-                    AccountActivationState::Active,
-                    true,
-                    provider_or_plan_supports_requested_sync,
-                ) {
-                    Some(Ok(account_id))
-                } else {
-                    None
-                }
-            }
-            Err(err) => Some(Err(err)),
-        })
-        .collect()
+        .filter_map(|(id, mode)| (mode != NativeAccountMode::Inactive).then_some(id))
+        .collect())
 }
 
 fn query_supported_account_limit_records(
@@ -341,7 +456,7 @@ mod tests {
     fn hard_cap_helper_rejects_when_current_plus_creating_exceeds_cap() {
         let _runtime = acquire_test_runtime().expect("test runtime should initialize");
         let (user_id, wallet_id) = setup_user_with_wallet();
-        for index in 0..100 {
+        for index in 0..1 {
             insert_native_account(
                 user_id,
                 wallet_id,
@@ -355,7 +470,10 @@ mod tests {
             let tx = conn
                 .transaction()
                 .map_err(|err| DbError::new(format!("transaction open failed: {err}")))?;
-            ensure_supported_account_hard_cap_before_insert_in_tx(&tx, 1)
+            ensure_supported_account_hard_cap_before_insert_in_tx(
+                &tx,
+                crate::account_limits::SUPPORTED_ACCOUNT_HARD_CAP,
+            )
         });
 
         assert!(result.is_err());
@@ -365,7 +483,7 @@ mod tests {
     fn hard_cap_helper_allows_exact_cap_before_insert() {
         let _runtime = acquire_test_runtime().expect("test runtime should initialize");
         let (user_id, wallet_id) = setup_user_with_wallet();
-        for index in 0..99 {
+        for index in 0..1 {
             insert_native_account(
                 user_id,
                 wallet_id,
@@ -379,9 +497,56 @@ mod tests {
             let tx = conn
                 .transaction()
                 .map_err(|err| DbError::new(format!("transaction open failed: {err}")))?;
-            ensure_supported_account_hard_cap_before_insert_in_tx(&tx, 1)
+            ensure_supported_account_hard_cap_before_insert_in_tx(
+                &tx,
+                crate::account_limits::SUPPORTED_ACCOUNT_HARD_CAP - 1,
+            )
         });
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn independent_account_classification_separates_native_and_manual_order() {
+        use crate::payments::account_allowances::AccountAllowances;
+        use crate::payments::types::{AccountAllowancePolicy, FeatureEntitlements};
+
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let (user_id, wallet_id) = setup_user_with_wallet();
+        let native = WalletAccountId::new();
+        let manual = WalletAccountId::new();
+        insert_manual_account(user_id, wallet_id, manual, "Early manual", &timestamp(1));
+        insert_native_account(user_id, wallet_id, native, "Later native", &timestamp(2));
+        with_user_db_mut(user_id, |conn| -> Result<(), DbError> {
+            conn.execute(
+                "INSERT INTO account_sync_slots VALUES (?1, ?2, 'free')",
+                params![native.to_string(), timestamp(3)],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE manual_asset_accounts SET admitted_at = ?2 WHERE id = ?1",
+                params![manual.to_string(), timestamp(1)],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+        let mut entitlements = FeatureEntitlements::free();
+        entitlements.account_allowance_policy =
+            AccountAllowancePolicy::Independent(AccountAllowances::try_new(1, 1, 1).unwrap());
+        entitlements.transaction_history_sync_enabled = true;
+        let modes = native_account_modes_for_user(user_id, &entitlements).unwrap();
+        let native_id = DigitalAssetAccountId::from_str(&native.to_string()).unwrap();
+        assert_eq!(modes[&native_id], NativeAccountMode::Transactions);
+        let classified =
+            classify_supported_accounts_for_entitlements(user_id, &entitlements).unwrap();
+        assert_eq!(
+            account_state_for(&classified, &native),
+            AccountActivationState::Active
+        );
+        assert_eq!(
+            account_state_for(&classified, &manual),
+            AccountActivationState::Active
+        );
     }
 }

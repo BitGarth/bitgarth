@@ -1,3 +1,4 @@
+#[cfg(any(feature = "server", test))]
 use std::sync::OnceLock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15,8 +16,7 @@ pub(crate) enum Channel {
 pub(crate) enum UpgradeUi {
     Script,
     Native(&'static str),
-    NativeUpdater,
-    AppStore,
+    Generic,
     None,
 }
 
@@ -32,49 +32,119 @@ pub(crate) fn parse_channel(raw: Option<&str>) -> Channel {
     }
 }
 
+#[cfg(any(feature = "server", test))]
 pub(crate) fn channel() -> Channel {
-    static CHANNEL: OnceLock<Channel> = OnceLock::new();
-    cached_channel_from(&CHANNEL, || std::env::var("BITGARTH_CHANNEL").ok())
+    parse_channel(Some(channel_id()))
 }
 
-fn cached_channel_from<F>(cache: &'static OnceLock<Channel>, get_raw: F) -> Channel
+#[cfg(any(feature = "server", test))]
+fn build_default_channel() -> &'static str {
+    if cfg!(feature = "desktop") {
+        "desktop"
+    } else {
+        "web"
+    }
+}
+
+#[cfg(any(feature = "server", test))]
+fn resolve_channel_id(raw: Option<&str>, default: &str) -> String {
+    raw.map(str::trim)
+        .filter(|value| {
+            (1..=32).contains(&value.len())
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| default.to_string())
+}
+
+#[cfg(any(feature = "server", test))]
+fn cached_channel_id_from<'a, F>(cache: &'a OnceLock<String>, default: &str, get_raw: F) -> &'a str
 where
     F: FnOnce() -> Option<String>,
 {
-    *cache.get_or_init(|| parse_channel(get_raw().as_deref()))
+    cache
+        .get_or_init(|| resolve_channel_id(get_raw().as_deref(), default))
+        .as_str()
+}
+
+#[cfg(any(feature = "server", test))]
+pub(crate) fn channel_id() -> &'static str {
+    static CHANNEL_ID: OnceLock<String> = OnceLock::new();
+    cached_channel_id_from(&CHANNEL_ID, build_default_channel(), || {
+        std::env::var("BITGARTH_CHANNEL").ok()
+    })
 }
 
 impl Channel {
-    pub(crate) fn as_header_value(self) -> &'static str {
-        match self {
-            Self::Docker => "docker",
-            Self::Umbrel => "umbrel",
-            Self::Desktop => "desktop",
-            Self::Ios => "ios",
-            Self::Android => "android",
-            Self::Hosted => "hosted",
-            Self::Unknown => "unknown",
-        }
-    }
-
     pub(crate) fn upgrade_kind(self) -> UpgradeUi {
         match self {
             Self::Docker => UpgradeUi::Script,
             Self::Umbrel => UpgradeUi::Native("Umbrel"),
-            Self::Desktop => UpgradeUi::NativeUpdater,
-            Self::Ios | Self::Android => UpgradeUi::AppStore,
-            Self::Hosted | Self::Unknown => UpgradeUi::None,
+            Self::Hosted => UpgradeUi::None,
+            Self::Desktop | Self::Ios | Self::Android | Self::Unknown => UpgradeUi::Generic,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Channel, UpgradeUi, channel, parse_channel};
-    use std::sync::{
-        OnceLock,
-        atomic::{AtomicUsize, Ordering},
+    use super::{
+        Channel, UpgradeUi, build_default_channel, cached_channel_id_from, channel, parse_channel,
+        resolve_channel_id,
     };
+    use std::sync::OnceLock;
+
+    #[test]
+    fn resolve_reporting_channel() {
+        for default in ["web", "desktop"] {
+            for raw in [
+                None,
+                Some(""),
+                Some(" \t"),
+                Some("a_b"),
+                Some("a/b"),
+                Some("é"),
+                Some("web\r\nx"),
+                Some("a b"),
+            ] {
+                assert_eq!(resolve_channel_id(raw, default), default);
+            }
+            assert_eq!(resolve_channel_id(Some(&"a".repeat(33)), default), default);
+            assert_eq!(
+                resolve_channel_id(Some(&"a".repeat(32)), default),
+                "a".repeat(32)
+            );
+            assert_eq!(resolve_channel_id(Some("x"), default), "x");
+            assert_eq!(resolve_channel_id(Some(" HomeBrew "), default), "homebrew");
+            assert_eq!(resolve_channel_id(Some(" HOSTED "), default), "hosted");
+        }
+        let cache = OnceLock::new();
+        let calls = std::cell::Cell::new(0);
+        for raw in ["HomeBrew", "docker"] {
+            assert_eq!(
+                cached_channel_id_from(&cache, "web", || {
+                    calls.set(calls.get() + 1);
+                    Some(raw.to_string())
+                }),
+                "homebrew"
+            );
+        }
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn default_channel_matches_features() {
+        assert_eq!(
+            build_default_channel(),
+            if cfg!(feature = "desktop") {
+                "desktop"
+            } else {
+                "web"
+            }
+        );
+    }
 
     #[test]
     fn parse_channel_maps_known_values() {
@@ -99,41 +169,11 @@ mod tests {
     fn upgrade_kind_maps_channels_to_ui_modes() {
         assert_eq!(Channel::Docker.upgrade_kind(), UpgradeUi::Script);
         assert_eq!(Channel::Umbrel.upgrade_kind(), UpgradeUi::Native("Umbrel"));
-        assert_eq!(Channel::Desktop.upgrade_kind(), UpgradeUi::NativeUpdater);
-        assert_eq!(Channel::Ios.upgrade_kind(), UpgradeUi::AppStore);
-        assert_eq!(Channel::Android.upgrade_kind(), UpgradeUi::AppStore);
+        assert_eq!(Channel::Desktop.upgrade_kind(), UpgradeUi::Generic);
+        assert_eq!(Channel::Ios.upgrade_kind(), UpgradeUi::Generic);
+        assert_eq!(Channel::Android.upgrade_kind(), UpgradeUi::Generic);
         assert_eq!(Channel::Hosted.upgrade_kind(), UpgradeUi::None);
-        assert_eq!(Channel::Unknown.upgrade_kind(), UpgradeUi::None);
-    }
-
-    #[test]
-    fn header_values_are_stable() {
-        assert_eq!(Channel::Docker.as_header_value(), "docker");
-        assert_eq!(Channel::Umbrel.as_header_value(), "umbrel");
-        assert_eq!(Channel::Desktop.as_header_value(), "desktop");
-        assert_eq!(Channel::Ios.as_header_value(), "ios");
-        assert_eq!(Channel::Android.as_header_value(), "android");
-        assert_eq!(Channel::Hosted.as_header_value(), "hosted");
-        assert_eq!(Channel::Unknown.as_header_value(), "unknown");
-    }
-
-    #[test]
-    fn channel_wrapper_uses_cache() {
-        static TEST_CHANNEL: OnceLock<Channel> = OnceLock::new();
-        static CALLS: AtomicUsize = AtomicUsize::new(0);
-
-        let first = super::cached_channel_from(&TEST_CHANNEL, || {
-            CALLS.fetch_add(1, Ordering::SeqCst);
-            Some("docker".to_string())
-        });
-        let second = super::cached_channel_from(&TEST_CHANNEL, || {
-            CALLS.fetch_add(1, Ordering::SeqCst);
-            Some("hosted".to_string())
-        });
-
-        assert_eq!(first, Channel::Docker);
-        assert_eq!(second, Channel::Docker);
-        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(Channel::Unknown.upgrade_kind(), UpgradeUi::Generic);
     }
 
     #[test]

@@ -1,13 +1,15 @@
 use super::derivation::{InitialHdAddressBootstrapRequest, bootstrap_initial_hd_account_addresses};
 use super::errors::db_error_from_sqlite;
 use crate::account_limits::AccountActivationState;
+use crate::db::account_admission::enroll_native_account_in_tx;
 use crate::db::account_limits::{
-    account_state_for, classify_supported_accounts_in_tx,
+    account_state_for, classify_supported_accounts_for_entitlements_in_tx,
     ensure_supported_account_hard_cap_before_insert_in_tx,
 };
 use crate::db::error::DbError;
 use crate::db::user_db::{with_user_db, with_user_db_mut};
 use crate::models::UserId;
+use crate::payments::types::{EntitlementTier, FeatureEntitlements};
 use crate::wallets::{
     ACCOUNT_LABEL_MAX_LENGTH, AccountIndex, AccountKind, AddressScheme, BIP44_GAP_LIMIT,
     DerivationPath, DigitalAssetAccountId, HdKeyId, IdentitySource, KeyRole, KeySource, Label,
@@ -135,13 +137,15 @@ pub(crate) fn add_xpub_wallet(
     active_limit: usize,
     now: DateTime<Utc>,
 ) -> Result<AddXpubDbResult, DbError> {
+    let mut entitlements = FeatureEntitlements::free();
+    entitlements.sync_account_slots_limit = u16::try_from(active_limit).unwrap_or(u16::MAX);
     add_xpub_wallet_with_account_label(
         user_id,
         extended_pubkey,
         wallet_id,
         wallet_label,
         None,
-        active_limit,
+        &entitlements,
         now,
     )
 }
@@ -154,7 +158,7 @@ pub(crate) fn add_xpub_wallet_with_account_label(
     wallet_id: Option<WalletId>,
     wallet_label: Option<&Label>,
     account_label: Option<&Label>,
-    active_limit: usize,
+    entitlements: &FeatureEntitlements,
     now: DateTime<Utc>,
 ) -> Result<AddXpubDbResult, DbError> {
     with_user_db_mut(user_id, |conn| {
@@ -264,6 +268,7 @@ pub(crate) fn add_xpub_wallet_with_account_label(
             ],
         )
         .map_err(|e| db_error_from_sqlite("Failed to insert account", e))?;
+        enroll_native_account_in_tx(&tx, account_id, now, &EntitlementTier::Free)?;
 
         // Create HD key with default account index 0
         let address_scheme = extended_pubkey.address_scheme();
@@ -294,7 +299,7 @@ pub(crate) fn add_xpub_wallet_with_account_label(
         )
         .map_err(|e| db_error_from_sqlite("Failed to insert hd key", e))?;
 
-        let classified = classify_supported_accounts_in_tx(&tx, active_limit)?;
+        let classified = classify_supported_accounts_for_entitlements_in_tx(&tx, entitlements)?;
         if account_state_for(&classified, &account_id.into()) == AccountActivationState::Active {
             bootstrap_initial_hd_account_addresses(
                 &tx,

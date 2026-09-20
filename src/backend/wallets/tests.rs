@@ -9,7 +9,7 @@ use crate::amounts::UnsignedAmount;
 use crate::asset_capabilities::AssetId;
 use crate::asset_capabilities::unsynced::{CoingeckoAssetId, UnsyncedNetworkId};
 use crate::balance_reliability::{BalanceProvisionalReason, BalanceReliability};
-use crate::db::{AccountSyncSlotRecord, ManualAssetAccountRow};
+use crate::db::ManualAssetAccountRow;
 use crate::payments::types::EntitlementTier;
 use crate::tasks::automatic_sync::AutomaticSyncAddTarget;
 use crate::tasks::{JobId, JobKey, TriggerParams, TriggerSource, UserTransactionMonitorParams};
@@ -304,9 +304,7 @@ fn convert_wallet_to_view_keeps_current_bitcoin_balance_final_when_history_is_li
             account_tx_counts: &HashMap::new(),
         },
         &NativeAccountManualSyncContext {
-            sync_slots: &HashMap::new(),
-            active_sync_slot_account_ids: &std::collections::HashSet::new(),
-            slot_limit: 2,
+            account_modes: &HashMap::new(),
             tier: EntitlementTier::Free,
             historical_backfill_enabled: false,
             historical_backfill_transactions_per_account: 0,
@@ -381,6 +379,7 @@ fn manual_account_view_uses_db_snapshot_metadata() {
         precision_source: "bitgarth_catalog".to_string(),
         coingecko_platform_id: None,
         provider_platform_asset_ref: None,
+        admitted_at: "2026-02-16T10:00:00Z".parse().expect("valid datetime"),
         created_at: "2026-02-16T10:00:00Z".parse().expect("valid datetime"),
         updated_at: "2026-02-16T10:00:00Z".parse().expect("valid datetime"),
     };
@@ -398,9 +397,7 @@ fn manual_account_view_uses_db_snapshot_metadata() {
             account_tx_counts: &HashMap::new(),
         },
         &NativeAccountManualSyncContext {
-            sync_slots: &HashMap::new(),
-            active_sync_slot_account_ids: &HashSet::new(),
-            slot_limit: 2,
+            account_modes: &HashMap::new(),
             tier: EntitlementTier::Free,
             historical_backfill_enabled: false,
             historical_backfill_transactions_per_account: 0,
@@ -469,9 +466,7 @@ fn inactive_native_accounts_are_visible_but_not_manually_syncable() {
             account_tx_counts: &HashMap::new(),
         },
         &NativeAccountManualSyncContext {
-            sync_slots: &HashMap::new(),
-            active_sync_slot_account_ids: &HashSet::new(),
-            slot_limit: 2,
+            account_modes: &HashMap::new(),
             tier: EntitlementTier::Free,
             historical_backfill_enabled: false,
             historical_backfill_transactions_per_account: 0,
@@ -491,10 +486,6 @@ fn inactive_native_accounts_are_visible_but_not_manually_syncable() {
         .expect("inactive native account should remain visible");
     assert_eq!(native_view.account_state, AccountStateView::Inactive);
     assert_eq!(native_view.manual_sync.mode, ManualSyncMode::Unavailable);
-    assert_eq!(
-        native_view.manual_sync.slot_effect,
-        ManualSyncSlotEffect::NoCapacity
-    );
     assert_eq!(
         native_view.manual_sync.disabled_reason,
         Some(ManualSyncDisabledReason::AccountInactive)
@@ -547,9 +538,7 @@ fn unclassified_supported_accounts_fail_closed_as_inactive() {
             account_tx_counts: &HashMap::new(),
         },
         &NativeAccountManualSyncContext {
-            sync_slots: &HashMap::new(),
-            active_sync_slot_account_ids: &HashSet::new(),
-            slot_limit: 2,
+            account_modes: &HashMap::new(),
             tier: EntitlementTier::Free,
             historical_backfill_enabled: false,
             historical_backfill_transactions_per_account: 0,
@@ -607,6 +596,7 @@ fn inactive_manual_accounts_are_visible() {
         precision_source: "bitgarth_catalog".to_string(),
         coingecko_platform_id: None,
         provider_platform_asset_ref: None,
+        admitted_at: "2026-02-16T10:00:00Z".parse().expect("valid datetime"),
         created_at: "2026-02-16T10:00:00Z".parse().expect("valid datetime"),
         updated_at: "2026-02-16T10:00:00Z".parse().expect("valid datetime"),
     };
@@ -624,9 +614,7 @@ fn inactive_manual_accounts_are_visible() {
             account_tx_counts: &HashMap::new(),
         },
         &NativeAccountManualSyncContext {
-            sync_slots: &HashMap::new(),
-            active_sync_slot_account_ids: &HashSet::new(),
-            slot_limit: 2,
+            account_modes: &HashMap::new(),
             tier: EntitlementTier::Free,
             historical_backfill_enabled: false,
             historical_backfill_transactions_per_account: 0,
@@ -1065,25 +1053,54 @@ fn native_account_view(asset: SyncedAssetId, label: &str) -> AccountView {
         },
         transaction_counts: AccountTransactionCountsView::default(),
         has_derived_addresses: false,
-        sync_slot: NativeAccountSyncSlotView {
-            selected: false,
-            active: false,
-            can_select: true,
-            limit: 2,
-            selected_at: None,
-            selected_under_tier: None,
-        },
+        account_mode: crate::account_limits::NativeAccountMode::BalanceOnly,
         manual_sync: NativeAccountManualSyncView {
             mode: ManualSyncMode::BalanceRefresh,
-            slot_effect: ManualSyncSlotEffect::WillSelectAvailableSlot,
             disabled_reason: None,
-            used_slots: 0,
-            slot_limit: 2,
             next_tier_display_name: Some("Basic".to_string()),
         },
         addresses: AddressesView::default(),
         transactions: vec![],
     }))
+}
+
+#[test]
+fn created_trezor_accounts_share_one_classification_snapshot() {
+    use super::handlers_write::created_native_accounts_from_snapshot;
+    let first = DigitalAssetAccountId::new();
+    let second = DigitalAssetAccountId::new();
+    let classified = vec![
+        ClassifiedAccount {
+            account_id: first.into(),
+            kind: SupportedAccountKind::Native,
+            state: AccountActivationState::Active,
+        },
+        ClassifiedAccount {
+            account_id: second.into(),
+            kind: SupportedAccountKind::Native,
+            state: AccountActivationState::Inactive,
+        },
+    ];
+    let modes = HashMap::from([
+        (first, crate::account_mode::NativeAccountMode::Transactions),
+        (second, crate::account_mode::NativeAccountMode::Inactive),
+    ]);
+
+    let (views, should_sync) =
+        created_native_accounts_from_snapshot(&[first, second], classified, &modes, 1);
+    assert!(should_sync);
+    assert_eq!(views[0].account_id, first.into());
+    assert_eq!(views[0].account_state, AccountStateView::Active);
+    assert_eq!(views[0].account_limit_notice, None);
+    assert_eq!(views[1].account_id, second.into());
+    assert_eq!(views[1].account_state, AccountStateView::Inactive);
+    assert_eq!(
+        views[1]
+            .account_limit_notice
+            .as_ref()
+            .map(|notice| notice.active_account_limit),
+        Some(1)
+    );
 }
 
 #[test]
@@ -1468,188 +1485,57 @@ fn sort_report_rows_by_unit_code_then_label() {
     );
 }
 
-// --- Manual Sync Affordance Tests ---
-
-fn slot_record(account_id: DigitalAssetAccountId) -> AccountSyncSlotRecord {
-    AccountSyncSlotRecord {
-        account_id,
-        selected_at: "2026-05-01T00:00:00Z".parse().expect("valid datetime"),
-        selected_under_tier: EntitlementTier::Basic,
-    }
-}
-
-fn active_set(ids: &[DigitalAssetAccountId]) -> HashSet<DigitalAssetAccountId> {
-    ids.iter().copied().collect()
-}
-
-fn slot_map(
-    records: Vec<AccountSyncSlotRecord>,
-) -> HashMap<DigitalAssetAccountId, AccountSyncSlotRecord> {
-    records.into_iter().map(|r| (r.account_id, r)).collect()
-}
-
-fn unavailable_set(ids: &[DigitalAssetAccountId]) -> HashSet<DigitalAssetAccountId> {
-    ids.iter().copied().collect()
-}
+// --- Manual Sync Mode Tests ---
 
 #[test]
-fn manual_sync_selected_transaction_history_account() {
+fn manual_sync_modes_follow_account_mode_and_transaction_threshold() {
     let account_id = DigitalAssetAccountId::new();
-    let view = native_account_manual_sync_view(
+    let modes = HashMap::from([(
         account_id,
-        50,
-        NativeAccountManualSyncContext {
-            sync_slots: &slot_map(vec![slot_record(account_id)]),
-            active_sync_slot_account_ids: &active_set(&[account_id]),
-            slot_limit: 5,
-            tier: EntitlementTier::Basic,
-            historical_backfill_enabled: true,
-            historical_backfill_transactions_per_account: 1000,
-            free_balance_unavailable_account_ids: &unavailable_set(&[]),
-        },
-    );
-
-    assert_eq!(view.mode, ManualSyncMode::TransactionHistory);
-    assert_eq!(view.slot_effect, ManualSyncSlotEffect::AlreadySelected);
-    assert_eq!(view.disabled_reason, None);
-    assert_eq!(view.used_slots, 1);
-    assert_eq!(view.slot_limit, 5);
-    assert_eq!(view.next_tier_display_name, Some("Premium".to_string()));
-}
-
-#[test]
-fn manual_sync_selected_balance_refresh_on_free() {
-    let account_id = DigitalAssetAccountId::new();
-    let mut record = slot_record(account_id);
-    record.selected_under_tier = EntitlementTier::Free;
-
-    let view = native_account_manual_sync_view(
-        account_id,
-        50,
-        NativeAccountManualSyncContext {
-            sync_slots: &slot_map(vec![record]),
-            active_sync_slot_account_ids: &active_set(&[account_id]),
-            slot_limit: 5,
-            tier: EntitlementTier::Free,
-            historical_backfill_enabled: false,
-            historical_backfill_transactions_per_account: 0,
-            free_balance_unavailable_account_ids: &unavailable_set(&[]),
-        },
-    );
-
-    assert_eq!(view.mode, ManualSyncMode::BalanceRefresh);
-    assert_eq!(view.slot_effect, ManualSyncSlotEffect::AlreadySelected);
-    assert_eq!(view.disabled_reason, None);
-}
-
-#[test]
-fn manual_sync_paid_over_cap_returns_balance_refresh() {
-    let account_id = DigitalAssetAccountId::new();
-    let view = native_account_manual_sync_view(
-        account_id,
-        5000,
-        NativeAccountManualSyncContext {
-            sync_slots: &slot_map(vec![slot_record(account_id)]),
-            active_sync_slot_account_ids: &active_set(&[account_id]),
-            slot_limit: 5,
-            tier: EntitlementTier::Basic,
-            historical_backfill_enabled: true,
-            historical_backfill_transactions_per_account: 1000,
-            free_balance_unavailable_account_ids: &unavailable_set(&[]),
-        },
-    );
-
-    assert_eq!(view.mode, ManualSyncMode::BalanceRefresh);
-    assert_eq!(view.slot_effect, ManualSyncSlotEffect::AlreadySelected);
-    assert_eq!(view.disabled_reason, None);
-}
-
-#[test]
-fn manual_sync_no_slot_with_available_capacity() {
-    let account_id = DigitalAssetAccountId::new();
-    let other_id = DigitalAssetAccountId::new();
-    let mut other_record = slot_record(other_id);
-    other_record.selected_under_tier = EntitlementTier::Basic;
-
-    let view = native_account_manual_sync_view(
-        account_id,
-        50,
-        NativeAccountManualSyncContext {
-            sync_slots: &slot_map(vec![other_record]),
-            active_sync_slot_account_ids: &active_set(&[other_id]),
-            slot_limit: 5,
-            tier: EntitlementTier::Basic,
-            historical_backfill_enabled: true,
-            historical_backfill_transactions_per_account: 1000,
-            free_balance_unavailable_account_ids: &unavailable_set(&[]),
-        },
-    );
-
-    assert_eq!(view.mode, ManualSyncMode::TransactionHistory);
+        crate::account_limits::NativeAccountMode::Transactions,
+    )]);
+    let context = NativeAccountManualSyncContext {
+        account_modes: &modes,
+        tier: EntitlementTier::Free,
+        historical_backfill_enabled: true,
+        historical_backfill_transactions_per_account: 1_000,
+        free_balance_unavailable_account_ids: &HashSet::new(),
+    };
     assert_eq!(
-        view.slot_effect,
-        ManualSyncSlotEffect::WillSelectAvailableSlot
+        native_account_manual_sync_view(account_id, 999, context.clone()).mode,
+        ManualSyncMode::TransactionHistory
     );
-    assert_eq!(view.disabled_reason, None);
-    assert_eq!(view.used_slots, 1);
-}
-
-#[test]
-fn manual_sync_no_slot_no_capacity_keeps_sync_available() {
-    let account_id = DigitalAssetAccountId::new();
-    let mut slots = vec![];
-    let mut active = vec![];
-    for _ in 0..5 {
-        let id = DigitalAssetAccountId::new();
-        let mut record = slot_record(id);
-        record.selected_under_tier = EntitlementTier::Basic;
-        slots.push(record);
-        active.push(id);
-    }
-
-    let view = native_account_manual_sync_view(
-        account_id,
-        50,
-        NativeAccountManualSyncContext {
-            sync_slots: &slot_map(slots),
-            active_sync_slot_account_ids: &active_set(&active),
-            slot_limit: 5,
-            tier: EntitlementTier::Basic,
-            historical_backfill_enabled: true,
-            historical_backfill_transactions_per_account: 1000,
-            free_balance_unavailable_account_ids: &unavailable_set(&[]),
-        },
-    );
-
-    assert_eq!(view.mode, ManualSyncMode::TransactionHistory);
-    assert_eq!(view.slot_effect, ManualSyncSlotEffect::NoCapacity);
-    assert_eq!(view.disabled_reason, None);
-    assert_eq!(view.next_tier_display_name, Some("Premium".to_string()));
-}
-
-#[test]
-fn manual_sync_unavailable_on_current_plan() {
-    let account_id = DigitalAssetAccountId::new();
-
-    let view = native_account_manual_sync_view(
-        account_id,
-        50,
-        NativeAccountManualSyncContext {
-            sync_slots: &slot_map(vec![]),
-            active_sync_slot_account_ids: &active_set(&[]),
-            slot_limit: 5,
-            tier: EntitlementTier::Free,
-            historical_backfill_enabled: false,
-            historical_backfill_transactions_per_account: 0,
-            free_balance_unavailable_account_ids: &unavailable_set(&[account_id]),
-        },
-    );
-
-    assert_eq!(view.mode, ManualSyncMode::Unavailable);
-    assert_eq!(view.slot_effect, ManualSyncSlotEffect::NoCapacity);
     assert_eq!(
-        view.disabled_reason,
-        Some(ManualSyncDisabledReason::SyncUnavailableOnPlan)
+        native_account_manual_sync_view(account_id, 1_000, context.clone()).mode,
+        ManualSyncMode::BalanceRefresh
+    );
+    let balance_only = HashMap::from([(
+        account_id,
+        crate::account_limits::NativeAccountMode::BalanceOnly,
+    )]);
+    assert_eq!(
+        native_account_manual_sync_view(
+            account_id,
+            0,
+            NativeAccountManualSyncContext {
+                account_modes: &balance_only,
+                ..context.clone()
+            }
+        )
+        .mode,
+        ManualSyncMode::BalanceRefresh
+    );
+    assert_eq!(
+        native_account_manual_sync_view(
+            account_id,
+            0,
+            NativeAccountManualSyncContext {
+                account_modes: &HashMap::new(),
+                ..context
+            }
+        )
+        .mode,
+        ManualSyncMode::Unavailable
     );
 }
 

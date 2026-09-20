@@ -1,5 +1,8 @@
 pub(crate) mod views;
 
+#[cfg(any(feature = "server", test))]
+pub(crate) mod account_allowances;
+
 #[cfg(feature = "server")]
 pub(crate) mod types;
 

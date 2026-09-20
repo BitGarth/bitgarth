@@ -27,6 +27,36 @@ It stores persistent application data in the `bitgarth-data` Docker volume.
 See [Environment Variables](docs/user/environment-variables.md) before exposing
 an instance through a reverse proxy or changing its storage configuration.
 
+## Web server downloads
+
+Download the `bitgarth-web` archive for your platform from
+[GitHub Releases](https://github.com/BitGarth/bitgarth/releases) and extract it
+into its own directory. Keep all extracted files together:
+
+- `bitgarth-web` (`bitgarth-web.exe` on Windows).
+- `public/`: generated HTML, JavaScript, WASM and static assets.
+- `assets/catalog/unsynced_asset_catalog.json`: required at server startup.
+- Windows also includes the OpenSSL crypto DLL used by SQLCipher.
+
+The executable alone is insufficient. Run it from the extracted directory so
+the catalog's relative path resolves:
+
+```sh
+./bitgarth-web
+```
+
+On Windows, run `./bitgarth-web.exe` in PowerShell instead. Open
+[http://127.0.0.1:8080](http://127.0.0.1:8080) in a browser. `IP` and `PORT`
+override the listen address; `BITGARTH_PROJECT_DIR` selects the persistent data
+directory. See [Environment Variables](docs/user/environment-variables.md)
+before exposing the server through a reverse proxy.
+
+Linux downloads are built on Ubuntu 24.04 and require glibc 2.39 or newer,
+OpenSSL 3 runtime libraries and system CA certificates. macOS downloads target
+Apple Silicon and use Apple's system crypto frameworks. Windows downloads
+target x86-64 and require the Microsoft Visual C++ runtime, in addition to the
+included crypto DLL. These archives are web servers, not desktop app bundles.
+
 ## Build from source
 
 The Docker build is the supported source-build path:

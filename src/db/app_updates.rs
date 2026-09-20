@@ -65,7 +65,7 @@ pub(crate) fn load_update_state() -> Result<AppUpdateState, DbError> {
 
 pub(crate) fn save_successful_update_check(
     latest_seen: &str,
-    release_url: &str,
+    release_url: Option<&str>,
     published_at: Option<&str>,
     checked_at: DateTime<Utc>,
 ) -> Result<(), DbError> {
@@ -139,7 +139,7 @@ mod tests {
         let checked_at = Utc.with_ymd_and_hms(2026, 6, 7, 12, 0, 0).unwrap();
         save_successful_update_check(
             "0.1.5",
-            "https://hub.docker.com/r/bitgarth/bitgarth/tags?name=0.1.5",
+            Some("https://hub.docker.com/r/bitgarth/bitgarth/tags?name=0.1.5"),
             Some("2026-06-07T12:00:00Z"),
             checked_at,
         )
@@ -160,12 +160,27 @@ mod tests {
     fn disabling_update_checks_persists_without_clearing_cached_release() {
         setup();
         let checked_at = Utc.with_ymd_and_hms(2026, 6, 7, 12, 0, 0).unwrap();
-        save_successful_update_check("0.1.5", "https://example.invalid/release", None, checked_at)
-            .unwrap();
+        save_successful_update_check(
+            "0.1.5",
+            Some("https://example.invalid/release"),
+            None,
+            checked_at,
+        )
+        .unwrap();
         set_update_check_enabled(false, checked_at).unwrap();
 
         let state = load_update_state().unwrap();
         assert!(!state.update_check_enabled);
         assert_eq!(state.latest_seen.as_deref(), Some("0.1.5"));
+    }
+
+    #[test]
+    fn missing_release_url_round_trips_as_null() {
+        setup();
+        let checked_at = Utc.with_ymd_and_hms(2026, 6, 7, 12, 0, 0).unwrap();
+        save_successful_update_check("0.1.5", None, None, checked_at).unwrap();
+        let state = load_update_state().unwrap();
+        assert_eq!(state.latest_seen.as_deref(), Some("0.1.5"));
+        assert_eq!(state.release_url, None);
     }
 }

@@ -320,9 +320,9 @@ pub(crate) fn load_wallet_balance_projection_from_summary(
     let entitlements =
         crate::payments::entitlements::load_feature_entitlements(user_id, Utc::now())
             .map_err(|error| internal_error("wallet_balance_projection", error))?;
-    let classifications = crate::db::account_limits::classify_supported_accounts_for_user(
+    let classifications = crate::db::account_limits::classify_supported_accounts_for_entitlements(
         user_id,
-        usize::from(entitlements.sync_account_slots_limit),
+        &entitlements,
     )
     .map_err(|error| internal_error("wallet_balance_projection", error))?;
 
@@ -505,15 +505,16 @@ mod tests {
                      (id, wallet_id, label, label_key, asset_id, network_id, decimal_precision,
                       unit_code, symbol, asset_name, network_name, coingecko_id, asset_source,
                       precision_source, coingecko_platform_id, provider_platform_asset_ref,
-                      created_at, updated_at)
+                      created_at, updated_at, admitted_at)
                      VALUES (?1, ?2, 'Manual ETH', 'manual eth', 'ethereum',
                              'ethereum-mainnet', 18, 'ETH', NULL, 'Ethereum', 'Ethereum',
                              'ethereum', 'bitgarth_catalog', 'bitgarth_catalog', NULL, NULL,
-                             ?3, ?3)",
+                             ?3, ?3, ?4)",
                     rusqlite::params![
                         manual_account_id.to_string(),
                         native.wallet_id.to_string(),
                         timestamp,
+                        now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
                     ],
                 )
                 .map_err(|error| DbError::new(error.to_string()))?;
@@ -587,9 +588,7 @@ mod tests {
                 account_tx_counts: &summary.account_tx_counts,
             },
             &NativeAccountManualSyncContext {
-                sync_slots: &HashMap::new(),
-                active_sync_slot_account_ids: &HashSet::new(),
-                slot_limit: 1,
+                account_modes: &HashMap::new(),
                 tier: EntitlementTier::Premium,
                 historical_backfill_enabled: false,
                 historical_backfill_transactions_per_account: 0,

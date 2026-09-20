@@ -374,7 +374,7 @@ async fn test_get_wallets_happy_path_returns_balances_contract() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn wallets_summary_uses_cached_free_tier_account_limit() {
+async fn wallets_summary_uses_cached_free_tier_allowances() {
     let server = super::setup_test_server();
     register_user(&server).await;
 
@@ -382,7 +382,7 @@ async fn wallets_summary_uses_cached_free_tier_account_limit() {
         &crate::payments::free_tier::FreeTierObservation {
             observed_at: crate::payments::free_tier::baked_free_tier_snapshot().captured_at
                 + chrono::TimeDelta::seconds(1),
-            capability_schema_version: crate::payments::types::CAPABILITY_SCHEMA_VERSION_V3,
+            capability_schema_version: crate::payments::types::CAPABILITY_SCHEMA_VERSION_V4,
             capabilities: crate::payments::free_tier::free_tier_capabilities_for_test(22),
         },
     )
@@ -398,10 +398,10 @@ async fn wallets_summary_uses_cached_free_tier_account_limit() {
     let response = server.get("/_app/user/wallets").await;
     response.assert_status_ok();
     let body: Value = response.json();
-    assert_eq!(body["account_limit"]["active_limit"], json!(22));
+    assert_eq!(body["account_limit"]["active_limit"], json!(1022));
     assert_eq!(
         body["account_limit"]["summary"],
-        json!("1 of 22 active accounts used")
+        json!("1 of 1022 active accounts used")
     );
 }
 
@@ -413,11 +413,21 @@ async fn wallets_summary_uses_baked_free_tier_when_cache_empty() {
     let response = server.get("/_app/user/wallets").await;
     response.assert_status_ok();
     let body: Value = response.json();
-    assert_eq!(body["account_limit"]["active_limit"], json!(50));
+    assert_eq!(body["account_limit"]["active_limit"], json!(1050));
     assert_eq!(
         body["account_limit"]["summary"],
-        json!("0 of 50 active accounts used")
+        json!("0 of 1050 active accounts used")
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sync_slot_selection_route_is_gone() {
+    let server = setup_test_server_no_db();
+    let response = server
+        .post("/_app/user/wallets/account/sync-slot/select")
+        .json(&json!({ "request": { "account_id": Ulid::new().to_string() } }))
+        .await;
+    assert_eq!(response.status_code(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -771,6 +781,11 @@ async fn test_trezor_link_skips_duplicate_scheme_and_adds_new_variant_in_same_wa
                         "account_index": 0,
                         "address_scheme": "native_segwit",
                         "extended_pubkey": TEST_NATIVE_SEGWIT_ZPUB
+                    },
+                    {
+                        "account_index": 0,
+                        "address_scheme": "nested_segwit",
+                        "extended_pubkey": TEST_NATIVE_SEGWIT_ZPUB
                     }
                 ]
             }
@@ -791,8 +806,17 @@ async fn test_trezor_link_skips_duplicate_scheme_and_adds_new_variant_in_same_wa
         .expect("skipped_account_indexes should be an array");
     assert_eq!(
         created_account_ids.len(),
-        1,
-        "expected one new scheme variant account to be created",
+        2,
+        "expected two new scheme variant accounts to be created",
+    );
+    let created_accounts = payload["created_accounts"]
+        .as_array()
+        .expect("created_accounts should be an array");
+    assert_eq!(created_accounts.len(), 2);
+    assert!(
+        created_accounts
+            .iter()
+            .all(|account| account["account_state"] == "active")
     );
     assert!(
         skipped_account_indexes
@@ -821,8 +845,8 @@ async fn test_trezor_link_skips_duplicate_scheme_and_adds_new_variant_in_same_wa
         .collect();
     assert_eq!(
         xpub_accounts.len(),
-        2,
-        "expected duplicate to be skipped and one new scheme variant added",
+        3,
+        "expected duplicate to be skipped and two new scheme variants added",
     );
     assert!(
         xpub_accounts

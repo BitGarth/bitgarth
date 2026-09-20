@@ -84,6 +84,7 @@ struct MempoolAccountProgressObservation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MempoolHistoryProofTransition {
     Publish(MempoolHistoryProof),
+    Preserve,
     PreserveAndRestart,
     InvalidateAndRestart,
     Restart,
@@ -209,18 +210,28 @@ impl MempoolAddressSyncIntegration {
             let stats = fetch_mempool_address_stats(context, mempool_client)?;
             persist_mempool_observation(context, stats, tip_height)?;
             let account_progress = load_mempool_account_progress_observation(context)?;
-            let proof_transition = mempool_history_proof_transition(
-                context.address.mempool_history_proof,
-                &stats,
-                tip_height,
-            );
+            let proof_transition = if !context.transaction_page_permitted
+                && !context
+                    .address
+                    .mempool_history_proof
+                    .is_some_and(|proof| stats.tx_count.value() < proof.confirmed_tx_count.value())
+            {
+                MempoolHistoryProofTransition::Preserve
+            } else {
+                mempool_history_proof_transition(
+                    context.address.mempool_history_proof,
+                    &stats,
+                    tip_height,
+                )
+            };
             let restart_from_first_page = matches!(
                 proof_transition,
                 MempoolHistoryProofTransition::PreserveAndRestart
                     | MempoolHistoryProofTransition::InvalidateAndRestart
             );
-            let backfill_active = context.is_backfill_active
-                || !matches!(proof_transition, MempoolHistoryProofTransition::Publish(_));
+            let backfill_active = context.transaction_page_permitted
+                && (context.is_backfill_active
+                    || !matches!(proof_transition, MempoolHistoryProofTransition::Publish(_)));
             let proof_publication_allowed = !matches!(
                 proof_transition,
                 MempoolHistoryProofTransition::InvalidateAndRestart
@@ -237,7 +248,8 @@ impl MempoolAddressSyncIntegration {
                     )?;
                     false
                 }
-                MempoolHistoryProofTransition::PreserveAndRestart
+                MempoolHistoryProofTransition::Preserve
+                | MempoolHistoryProofTransition::PreserveAndRestart
                 | MempoolHistoryProofTransition::Restart => false,
             };
             let mut persisted_resume_cursor = if restart_from_first_page {
@@ -250,7 +262,8 @@ impl MempoolAddressSyncIntegration {
             } else {
                 active_mempool_resume_cursor(context)
             };
-            let strict_scan_start_run_id = if context.legacy_mempool_history_repair
+            let strict_scan_start_run_id = if context.transaction_page_permitted
+                && context.legacy_mempool_history_repair
                 && !proof_published
                 && !zero_stats_skip_transaction_page(&stats)
             {
@@ -512,7 +525,7 @@ impl AddressSyncIntegration for MempoolAddressSyncIntegration {
         let state = self.ensure_initialized(&context, tip_height, mempool_client)?;
         let visit = state.visit;
         publish_mempool_progress(state, &context);
-        if !context.historical_backfill_enabled {
+        if !context.transaction_page_permitted {
             return Ok(SyncIterationResult {
                 new_tx_count: TransactionCount::zero(),
                 updated_tx_count: TransactionCount::zero(),
@@ -1174,6 +1187,7 @@ mod pure_tests {
             last_completed_at: None,
             last_result: None,
             last_tip_height: None,
+            etherscan_transaction_tip_height: None,
             mempool_backfill_cursor_txid: None,
             mempool_expected_tx_count: None,
             mempool_history_proof: None,
@@ -1532,6 +1546,7 @@ pub(crate) mod tests {
             last_completed_at: None,
             last_result: None,
             last_tip_height: None,
+            etherscan_transaction_tip_height: None,
             mempool_backfill_cursor_txid: None,
             mempool_expected_tx_count: None,
             mempool_history_proof: None,
@@ -1667,7 +1682,7 @@ pub(crate) mod tests {
             raw_sync_run_id: SyncRunId::new(),
             source_connection_id: &source_connection_id,
             is_backfill_active: false,
-            historical_backfill_enabled: true,
+            transaction_page_permitted: true,
             legacy_mempool_history_repair: false,
             mempool_history_page_frontier: None,
         })
@@ -1816,7 +1831,7 @@ pub(crate) mod tests {
                 raw_sync_run_id: SyncRunId::new(),
                 source_connection_id: &source_connection_id,
                 is_backfill_active: false,
-                historical_backfill_enabled: false,
+                transaction_page_permitted: false,
                 legacy_mempool_history_repair: false,
                 mempool_history_page_frontier: None,
             });
@@ -1880,7 +1895,7 @@ pub(crate) mod tests {
                 raw_sync_run_id: raw_sync_run.sync_run_id,
                 source_connection_id: &raw_sync_run.source_connection_id,
                 is_backfill_active: false,
-                historical_backfill_enabled: true,
+                transaction_page_permitted: true,
                 legacy_mempool_history_repair: false,
                 mempool_history_page_frontier: None,
             })
@@ -2015,11 +2030,8 @@ pub(crate) mod tests {
             .find(|candidate| candidate.address_id == higher_address.address_id)
             .expect("higher-count address should exist");
         assert_eq!(durable_higher.mempool_history_proof, Some(old_proof));
-        assert_eq!(durable_higher.mempool_backfill_cursor_txid, None);
-        assert_eq!(
-            durable_higher.mempool_expected_tx_count,
-            Some(TransactionCount::from_u32(3))
-        );
+        assert_eq!(durable_higher.mempool_backfill_cursor_txid, Some(cursor));
+        assert_eq!(durable_higher.mempool_expected_tx_count, None);
 
         let lower_user_id = unique_user_id();
         setup_test_user(lower_user_id);
@@ -2051,10 +2063,48 @@ pub(crate) mod tests {
             .expect("lower-count address should exist");
         assert_eq!(durable_lower.mempool_history_proof, None);
         assert_eq!(durable_lower.mempool_backfill_cursor_txid, None);
-        assert_eq!(
-            durable_lower.mempool_expected_tx_count,
-            Some(TransactionCount::from_u32(1))
-        );
+        assert_eq!(durable_lower.mempool_expected_tx_count, None);
+    }
+
+    #[test]
+    fn capped_stats_only_visit_does_not_advance_retained_history_proof() {
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let old_tip = ChainTipHeight::try_new(800_000).expect("old tip should parse");
+        let new_tip = ChainTipHeight::try_new(800_001).expect("new tip should parse");
+        let proof = MempoolHistoryProof {
+            confirmed_tx_count: TransactionCount::from_u32(2),
+            complete_height: old_tip,
+        };
+        let mut address = test_sync_address();
+        address.mempool_history_proof = Some(proof);
+        persist_sync_address_fixture(user_id, &address, test_now())
+            .expect("address should persist");
+        mark_address_sync_started(
+            user_id,
+            address.address_id,
+            TransactionSyncRunId::new(),
+            test_now(),
+        )
+        .expect("sync state should exist");
+        publish_mempool_history_proof(user_id, address.address_id, proof)
+            .expect("old proof should persist");
+
+        run_stats_only_visit(
+            user_id,
+            &address,
+            r#"{"chain_stats":{"tx_count":2,"funded_txo_sum":2,"spent_txo_sum":0},"mempool_stats":{"tx_count":0}}"#,
+            new_tip,
+        )
+        .expect("capped visit should succeed");
+        let persisted = get_non_hd_sync_addresses(user_id)
+            .expect("address should load")
+            .into_iter()
+            .find(|candidate| candidate.address_id == address.address_id)
+            .expect("address should remain");
+        assert_eq!(persisted.mempool_history_proof, Some(proof));
+        assert_eq!(persisted.last_tip_height, Some(new_tip));
     }
 
     #[test]
@@ -2173,7 +2223,7 @@ pub(crate) mod tests {
                 raw_sync_run_id: raw_sync_run.sync_run_id,
                 source_connection_id: &raw_sync_run.source_connection_id,
                 is_backfill_active: true,
-                historical_backfill_enabled: true,
+                transaction_page_permitted: true,
                 legacy_mempool_history_repair: false,
                 mempool_history_page_frontier: None,
             })
@@ -2192,7 +2242,7 @@ pub(crate) mod tests {
                 raw_sync_run_id: raw_sync_run.sync_run_id,
                 source_connection_id: &raw_sync_run.source_connection_id,
                 is_backfill_active: true,
-                historical_backfill_enabled: true,
+                transaction_page_permitted: true,
                 legacy_mempool_history_repair: false,
                 mempool_history_page_frontier: None,
             })
@@ -2228,6 +2278,7 @@ pub(crate) mod tests {
         let observation = crate::db::with_user_db(user_id, |conn| {
             conn.query_row(
                 "SELECT reported_tx_count, last_tip_height, last_completed_at,
+                        api_confirmed_balance_observed_at,
                         api_confirmed_balance_hi, api_confirmed_balance_lo
                  FROM transaction_sync_state
                  WHERE scope = 'address' AND address_id = ?1",
@@ -2237,8 +2288,9 @@ pub(crate) mod tests {
                         row.get::<_, Option<i64>>(0)?,
                         row.get::<_, Option<i64>>(1)?,
                         row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<String>>(3)?,
                         row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
                     ))
                 },
             )
@@ -2247,7 +2299,14 @@ pub(crate) mod tests {
         .expect("coherent observation should load");
         assert_eq!(
             observation,
-            (Some(2), Some(1), Some(now.to_rfc3339()), Some(0), Some(0),)
+            (
+                Some(2),
+                Some(1),
+                Some(now.to_rfc3339()),
+                Some(now.to_rfc3339()),
+                Some(0),
+                Some(0),
+            )
         );
         assert_eq!(
             get_non_hd_sync_addresses(user_id)
@@ -2336,7 +2395,7 @@ pub(crate) mod tests {
                 raw_sync_run_id: raw_sync_run.sync_run_id,
                 source_connection_id: &raw_sync_run.source_connection_id,
                 is_backfill_active: true,
-                historical_backfill_enabled: true,
+                transaction_page_permitted: true,
                 legacy_mempool_history_repair: false,
                 mempool_history_page_frontier: None,
             })
@@ -2477,7 +2536,7 @@ pub(crate) mod tests {
                     raw_sync_run_id: raw_sync_run.sync_run_id,
                     source_connection_id: &raw_sync_run.source_connection_id,
                     is_backfill_active: true,
-                    historical_backfill_enabled: true,
+                    transaction_page_permitted: true,
                     legacy_mempool_history_repair: true,
                     mempool_history_page_frontier: None,
                 })
@@ -2573,7 +2632,7 @@ pub(crate) mod tests {
             raw_sync_run_id: raw_sync_run.sync_run_id,
             source_connection_id: &raw_sync_run.source_connection_id,
             is_backfill_active: true,
-            historical_backfill_enabled: true,
+            transaction_page_permitted: true,
             legacy_mempool_history_repair: true,
             mempool_history_page_frontier: None,
         };
@@ -2688,7 +2747,7 @@ pub(crate) mod tests {
             raw_sync_run_id: raw_sync_run.sync_run_id,
             source_connection_id: &raw_sync_run.source_connection_id,
             is_backfill_active: true,
-            historical_backfill_enabled: true,
+            transaction_page_permitted: true,
             legacy_mempool_history_repair: true,
             mempool_history_page_frontier: None,
         };
@@ -2762,7 +2821,7 @@ pub(crate) mod tests {
                 raw_sync_run_id: retry_run.sync_run_id,
                 source_connection_id: &retry_run.source_connection_id,
                 is_backfill_active: true,
-                historical_backfill_enabled: true,
+                transaction_page_permitted: true,
                 legacy_mempool_history_repair: true,
                 mempool_history_page_frontier: None,
             })
@@ -2857,7 +2916,7 @@ pub(crate) mod tests {
             raw_sync_run_id: first_run.sync_run_id,
             source_connection_id: &first_run.source_connection_id,
             is_backfill_active: true,
-            historical_backfill_enabled: true,
+            transaction_page_permitted: true,
             legacy_mempool_history_repair: true,
             mempool_history_page_frontier: None,
         };
@@ -2923,7 +2982,7 @@ pub(crate) mod tests {
             raw_sync_run_id: second_run.sync_run_id,
             source_connection_id: &second_run.source_connection_id,
             is_backfill_active: true,
-            historical_backfill_enabled: true,
+            transaction_page_permitted: true,
             legacy_mempool_history_repair: true,
             mempool_history_page_frontier: None,
         };
@@ -3091,7 +3150,7 @@ pub(crate) mod tests {
                 raw_sync_run_id: raw_sync_run.sync_run_id,
                 source_connection_id: &raw_sync_run.source_connection_id,
                 is_backfill_active: true,
-                historical_backfill_enabled: true,
+                transaction_page_permitted: true,
                 legacy_mempool_history_repair: false,
                 mempool_history_page_frontier: None,
             })
@@ -3367,7 +3426,7 @@ pub(crate) mod tests {
                 raw_sync_run_id: raw_sync_run.sync_run_id,
                 source_connection_id: &raw_sync_run.source_connection_id,
                 is_backfill_active: true,
-                historical_backfill_enabled: true,
+                transaction_page_permitted: true,
                 legacy_mempool_history_repair: false,
                 mempool_history_page_frontier: None,
             })
@@ -3623,7 +3682,7 @@ pub(crate) mod tests {
             raw_sync_run_id: SyncRunId::new(),
             source_connection_id: &source_connection_id,
             is_backfill_active: true,
-            historical_backfill_enabled: true,
+            transaction_page_permitted: true,
             legacy_mempool_history_repair: false,
             mempool_history_page_frontier: None,
         };
@@ -3746,7 +3805,7 @@ pub(crate) mod tests {
                     raw_sync_run_id: SyncRunId::new(),
                     source_connection_id: &source_connection_id,
                     is_backfill_active: true,
-                    historical_backfill_enabled: true,
+                    transaction_page_permitted: true,
                     legacy_mempool_history_repair: false,
                     mempool_history_page_frontier: None,
                 },

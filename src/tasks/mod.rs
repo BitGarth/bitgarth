@@ -9,6 +9,7 @@
 pub(crate) mod automatic_sync;
 mod jobs;
 
+pub(crate) use jobs::sync::TransactionFetchPolicy;
 #[cfg(feature = "server")]
 pub(crate) use jobs::sync::approximate_account_unsynced_count;
 #[cfg(feature = "server")]

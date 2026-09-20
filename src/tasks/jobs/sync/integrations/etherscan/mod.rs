@@ -4,8 +4,9 @@ use super::{AddressSyncIntegration, IntegrationEstimateContext};
 use crate::asset_capabilities::SyncProviderId;
 use crate::db::raw_ingestion::{EtherscanChainId, EtherscanRequestKind, OpaqueJsonText, SyncRunId};
 use crate::db::{
-    SyncAddress, reconcile_account_transactions, update_address_etherscan_backfill_cursor,
-    update_address_etherscan_history_status,
+    EtherscanPendingRange, SyncAddress, commit_etherscan_transaction_tip,
+    load_etherscan_pending_range, reconcile_account_transactions, save_etherscan_pending_range,
+    update_address_etherscan_backfill_cursor, update_address_etherscan_history_status,
 };
 use crate::ethereum::{EthAddress, RawEthAddress};
 use crate::integrations::etherscan::{
@@ -20,7 +21,7 @@ use crate::tasks::jobs::raw_ingestion_executor::{
 };
 use crate::tasks::jobs::sync::{
     IntegrationIterationContext, IntegrationSyncPlan, LABEL_ETHERSCAN, RunContext,
-    SyncIterationResult, UserTransactionMonitorError, is_first_sync,
+    SyncIterationResult, UserTransactionMonitorError, is_first_sync, record_rate_limit,
 };
 use crate::tasks::publish_transaction_sync_event;
 use crate::traces::client::{IntegrationLabel, TracedBlockingClient};
@@ -118,9 +119,14 @@ struct EtherscanIterationState {
     range_start_block: u64,
     current_end_block: u64,
     chain_tip_u64: u64,
+    recent_range_tip: u64,
     backfill_cursor_active: bool,
+    recent_range_active: bool,
+    recent_range_from_zero: bool,
+    retained_older_cursor: Option<u64>,
     run_summary: EtherscanRunSummary,
     fetched_normal_count: u32,
+    balance_observation_attempted: bool,
     done: bool,
 }
 
@@ -128,36 +134,14 @@ struct EtherscanIterationState {
 struct EtherscanFetchInitialization {
     range_start_block: u64,
     current_end_block: u64,
-    backfill_cursor_active: bool,
 }
 
 fn etherscan_fetch_initialization(
     address: &SyncAddress,
     chain_tip_u64: u64,
-    historical_backfill_enabled: bool,
+    _transaction_page_permitted: bool,
 ) -> Result<EtherscanFetchInitialization, UserTransactionMonitorError> {
-    if historical_backfill_enabled && let Some(cursor) = address.etherscan_backfill_end_block {
-        let end_block = cursor.as_u64().map_err(|err| {
-            UserTransactionMonitorError::Parse(format!(
-                "invalid persisted etherscan backfill end block: {err}"
-            ))
-        })?;
-        return Ok(EtherscanFetchInitialization {
-            range_start_block: 0,
-            current_end_block: end_block,
-            backfill_cursor_active: true,
-        });
-    }
-
-    if historical_backfill_enabled && !address.etherscan_history_checkpoint_verified {
-        return Ok(EtherscanFetchInitialization {
-            range_start_block: 0,
-            current_end_block: chain_tip_u64,
-            backfill_cursor_active: false,
-        });
-    }
-
-    let range_start_block = match address.last_tip_height {
+    let range_start_block = match address.etherscan_transaction_tip_height {
         Some(height) if height.value() > 0 => {
             u64::try_from(height.value() - 1_i64).unwrap_or(0_u64)
         }
@@ -166,7 +150,6 @@ fn etherscan_fetch_initialization(
     Ok(EtherscanFetchInitialization {
         range_start_block,
         current_end_block: chain_tip_u64,
-        backfill_cursor_active: false,
     })
 }
 
@@ -217,10 +200,48 @@ impl EtherscanAddressSyncIntegration {
             let fetch_initialization = etherscan_fetch_initialization(
                 address,
                 chain_tip_u64,
-                context.historical_backfill_enabled,
+                context.transaction_page_permitted,
             )?;
-            let range_start_block = fetch_initialization.range_start_block;
-            let current_end_block = fetch_initialization.current_end_block;
+            // Automatic cycles create a fresh executor, so resume durable page boundaries.
+            let pending_range = if context.transaction_page_permitted {
+                load_etherscan_pending_range(context.run.user_id, address.address_id)?
+            } else {
+                None
+            };
+            let parse_block = |block: EthereumBlockNumber| {
+                block
+                    .as_u64()
+                    .map_err(|err| UserTransactionMonitorError::Parse(err.to_string()))
+            };
+            let (range_start_block, current_end_block, recent_range_tip, recent_range_active) =
+                match pending_range {
+                    Some(range) => (
+                        parse_block(range.start_block)?,
+                        parse_block(range.end_block)?,
+                        range
+                            .transaction_tip
+                            .map(parse_block)
+                            .transpose()?
+                            .unwrap_or(chain_tip_u64),
+                        range.transaction_tip.is_some(),
+                    ),
+                    None => (
+                        fetch_initialization.range_start_block,
+                        fetch_initialization.current_end_block,
+                        chain_tip_u64,
+                        context.transaction_page_permitted,
+                    ),
+                };
+            let retained_older_cursor = address
+                .etherscan_backfill_end_block
+                .map(|cursor| {
+                    cursor.as_u64().map_err(|err| {
+                        UserTransactionMonitorError::Parse(format!(
+                            "invalid persisted etherscan backfill end block: {err}"
+                        ))
+                    })
+                })
+                .transpose()?;
 
             if range_start_block > current_end_block {
                 return Err(UserTransactionMonitorError::Parse(format!(
@@ -234,15 +255,20 @@ impl EtherscanAddressSyncIntegration {
                 range_start_block,
                 current_end_block,
                 chain_tip_u64,
-                backfill_cursor_active: fetch_initialization.backfill_cursor_active,
+                recent_range_tip,
+                backfill_cursor_active: !recent_range_active && context.transaction_page_permitted,
+                recent_range_active,
+                recent_range_from_zero: range_start_block == 0,
+                retained_older_cursor,
                 run_summary: EtherscanRunSummary {
                     backfill_active: context.is_backfill_active
-                        && context.historical_backfill_enabled,
+                        && context.transaction_page_permitted,
                     requested_start_block: range_start_block,
                     requested_end_block: current_end_block,
                     ..EtherscanRunSummary::default()
                 },
                 fetched_normal_count: 0,
+                balance_observation_attempted: false,
                 done: false,
             });
         }
@@ -261,7 +287,7 @@ impl AddressSyncIntegration for EtherscanAddressSyncIntegration {
         _allow_known_confirmed_early_exit: bool,
     ) -> Result<IntegrationSyncPlan, UserTransactionMonitorError> {
         Ok(IntegrationSyncPlan {
-            is_backfill_active: is_first_sync(address.last_tip_height)
+            is_backfill_active: is_first_sync(address.etherscan_transaction_tip_height)
                 || address.etherscan_backfill_end_block.is_some()
                 || !address.etherscan_history_checkpoint_verified,
         })
@@ -324,7 +350,7 @@ impl AddressSyncIntegration for EtherscanAddressSyncIntegration {
             }
         }
 
-        if !context.historical_backfill_enabled {
+        if !context.transaction_page_permitted {
             let state = self.iteration_state.as_mut().ok_or_else(|| {
                 UserTransactionMonitorError::Parse(
                     "etherscan iteration state not initialized".to_string(),
@@ -446,19 +472,73 @@ fn run_etherscan_iteration(
         observed_at,
     )?;
 
-    // Update cursor for next iteration.
-    match resume_cursor {
-        Some(cursor_block) => state.current_end_block = cursor_block,
-        None => state.done = true,
-    }
-
-    persist_etherscan_backfill_cursor_transition(
-        run.user_id,
-        address.address_id,
-        &mut state.backfill_cursor_active,
-        resume_cursor,
-    )?;
-    if resume_cursor.is_none() {
+    let next_cursor = if state.recent_range_active {
+        match resume_cursor {
+            Some(cursor_block) => {
+                state.current_end_block = cursor_block;
+                Some(cursor_block)
+            }
+            None => {
+                let tip = ChainTipHeight::try_new(i64::try_from(state.recent_range_tip).map_err(
+                    |_| UserTransactionMonitorError::Parse("etherscan tip exceeds i64".to_string()),
+                )?)
+                .map_err(|err| UserTransactionMonitorError::Parse(err.to_string()))?;
+                commit_etherscan_transaction_tip(run.user_id, address.address_id, tip)?;
+                state.recent_range_active = false;
+                if state.recent_range_from_zero {
+                    if state.retained_older_cursor.is_some() {
+                        update_address_etherscan_backfill_cursor(
+                            run.user_id,
+                            address.address_id,
+                            None,
+                        )?;
+                    }
+                    state.done = true;
+                    None
+                } else if let Some(cursor) = state.retained_older_cursor {
+                    state.range_start_block = 0;
+                    state.current_end_block = cursor;
+                    state.backfill_cursor_active = true;
+                    Some(cursor)
+                } else {
+                    state.done = true;
+                    None
+                }
+            }
+        }
+    } else {
+        match resume_cursor {
+            Some(cursor_block) => state.current_end_block = cursor_block,
+            None => state.done = true,
+        }
+        persist_etherscan_backfill_cursor_transition(
+            run.user_id,
+            address.address_id,
+            &mut state.backfill_cursor_active,
+            resume_cursor,
+        )?;
+        resume_cursor
+    };
+    // Save only after both streams have reconciled. If interrupted before this write,
+    // the previous explicit range can safely replay, even after its tip was committed.
+    let block_number = |value| {
+        EthereumBlockNumber::from_u64(value)
+            .map_err(|err| UserTransactionMonitorError::Parse(err.to_string()))
+    };
+    let pending_range = if state.done {
+        None
+    } else {
+        Some(EtherscanPendingRange {
+            start_block: block_number(state.range_start_block)?,
+            end_block: block_number(state.current_end_block)?,
+            transaction_tip: state
+                .recent_range_active
+                .then(|| block_number(state.recent_range_tip))
+                .transpose()?,
+        })
+    };
+    save_etherscan_pending_range(run.user_id, address.address_id, pending_range)?;
+    if state.done {
         update_address_etherscan_history_status(
             run.user_id,
             address.address_id,
@@ -468,8 +548,34 @@ fn run_etherscan_iteration(
     set_etherscan_run_summary_backfill_state(
         &mut state.run_summary,
         context.is_backfill_active,
-        resume_cursor,
+        next_cursor,
     );
+
+    let api_confirmed_balance = if state.balance_observation_attempted {
+        None
+    } else {
+        state.balance_observation_attempted = true;
+        match fetch_etherscan_api_confirmed_balance(state, context) {
+            Ok(balance) => Some(balance),
+            Err(UserTransactionMonitorError::RateLimited { retry_after, .. }) => {
+                record_rate_limit(
+                    run.user_id,
+                    LABEL_ETHERSCAN,
+                    run.clock.instant_now(),
+                    retry_after,
+                );
+                None
+            }
+            Err(_) => {
+                tracing::warn!(
+                    user_id = %run.user_id,
+                    address_id = %address.address_id,
+                    "etherscan balance observation failed after transaction page"
+                );
+                None
+            }
+        }
+    };
 
     let has_more_work = !state.done;
 
@@ -489,7 +595,7 @@ fn run_etherscan_iteration(
         observed_activity: false,
         ledger_rebuild_required: !mapped_transactions.is_empty(),
         raw_run_summary_json: Some(state.run_summary.to_summary_json()?),
-        api_confirmed_balance: None,
+        api_confirmed_balance,
     })
 }
 
@@ -857,8 +963,7 @@ fn fetch_etherscan_api_confirmed_balance(
             if let Ok(request_metadata) = state
                 .client
                 .native_balance_request_metadata(&normalized_address)
-            {
-                record_etherscan_request_failure(
+                && let Err(record_error) = record_etherscan_request_failure(
                     EtherscanRequestFailureRecord {
                         user_id: context.run.user_id,
                         raw_sync_run_id: context.raw_sync_run_id,
@@ -868,7 +973,14 @@ fn fetch_etherscan_api_confirmed_balance(
                         attempted_at,
                     },
                     &error,
-                )?;
+                )
+            {
+                tracing::warn!(
+                    user_id = %context.run.user_id,
+                    address_id = %context.address.address_id,
+                    error = %record_error,
+                    "etherscan balance failure diagnostics could not be recorded"
+                );
             }
             Err(error.into())
         }
@@ -905,6 +1017,7 @@ mod pure_tests {
             last_completed_at: None,
             last_result: None,
             last_tip_height: None,
+            etherscan_transaction_tip_height: None,
             mempool_backfill_cursor_txid: None,
             mempool_expected_tx_count: None,
             mempool_history_proof: None,
@@ -964,6 +1077,8 @@ mod pure_tests {
     fn free_etherscan_fetch_initialization_ignores_persisted_backfill_cursor() {
         let mut address = dummy_sync_address();
         address.last_tip_height = Some(ChainTipHeight::try_new(100).expect("tip should be valid"));
+        address.etherscan_transaction_tip_height =
+            Some(ChainTipHeight::try_new(100).expect("tip should be valid"));
         address.etherscan_backfill_end_block =
             Some(EthereumBlockNumber::try_new(42).expect("block should be valid"));
 
@@ -975,15 +1090,16 @@ mod pure_tests {
             EtherscanFetchInitialization {
                 range_start_block: 99,
                 current_end_block: 150,
-                backfill_cursor_active: false,
             }
         );
     }
 
     #[test]
-    fn paid_etherscan_fetch_initialization_uses_persisted_backfill_cursor() {
+    fn paid_etherscan_fetch_initialization_prioritizes_recent_range_over_older_cursor() {
         let mut address = dummy_sync_address();
-        address.last_tip_height = Some(ChainTipHeight::try_new(100).expect("tip should be valid"));
+        address.last_tip_height = Some(ChainTipHeight::try_new(200).expect("tip should be valid"));
+        address.etherscan_transaction_tip_height =
+            Some(ChainTipHeight::try_new(100).expect("tip should be valid"));
         address.etherscan_backfill_end_block =
             Some(EthereumBlockNumber::try_new(42).expect("block should be valid"));
 
@@ -993,9 +1109,8 @@ mod pure_tests {
         assert_eq!(
             initialization,
             EtherscanFetchInitialization {
-                range_start_block: 0,
-                current_end_block: 42,
-                backfill_cursor_active: true,
+                range_start_block: 99,
+                current_end_block: 150,
             }
         );
     }
@@ -1018,7 +1133,6 @@ mod pure_tests {
             EtherscanFetchInitialization {
                 range_start_block: 0,
                 current_end_block: 150,
-                backfill_cursor_active: false,
             }
         );
     }
@@ -1027,6 +1141,8 @@ mod pure_tests {
     fn paid_etherscan_fetch_initialization_uses_tip_after_verified_backfill() {
         let mut address = dummy_sync_address();
         address.last_tip_height = Some(ChainTipHeight::try_new(100).expect("tip should be valid"));
+        address.etherscan_transaction_tip_height =
+            Some(ChainTipHeight::try_new(100).expect("tip should be valid"));
         address.etherscan_history_checkpoint_verified = true;
 
         let plan = EtherscanAddressSyncIntegration::new()
@@ -1041,7 +1157,26 @@ mod pure_tests {
             EtherscanFetchInitialization {
                 range_start_block: 99,
                 current_end_block: 150,
-                backfill_cursor_active: false,
+            }
+        );
+    }
+
+    #[test]
+    fn etherscan_transaction_tip_ignores_balance_tip_and_fetches_recent_before_older_cursor() {
+        let mut address = dummy_sync_address();
+        address.last_tip_height = Some(ChainTipHeight::try_new(200).expect("tip should be valid"));
+        address.etherscan_backfill_end_block =
+            Some(EthereumBlockNumber::try_new(42).expect("block should be valid"));
+        address.etherscan_history_checkpoint_verified = true;
+
+        let initialization = etherscan_fetch_initialization(&address, 250, true)
+            .expect("fetch initialization should compute");
+
+        assert_eq!(
+            initialization,
+            EtherscanFetchInitialization {
+                range_start_block: 0,
+                current_end_block: 250,
             }
         );
     }
@@ -1213,6 +1348,7 @@ mod tests {
             last_completed_at: None,
             last_result: None,
             last_tip_height: None,
+            etherscan_transaction_tip_height: None,
             mempool_backfill_cursor_txid: None,
             mempool_expected_tx_count: None,
             mempool_history_proof: None,
@@ -1345,6 +1481,95 @@ mod tests {
         SingleResponseServer { base_url, handle }
     }
 
+    fn start_page_set_server(
+        internal_succeeds: bool,
+        normal_tx_count: usize,
+        balance_body: Option<&'static str>,
+    ) -> SingleResponseServer {
+        start_range_page_set_server(internal_succeeds, normal_tx_count, balance_body, 99, 250)
+    }
+
+    fn start_range_page_set_server(
+        internal_succeeds: bool,
+        normal_tx_count: usize,
+        balance_body: Option<&'static str>,
+        start_block: u64,
+        end_block: u64,
+    ) -> SingleResponseServer {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("page server should bind");
+        let base_url = format!(
+            "http://{}/v2/api",
+            listener
+                .local_addr()
+                .expect("page server address should load")
+        );
+        let handle = thread::spawn(move || {
+            let normal_body = if normal_tx_count > 0 {
+                let transactions = (0..normal_tx_count).map(|index| {
+                    let block = end_block - u64::try_from(index).expect("fixture index fits u64");
+                    format!(
+                    r#"{{"hash":"0x{:064x}","blockNumber":"{}","timeStamp":"1609459200","from":"0x1111111111111111111111111111111111111111","to":"0x2222222222222222222222222222222222222222","value":"0","gasPrice":"0","gasUsed":"0","nonce":"0"}}"#,
+                    block, block
+                )}).collect::<Vec<_>>();
+                format!(
+                    r#"{{"status":"1","message":"OK","result":[{}]}}"#,
+                    transactions.join(",")
+                )
+            } else {
+                r#"{"status":"0","message":"No transactions found","result":[]}"#.to_string()
+            };
+            for action in ["txlist", "txlistinternal"] {
+                let (mut stream, _) = listener.accept().expect("page request should arrive");
+                let mut buffer = [0_u8; 4096];
+                let read = stream.read(&mut buffer).expect("page request should read");
+                let request = String::from_utf8_lossy(&buffer[..read]);
+                assert!(request.contains(&format!("action={action}")));
+                assert!(
+                    request.contains(&format!("startblock={start_block}&")),
+                    "{request}"
+                );
+                assert!(
+                    request.contains(&format!("endblock={end_block}&")),
+                    "{request}"
+                );
+                let (status, body) = if action == "txlistinternal" && !internal_succeeds {
+                    ("500 Internal Server Error", "failure")
+                } else if action == "txlist" {
+                    ("200 OK", normal_body.as_str())
+                } else {
+                    (
+                        "200 OK",
+                        r#"{"status":"0","message":"No transactions found","result":[]}"#,
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("page response should write");
+            }
+            if let Some(body) = balance_body {
+                let (mut stream, _) = listener.accept().expect("balance request should arrive");
+                let mut buffer = [0_u8; 4096];
+                let read = stream
+                    .read(&mut buffer)
+                    .expect("balance request should read");
+                let request = String::from_utf8_lossy(&buffer[..read]);
+                assert!(request.contains("action=balance"));
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("balance response should write");
+            }
+        });
+        SingleResponseServer { base_url, handle }
+    }
+
     #[test]
     fn etherscan_balance_fetch_result_persists_as_api_confirmed_balance() {
         let _runtime = acquire_test_runtime().expect("test runtime should initialize");
@@ -1389,9 +1614,14 @@ mod tests {
             range_start_block: 0,
             current_end_block: 1,
             chain_tip_u64: 1,
+            recent_range_tip: 1,
             backfill_cursor_active: false,
+            recent_range_active: false,
+            recent_range_from_zero: true,
+            retained_older_cursor: None,
             run_summary: EtherscanRunSummary::default(),
             fetched_normal_count: 0,
+            balance_observation_attempted: false,
             done: false,
         };
         let clock = FixedClock::new(now);
@@ -1414,7 +1644,7 @@ mod tests {
             raw_sync_run_id: raw_sync_run.sync_run_id,
             source_connection_id: &raw_sync_run.source_connection_id,
             is_backfill_active: false,
-            historical_backfill_enabled: true,
+            transaction_page_permitted: true,
             legacy_mempool_history_repair: false,
             mempool_history_page_frontier: None,
         };
@@ -1460,6 +1690,327 @@ mod tests {
             })
             .expect("persisted sync state should load");
         assert_eq!(stored_balance, (Some(0), Some(321_000)));
+    }
+
+    #[test]
+    fn etherscan_transaction_iteration_observes_balance_without_losing_completed_pages() {
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let now = test_now();
+        let clock = FixedClock::new(now);
+        let api_key = RawEtherscanApiKey::new("test-api-key".to_string());
+        let http_counters = SyncHttpCounters::new();
+
+        for (balance_body, expected_balance, expect_rate_limit) in [
+            (
+                r#"{"status":"1","message":"OK","result":"321000"}"#,
+                Some(ApiConfirmedBalance::from_smallest_unit_i64(321_000).expect("valid balance")),
+                false,
+            ),
+            (
+                r#"{"status":"0","message":"NOTOK","result":"failure"}"#,
+                None,
+                false,
+            ),
+            (
+                r#"{"status":"0","message":"NOTOK","result":"Max rate limit reached"}"#,
+                None,
+                true,
+            ),
+        ] {
+            let user_id = unique_user_id();
+            setup_test_user(user_id);
+            let address = dummy_sync_address();
+            persist_sync_address_fixture(user_id, &address, now)
+                .expect("sync address fixture should persist");
+            let run_id = TransactionSyncRunId::new();
+            mark_address_sync_started(user_id, address.address_id, run_id, now)
+                .expect("sync state row should exist");
+            commit_etherscan_transaction_tip(
+                user_id,
+                address.address_id,
+                ChainTipHeight::try_new(100).expect("tip should be valid"),
+            )
+            .expect("previous transaction tip should persist");
+            let loaded = get_non_hd_sync_addresses(user_id)
+                .expect("address should load")
+                .into_iter()
+                .find(|candidate| candidate.address_id == address.address_id)
+                .expect("address should remain available");
+            let raw_run = start_etherscan_sync_run(user_id, address.address_id, now);
+            let server = start_page_set_server(true, 1, Some(balance_body));
+            let base_url =
+                EtherscanBaseUrl::parse(&server.base_url).expect("page server URL should parse");
+            let mut integration = EtherscanAddressSyncIntegration::new();
+            let result = integration
+                .sync_one_iteration(IntegrationIterationContext {
+                    run: make_run_context_for_user(&clock, user_id),
+                    now_utc: now,
+                    now_instant: clock.instant_now(),
+                    address: &loaded,
+                    clients: SyncClients {
+                        mempool_client: None,
+                        etherscan_api_key: Some(&api_key),
+                        etherscan_base_url: Some(&base_url),
+                        http_counters: &http_counters,
+                    },
+                    single_address_progress: None,
+                    allow_known_confirmed_early_exit: false,
+                    chain_tip: Some(ChainTipHeight::try_new(250).expect("tip should be valid")),
+                    raw_sync_run_id: raw_run.sync_run_id,
+                    source_connection_id: &raw_run.source_connection_id,
+                    is_backfill_active: false,
+                    transaction_page_permitted: true,
+                    legacy_mempool_history_repair: false,
+                    mempool_history_page_frontier: None,
+                })
+                .expect("completed transaction page should remain successful");
+            assert_eq!(result.api_confirmed_balance, expected_balance);
+            assert_eq!(result.new_tx_count.value(), 1);
+            assert!(!result.has_more_work);
+            assert_eq!(
+                crate::tasks::jobs::sync::rate_limit::is_rate_limited(
+                    user_id,
+                    LABEL_ETHERSCAN,
+                    clock.instant_now(),
+                ),
+                expect_rate_limit
+            );
+            server.join();
+
+            let persisted_address = get_non_hd_sync_addresses(user_id)
+                .expect("address should reload")
+                .into_iter()
+                .find(|candidate| candidate.address_id == address.address_id)
+                .expect("address should remain available");
+            assert_eq!(
+                persisted_address
+                    .etherscan_transaction_tip_height
+                    .map(ChainTipHeight::value),
+                Some(250)
+            );
+            mark_address_sync_completed_success(
+                user_id,
+                &AddressSyncSuccess {
+                    address_id: address.address_id,
+                    run_id,
+                    started_at: now,
+                    completed_at: result.completed_at,
+                    last_tip_height: result.tip_height,
+                    new_tx_count: result.new_tx_count,
+                    updated_tx_count: result.updated_tx_count,
+                    api_confirmed_balance: result.api_confirmed_balance,
+                },
+            )
+            .expect("iteration result should persist");
+            let stored_balance: (Option<i64>, Option<i64>) =
+                with_user_db(user_id, |conn| -> Result<_, DbError> {
+                    conn.query_row(
+                        "SELECT api_confirmed_balance_hi, api_confirmed_balance_lo
+                         FROM transaction_sync_state WHERE address_id = ?1",
+                        [address.address_id.to_string()],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(|err| DbError::from_rusqlite_error("load test balance", err))
+                })
+                .expect("persisted balance should load");
+            assert_eq!(
+                stored_balance,
+                if expected_balance.is_some() {
+                    (Some(0), Some(321_000))
+                } else {
+                    (None, None)
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn etherscan_transaction_tip_survives_balance_only_success() {
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let address = dummy_sync_address();
+        let now = test_now();
+        persist_sync_address_fixture(user_id, &address, now)
+            .expect("sync address fixture should persist");
+        let run_id = TransactionSyncRunId::new();
+        mark_address_sync_started(user_id, address.address_id, run_id, now)
+            .expect("sync state row should exist");
+        let transaction_tip = ChainTipHeight::try_new(100).expect("tip should be valid");
+        commit_etherscan_transaction_tip(user_id, address.address_id, transaction_tip)
+            .expect("transaction tip should persist");
+        mark_address_sync_completed_success(
+            user_id,
+            &AddressSyncSuccess {
+                address_id: address.address_id,
+                run_id,
+                started_at: now,
+                completed_at: now,
+                last_tip_height: ChainTipHeight::try_new(300).expect("tip should be valid"),
+                new_tx_count: TransactionCount::zero(),
+                updated_tx_count: TransactionCount::zero(),
+                api_confirmed_balance: None,
+            },
+        )
+        .expect("balance-only success should persist");
+
+        let loaded = crate::db::get_non_hd_sync_addresses(user_id)
+            .expect("sync addresses should load")
+            .into_iter()
+            .find(|candidate| candidate.address_id == address.address_id)
+            .expect("address should remain available");
+        assert_eq!(loaded.last_tip_height.map(ChainTipHeight::value), Some(300));
+        assert_eq!(
+            loaded
+                .etherscan_transaction_tip_height
+                .map(ChainTipHeight::value),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn etherscan_pages_resume_across_fresh_executors_before_finishing_older_history() {
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let address = dummy_sync_address();
+        let now = test_now();
+        persist_sync_address_fixture(user_id, &address, now)
+            .expect("sync address fixture should persist");
+        let run_id = TransactionSyncRunId::new();
+        mark_address_sync_started(user_id, address.address_id, run_id, now)
+            .expect("sync state row should exist");
+        commit_etherscan_transaction_tip(
+            user_id,
+            address.address_id,
+            ChainTipHeight::try_new(100).expect("tip should be valid"),
+        )
+        .expect("earlier transaction tip should persist");
+        mark_address_sync_completed_success(
+            user_id,
+            &AddressSyncSuccess {
+                address_id: address.address_id,
+                run_id,
+                started_at: now,
+                completed_at: now,
+                last_tip_height: ChainTipHeight::try_new(200).expect("tip should be valid"),
+                new_tx_count: TransactionCount::zero(),
+                updated_tx_count: TransactionCount::zero(),
+                api_confirmed_balance: None,
+            },
+        )
+        .expect("balance observation should persist");
+        update_address_etherscan_backfill_cursor(
+            user_id,
+            address.address_id,
+            Some(EthereumBlockNumber::try_new(42).expect("cursor should be valid")),
+        )
+        .expect("older cursor should persist");
+
+        let clock = FixedClock::new(now);
+        let api_key = RawEtherscanApiKey::new("test-api-key".to_string());
+        let http_counters = SyncHttpCounters::new();
+        for (
+            internal_succeeds,
+            permitted,
+            count,
+            start,
+            end,
+            observed_tip,
+            expected_tip,
+            more_work,
+        ) in [
+            (false, true, 0, 99, 2000, 2000, 100, true),
+            (true, true, 1000, 99, 2000, 2000, 100, true),
+            (true, false, 0, 0, 0, 2800, 100, false),
+            (true, true, 501, 99, 1001, 3000, 2000, true),
+            (true, true, 0, 0, 42, 3500, 2000, false),
+        ] {
+            let loaded = get_non_hd_sync_addresses(user_id)
+                .expect("address should reload after process restart")
+                .into_iter()
+                .find(|candidate| candidate.address_id == address.address_id)
+                .expect("address should remain available");
+            let balance_body = r#"{"status":"1","message":"OK","result":"321000"}"#;
+            let server = if permitted {
+                start_range_page_set_server(
+                    internal_succeeds,
+                    count,
+                    internal_succeeds.then_some(balance_body),
+                    start,
+                    end,
+                )
+            } else {
+                start_single_response_etherscan_server(balance_body)
+            };
+            let base_url =
+                EtherscanBaseUrl::parse(&server.base_url).expect("page server URL should parse");
+            let raw_run = start_etherscan_sync_run(user_id, address.address_id, now);
+            let run = make_run_context_for_user(&clock, user_id);
+            let mut integration = EtherscanAddressSyncIntegration::new();
+            let result = integration.sync_one_iteration(IntegrationIterationContext {
+                run,
+                now_utc: now,
+                now_instant: clock.instant_now(),
+                address: &loaded,
+                clients: SyncClients {
+                    mempool_client: None,
+                    etherscan_api_key: Some(&api_key),
+                    etherscan_base_url: Some(&base_url),
+                    http_counters: &http_counters,
+                },
+                single_address_progress: None,
+                allow_known_confirmed_early_exit: false,
+                chain_tip: Some(
+                    ChainTipHeight::try_new(observed_tip).expect("tip should be valid"),
+                ),
+                raw_sync_run_id: raw_run.sync_run_id,
+                source_connection_id: &raw_run.source_connection_id,
+                is_backfill_active: true,
+                transaction_page_permitted: permitted,
+                legacy_mempool_history_repair: false,
+                mempool_history_page_frontier: None,
+            });
+            server.join();
+            if internal_succeeds {
+                let result = result.expect("both page streams should complete");
+                assert_eq!(result.has_more_work, more_work);
+                assert_eq!(
+                    result.api_confirmed_balance,
+                    Some(
+                        ApiConfirmedBalance::from_smallest_unit_i64(321_000)
+                            .expect("test balance should parse")
+                    )
+                );
+            } else {
+                assert!(result.is_err(), "failed internal page must abort the range");
+            }
+            let reloaded = get_non_hd_sync_addresses(user_id)
+                .expect("checkpoint should reload")
+                .into_iter()
+                .find(|candidate| candidate.address_id == address.address_id)
+                .expect("address should remain available");
+            assert_eq!(
+                reloaded
+                    .etherscan_transaction_tip_height
+                    .map(ChainTipHeight::value),
+                Some(expected_tip)
+            );
+            assert_eq!(
+                reloaded
+                    .etherscan_backfill_end_block
+                    .map(EthereumBlockNumber::value),
+                (end != 42).then_some(42)
+            );
+        }
+        let transaction_count = with_user_db(user_id, |conn| -> Result<i64, DbError> {
+            conn.query_row("SELECT COUNT(*) FROM chain_transactions", [], |row| {
+                row.get(0)
+            })
+            .map_err(|err| DbError::from_rusqlite_error("count synced transactions", err))
+        })
+        .expect("transactions should load");
+        assert_eq!(transaction_count, 1500);
     }
 
     fn make_normal_tx(hash: &str, block_number: &str) -> EtherscanNormalTx {

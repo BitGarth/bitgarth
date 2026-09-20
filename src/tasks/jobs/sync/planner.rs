@@ -8,13 +8,15 @@ use super::context::{
     ADDRESS_FAILURE_THRESHOLD, SyncIterationStopReason, SyncPlannerPriorityTier, is_first_sync,
     is_successful_balance_refresh_fresh,
 };
-use super::gate::{MempoolHistoryPolicy, mempool_history_requires_first_page_restart};
+use super::gate::{TransactionFetchPolicy, mempool_history_requires_first_page_restart};
 use super::integrations::unfinished_backfill_state;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct SyncPlannerInput<'a> {
     pub(super) now_utc: DateTime<Utc>,
-    pub(super) mempool_history_policy: MempoolHistoryPolicy,
+    pub(super) transaction_fetch_policy: TransactionFetchPolicy,
+    pub(super) native_account_modes:
+        Option<&'a HashMap<DigitalAssetAccountId, crate::account_limits::NativeAccountMode>>,
     pub(super) account_transaction_counts: &'a HashMap<DigitalAssetAccountId, TransactionCount>,
     pub(super) pending_address_ids: &'a HashSet<DigitalAssetAddressId>,
     pub(super) known_activity_address_ids: &'a HashSet<DigitalAssetAddressId>,
@@ -49,11 +51,17 @@ pub(super) fn priority_tier_for_address(
     address: &SyncAddress,
     input: &SyncPlannerInput<'_>,
 ) -> SyncPlannerPriorityTier {
-    if unfinished_backfill_state(address).is_some() {
+    let history_mode = address.account_id.is_some_and(|id| {
+        input.bitcoin_history_repair_account_ids.contains(&id)
+            || input.native_account_modes.is_none_or(|modes| {
+                modes.get(&id) == Some(&crate::account_limits::NativeAccountMode::Transactions)
+            })
+    });
+    if history_mode && unfinished_backfill_state(address).is_some() {
         return SyncPlannerPriorityTier::ActiveUnfinishedBackfill;
     }
 
-    if input.pending_address_ids.contains(&address.address_id) {
+    if history_mode && input.pending_address_ids.contains(&address.address_id) {
         return SyncPlannerPriorityTier::PendingTransactionRefresh;
     }
 
@@ -257,7 +265,18 @@ fn address_candidate(
 }
 
 fn should_plan_balance_refresh(address: &SyncAddress, input: &SyncPlannerInput<'_>) -> bool {
-    if input.mempool_history_policy == MempoolHistoryPolicy::CurrentOnly {
+    if !address
+        .account_id
+        .is_some_and(|id| input.bitcoin_history_repair_account_ids.contains(&id))
+        && input.native_account_modes.is_some_and(|modes| {
+            !address.account_id.is_some_and(|id| {
+                modes.get(&id) == Some(&crate::account_limits::NativeAccountMode::Transactions)
+            })
+        })
+    {
+        return true;
+    }
+    if input.transaction_fetch_policy == TransactionFetchPolicy::CurrentOnly {
         return true;
     }
 
@@ -269,7 +288,7 @@ fn should_plan_balance_refresh(address: &SyncAddress, input: &SyncPlannerInput<'
         .get(&account_id)
         .is_some_and(|count| {
             !input
-                .mempool_history_policy
+                .transaction_fetch_policy
                 .permits_transaction_page(*count)
         })
 }
@@ -440,6 +459,7 @@ mod tests {
             last_completed_at: None,
             last_result: None,
             last_tip_height: None,
+            etherscan_transaction_tip_height: None,
             mempool_backfill_cursor_txid: None,
             mempool_expected_tx_count: None,
             mempool_history_proof: None,
@@ -460,9 +480,10 @@ mod tests {
     ) -> SyncPlannerInput<'a> {
         SyncPlannerInput {
             now_utc,
-            mempool_history_policy: MempoolHistoryPolicy::Normal {
+            transaction_fetch_policy: TransactionFetchPolicy::Normal {
                 cap: TransactionCount::from_u32(1_000),
             },
+            native_account_modes: None,
             account_transaction_counts,
             pending_address_ids,
             known_activity_address_ids,
@@ -570,7 +591,7 @@ mod tests {
             ]
         );
 
-        let policy = MempoolHistoryPolicy::Normal {
+        let policy = TransactionFetchPolicy::Normal {
             cap: TransactionCount::from_u32(3),
         };
         assert!(policy.permits_transaction_page(TransactionCount::from_u32(2)));
@@ -650,7 +671,7 @@ mod tests {
         let activity = empty_set();
         let excluded = empty_set();
         let input = SyncPlannerInput {
-            mempool_history_policy: MempoolHistoryPolicy::CurrentOnly,
+            transaction_fetch_policy: TransactionFetchPolicy::CurrentOnly,
             ..planner_input(now, &pending, &activity, &counts, &excluded)
         };
 
@@ -676,7 +697,7 @@ mod tests {
         let activity = empty_set();
         let excluded = empty_set();
         let input = SyncPlannerInput {
-            mempool_history_policy: MempoolHistoryPolicy::CurrentOnly,
+            transaction_fetch_policy: TransactionFetchPolicy::CurrentOnly,
             ..planner_input(now, &pending, &activity, &counts, &excluded)
         };
 
@@ -687,6 +708,33 @@ mod tests {
         assert_eq!(
             priority_tier_for_address(&address, &input),
             SyncPlannerPriorityTier::RetryableFailedAttempt
+        );
+    }
+
+    #[test]
+    fn balance_only_pending_history_does_not_refresh_a_fresh_balance() {
+        let account_id = DigitalAssetAccountId::new();
+        let now = test_utc_now();
+        let mut address = btc_address(account_id, "balanceonly");
+        address.last_completed_at = Some(now - Duration::minutes(5));
+        address.last_result = Some(TransactionSyncResult::Success);
+        let pending = HashSet::from([address.address_id]);
+        let activity = empty_set();
+        let counts = HashMap::new();
+        let excluded = empty_set();
+        let modes = HashMap::from([(
+            account_id,
+            crate::account_limits::NativeAccountMode::BalanceOnly,
+        )]);
+        let input = SyncPlannerInput {
+            native_account_modes: Some(&modes),
+            ..planner_input(now, &pending, &activity, &counts, &excluded)
+        };
+        assert_eq!(
+            plan_next_iteration(&[address], &[], &input),
+            PlannedSyncIteration::Stop {
+                reason: SyncIterationStopReason::BalanceRefreshesFresh,
+            }
         );
     }
 

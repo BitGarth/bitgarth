@@ -5,6 +5,7 @@ use getrandom_0_3 as _;
 
 #[cfg(any(feature = "server", test))]
 pub(crate) mod account_limits;
+mod account_mode;
 mod account_model;
 mod amounts;
 mod asset_capabilities;

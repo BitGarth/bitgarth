@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use std::str::FromStr;
 use ulid::Ulid;
 
-use super::fixtures::{add_ethereum_wallet_account, register_user, select_account_sync_slot};
+use super::fixtures::{add_ethereum_wallet_account, register_user};
 use super::{IntegrationTestServer, setup_test_server, setup_test_server_no_db};
 
 async fn assert_malformed_json_returns_bad_request(server: &IntegrationTestServer, path: &str) {
@@ -297,7 +297,6 @@ async fn test_get_account_sync_control_state_happy_path() {
         "Sync Control",
     )
     .await;
-    select_account_sync_slot(&server, &account.account_id).await;
     let user_id = current_user_id(&server).await;
     mark_address_sync_recent_success(
         &server,
@@ -366,7 +365,6 @@ async fn test_run_account_sync_control_happy_path() {
         "Sync Control Run",
     )
     .await;
-    select_account_sync_slot(&server, &account.account_id).await;
     let user_id = current_user_id(&server).await;
     mark_address_sync_recent_success(
         &server,
@@ -394,7 +392,7 @@ async fn test_run_account_sync_control_happy_path() {
 
     let payload: Value = response.json();
     assert_eq!(payload["iterations_requested"], 1);
-    assert_eq!(payload["iterations_completed"], 0);
+    assert_eq!(payload["iterations_completed"], 1);
     assert_eq!(payload["addresses_touched"], 0);
     assert_eq!(payload["stopped_early"], false);
 }

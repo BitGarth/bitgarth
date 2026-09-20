@@ -1,8 +1,8 @@
 #![cfg(feature = "server")]
 
 use super::types::{
-    CAPABILITY_SCHEMA_VERSION_LEGACY, CAPABILITY_SCHEMA_VERSION_V3, EntitlementHolderId,
-    EntitlementSource, FeatureEntitlements, TokenClaims,
+    CAPABILITY_SCHEMA_VERSION_LEGACY, CAPABILITY_SCHEMA_VERSION_V3, CAPABILITY_SCHEMA_VERSION_V4,
+    EntitlementHolderId, EntitlementSource, FeatureEntitlements, TokenClaims,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
@@ -87,7 +87,7 @@ pub(crate) fn verify_entitlement_token(
 
     let claims: TokenClaims =
         serde_json::from_slice(&claims_bytes).map_err(|_| EntitlementTokenError::InvalidClaims)?;
-    validate_claims(&claims, expected_holder_id, now)?;
+    validate_claims(&claims, &claims_bytes, expected_holder_id, now)?;
 
     let entitlements = FeatureEntitlements::from_capabilities(
         claims.tier.clone(),
@@ -148,6 +148,7 @@ fn decode_public_key(value: &str) -> Result<[u8; 32], EntitlementTokenError> {
 
 fn validate_claims(
     claims: &TokenClaims,
+    claims_bytes: &[u8],
     expected_holder_id: EntitlementHolderId,
     now: DateTime<Utc>,
 ) -> Result<(), EntitlementTokenError> {
@@ -156,9 +157,29 @@ fn validate_claims(
     }
     if !matches!(
         claims.capability_schema_version,
-        CAPABILITY_SCHEMA_VERSION_LEGACY | CAPABILITY_SCHEMA_VERSION_V3
+        CAPABILITY_SCHEMA_VERSION_LEGACY
+            | CAPABILITY_SCHEMA_VERSION_V3
+            | CAPABILITY_SCHEMA_VERSION_V4
     ) {
         return Err(EntitlementTokenError::UnsupportedCapabilitySchemaVersion);
+    }
+    if claims.capability_schema_version == CAPABILITY_SCHEMA_VERSION_V4
+        && (claims
+            .capabilities
+            .limits
+            .accounts
+            .and_then(super::types::AccountLimits::validated_v4)
+            .is_none()
+            || serde_json::from_slice::<serde_json::Value>(claims_bytes)
+                .ok()
+                .and_then(|raw| {
+                    raw.pointer("/capabilities/limits/history/max_transactions_per_account")
+                        .and_then(serde_json::Value::as_u64)
+                })
+                .and_then(|limit| u32::try_from(limit).ok())
+                .is_none())
+    {
+        return Err(EntitlementTokenError::InvalidClaims);
     }
     if claims.subscription_valid_until <= now {
         return Err(EntitlementTokenError::SubscriptionExpired);
@@ -297,7 +318,7 @@ mod tests {
             .map_err(|_| PremiumTokenError::InvalidSignature)?;
         let claims: TokenClaims =
             serde_json::from_slice(&claims_bytes).map_err(|_| PremiumTokenError::InvalidClaims)?;
-        validate_claims(&claims, expected_holder_id, now)?;
+        validate_claims(&claims, &claims_bytes, expected_holder_id, now)?;
         let entitlements = FeatureEntitlements::from_capabilities(
             claims.tier.clone(),
             claims.capability_schema_version,
@@ -315,6 +336,7 @@ mod tests {
 
     #[test]
     fn expected_key_hash_matches_central_contract() -> Result<(), Box<dyn Error>> {
+        let _guard = set_signing_public_key_override_for_test(APP_SIGNING_PUBLIC_KEY_B64);
         assert_eq!(
             expected_signing_key_hash()?,
             "BBqcs8N6ZjOe9PdxCs9p4uFFlpRSgu0Qpd6-1xOlLug"
@@ -391,6 +413,10 @@ mod tests {
         assert_eq!(verified.claims.capability_schema_version, 3);
         assert_eq!(verified.entitlements.sync_account_slots_limit, 10);
         assert!(verified.entitlements.historical_backfill_enabled);
+        assert_eq!(
+            verified.entitlements.account_allowance_policy,
+            super::super::types::AccountAllowancePolicy::LegacyCombined { total: 10 }
+        );
         Ok(())
     }
 
@@ -402,7 +428,7 @@ mod tests {
             "entitlement_holder_id": holder_id(),
             "tier": "premium",
             "capability_set_id": "premium.v4",
-            "capability_schema_version": 4,
+            "capability_schema_version": 5,
             "capabilities": {
                 "features": {
                     "transaction_history_sync": true
@@ -421,6 +447,68 @@ mod tests {
         assert_eq!(
             verify_entitlement_token(&token, holder_id(), now()).err(),
             Some(PremiumTokenError::UnsupportedCapabilitySchemaVersion)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn verifier_accepts_v4_and_rejects_signed_malformed_allowances() -> Result<(), Box<dyn Error>> {
+        let mut claims = serde_json::json!({
+            "token_id": "01JQABCDEF000000000000000B",
+            "subscription_subject_id": "01JQABCDEF000000000000000C",
+            "entitlement_holder_id": holder_id(),
+            "tier": "basic",
+            "capability_set_id": "basic.v4",
+            "capability_schema_version": 4,
+            "capabilities": {
+                "features": { "transaction_history_sync": true, "balance_sync": true,
+                    "tax_reports": true, "exchange_rates_history": true },
+                "limits": {
+                    "accounts": { "balance_sync": 200, "transaction_history_sync": 200,
+                        "manual": 1000 },
+                    "history": { "max_transactions_per_account": 3000 }
+                }
+            },
+            "subscription_valid_until": "2027-04-16T12:00:00Z",
+            "token_expires_at": "2026-04-23T12:00:00Z",
+            "issued_at": "2026-04-16T12:00:00Z"
+        });
+        let token = sign_claims_json(claims.clone())?;
+        let verified = verify_test_token(&token, holder_id(), now())?;
+        assert_eq!(
+            verified.entitlements.account_allowance_policy,
+            super::super::types::AccountAllowancePolicy::Independent(
+                super::super::account_allowances::AccountAllowances::try_new(200, 200, 1000)
+                    .expect("test allowances")
+            )
+        );
+        for field in ["balance_sync", "transaction_history_sync", "manual"] {
+            let mut malformed = claims.clone();
+            malformed["capabilities"]["limits"]["accounts"]
+                .as_object_mut()
+                .expect("accounts object")
+                .remove(field);
+            let token = sign_claims_json(malformed)?;
+            assert_eq!(
+                verify_test_token(&token, holder_id(), now()).err(),
+                Some(PremiumTokenError::InvalidClaims)
+            );
+        }
+        let mut missing_history = claims.clone();
+        missing_history["capabilities"]["limits"]
+            .as_object_mut()
+            .expect("limits object")
+            .remove("history");
+        let token = sign_claims_json(missing_history)?;
+        assert_eq!(
+            verify_test_token(&token, holder_id(), now()).err(),
+            Some(PremiumTokenError::InvalidClaims)
+        );
+        claims["capabilities"]["limits"]["accounts"]["transaction_history_sync"] = 201.into();
+        let token = sign_claims_json(claims)?;
+        assert_eq!(
+            verify_test_token(&token, holder_id(), now()).err(),
+            Some(PremiumTokenError::InvalidClaims)
         );
         Ok(())
     }
@@ -452,6 +540,10 @@ mod tests {
         assert_eq!(verified.claims.capability_schema_version, 2);
         assert_eq!(verified.entitlements.sync_account_slots_limit, 10);
         assert!(verified.entitlements.historical_backfill_enabled);
+        assert_eq!(
+            verified.entitlements.account_allowance_policy,
+            super::super::types::AccountAllowancePolicy::LegacyCombined { total: 10 }
+        );
         Ok(())
     }
 

@@ -1,6 +1,6 @@
 use crate::Route;
 use crate::backend::{UpdateStatus, logout, refresh_update_status, update_status};
-use crate::channel::{UpgradeUi, channel, parse_channel};
+use crate::channel::{UpgradeUi, parse_channel};
 use crate::{AuthState, AuthStatus};
 use dioxus::logger::tracing;
 use dioxus::prelude::*;
@@ -44,6 +44,11 @@ pub(crate) enum UpdateBanner {
         current: String,
         store: &'static str,
     },
+    Generic {
+        latest: String,
+        current: String,
+        release_url: String,
+    },
 }
 
 /// Decide which update banner to show. Pure so the gating is unit-testable.
@@ -68,7 +73,12 @@ fn decide_update_banner(status: &UpdateStatus, dismissed: bool) -> Option<Update
             current,
             store,
         }),
-        UpgradeUi::NativeUpdater | UpgradeUi::AppStore | UpgradeUi::None => None,
+        UpgradeUi::Generic => Some(UpdateBanner::Generic {
+            latest,
+            current,
+            release_url: status.release_url.clone()?,
+        }),
+        UpgradeUi::None => None,
     }
 }
 
@@ -1144,6 +1154,44 @@ pub(crate) fn UpdateAvailableBanner(initial_status: Option<UpdateStatus>) -> Ele
             }
             }
         },
+        UpdateBanner::Generic {
+            latest,
+            current,
+            release_url,
+        } => rsx! {
+            div { class: "page-container",
+                section {
+                    class: "upgrade-notice",
+                    "aria-label": "Application update available",
+                    div { class: "upgrade-notice-head",
+                        span { class: "upgrade-notice-eyebrow", "Update" }
+                        p { class: "upgrade-notice-title", "Version {latest} is available" }
+                        p { class: "upgrade-notice-current", "You have version {current}" }
+                    }
+                    div { class: "upgrade-notice-actions",
+                        a {
+                            class: "btn ghost",
+                            href: "https://bitgarth.app/#install",
+                            target: "_blank", rel: "noopener noreferrer",
+                            title: "Installation instructions (opens in a new tab)",
+                            "Installation instructions" " " ExternalLinkIcon {}
+                        }
+                        a {
+                            class: "btn ghost", href: release_url,
+                            target: "_blank", rel: "noopener noreferrer",
+                            title: "View release (opens in a new tab)",
+                            "View release" " " ExternalLinkIcon {}
+                        }
+                        button {
+                            class: "btn ghost", r#type: "button",
+                            "aria-label": "Remind me later",
+                            onclick: move |_| dismissed.set(true),
+                            "Remind me later"
+                        }
+                    }
+                }
+            }
+        },
     }
 }
 
@@ -1189,9 +1237,6 @@ pub fn NavBar() -> Element {
     let initial_update_status = update_status_resource()
         .and_then(|result| result.ok())
         .flatten();
-    let runtime_channel = channel();
-    let _runtime_channel_header = runtime_channel.as_header_value();
-    let _runtime_upgrade_kind = runtime_channel.upgrade_kind();
 
     let toggle_sidebar = move |_| {
         sidebar_open.set(!sidebar_open());
@@ -1627,15 +1672,32 @@ mod tests {
     }
 
     #[test]
-    fn channels_without_a_self_serve_path_show_nothing() {
+    fn hosted_has_no_notice_but_generic_channels_do() {
         assert_eq!(
             decide_update_banner(&status("hosted", true, true), false),
             None
         );
-        assert_eq!(
-            decide_update_banner(&status("unknown", true, true), false),
-            None
-        );
+        for label in ["web", "desktop", "ios", "android", "unknown", "homebrew"] {
+            let mut state = status(label, true, true);
+            state.release_url =
+                Some("https://github.com/BitGarth/bitgarth/releases/tag/v0.1.8".into());
+            assert!(matches!(
+                decide_update_banner(&state, false),
+                Some(UpdateBanner::Generic { .. })
+            ));
+            assert_eq!(decide_update_banner(&state, true), None);
+            state.update_check_enabled = false;
+            assert_eq!(decide_update_banner(&state, false), None);
+            state.update_check_enabled = true;
+            state.available = false;
+            assert_eq!(decide_update_banner(&state, false), None);
+            state.available = true;
+            state.latest = None;
+            assert_eq!(decide_update_banner(&state, false), None);
+            state.latest = Some("0.1.8".into());
+            state.release_url = None;
+            assert_eq!(decide_update_banner(&state, false), None);
+        }
     }
 
     #[test]

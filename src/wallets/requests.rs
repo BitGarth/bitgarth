@@ -102,11 +102,6 @@ pub(crate) struct MoveAccountResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct SelectAccountSyncSlotRequest {
-    pub account_id: DigitalAssetAccountId,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct AddManualAssetAccountRequest {
     pub wallet_id: Option<WalletId>,
     pub wallet_label: Option<RawLabel>,
@@ -335,6 +330,9 @@ pub(crate) enum TransactionHistoryCoverageNoticeView {
     Free {
         approximate_unsynced_count: u32,
     },
+    FreeWithHistory {
+        approximate_unsynced_count: u32,
+    },
     Paid {
         approximate_unsynced_count: u32,
         confirmed_synced_count: u32,
@@ -359,7 +357,8 @@ pub(crate) struct GetAccountTransactionsResponse {
     pub symbol: Option<String>,
     #[serde(default)]
     pub bitcoin_history_coverage: Option<crate::balance_reliability::BitcoinHistoryCoverageView>,
-    pub sync_slot: Box<crate::backend::NativeAccountSyncSlotView>,
+    pub account_mode: crate::account_mode::NativeAccountMode,
+    pub transaction_sync_pause_reason: Option<crate::account_mode::TransactionSyncPauseReason>,
     pub manual_sync: Box<crate::backend::NativeAccountManualSyncView>,
     pub etherscan_history_status: Option<crate::transactions::EtherscanHistoryStatus>,
     pub is_free_tier: bool,

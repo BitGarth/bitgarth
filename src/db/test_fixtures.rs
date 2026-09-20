@@ -172,6 +172,12 @@ fn ensure_test_account_for_sync_address_tx(
         .optional()
         .map_err(|err| DbError::new(format!("Failed to query sync account fixture: {err}")))?;
     if account_exists.is_some() {
+        super::account_admission::enroll_native_account_in_tx(
+            tx,
+            account_id,
+            now,
+            &crate::payments::types::EntitlementTier::Free,
+        )?;
         return Ok(account_id);
     }
 
@@ -220,6 +226,12 @@ fn ensure_test_account_for_sync_address_tx(
         ],
     )
     .map_err(|err| DbError::new(format!("Failed to insert sync account fixture: {err}")))?;
+    super::account_admission::enroll_native_account_in_tx(
+        tx,
+        account_id,
+        now,
+        &crate::payments::types::EntitlementTier::Free,
+    )?;
     Ok(account_id)
 }
 

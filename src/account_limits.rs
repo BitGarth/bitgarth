@@ -1,7 +1,11 @@
-use crate::wallets::WalletAccountId;
+pub(crate) use crate::account_mode::NativeAccountMode;
+use crate::wallets::{DigitalAssetAccountId, WalletAccountId};
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 
-pub(crate) const SUPPORTED_ACCOUNT_HARD_CAP: usize = 100;
+use crate::payments::account_allowances::AccountAllowances;
+
+pub(crate) use crate::payments::account_allowances::SUPPORTED_ACCOUNT_HARD_CAP;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SupportedAccountKind {
@@ -21,6 +25,49 @@ pub(crate) struct SupportedAccountLimitRecord {
 pub(crate) enum AccountActivationState {
     Active,
     Inactive,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct NativeAccountModeRecord {
+    pub(crate) account_id: DigitalAssetAccountId,
+    pub(crate) admitted_at: DateTime<Utc>,
+    pub(crate) supports_balance_sync: bool,
+    pub(crate) supports_transaction_sync: bool,
+}
+
+pub(crate) fn classify_native_account_modes(
+    mut records: Vec<NativeAccountModeRecord>,
+    allowances: AccountAllowances,
+) -> HashMap<DigitalAssetAccountId, NativeAccountMode> {
+    records.sort_by(|left, right| {
+        left.admitted_at.cmp(&right.admitted_at).then_with(|| {
+            left.account_id
+                .to_string()
+                .cmp(&right.account_id.to_string())
+        })
+    });
+    let mut balance_count = 0;
+    let mut transaction_count = 0;
+    records
+        .into_iter()
+        .map(|record| {
+            let mode =
+                if !record.supports_balance_sync || balance_count >= allowances.balance_sync() {
+                    NativeAccountMode::Inactive
+                } else {
+                    balance_count += 1;
+                    if record.supports_transaction_sync
+                        && transaction_count < allowances.transaction_history_sync()
+                    {
+                        transaction_count += 1;
+                        NativeAccountMode::Transactions
+                    } else {
+                        NativeAccountMode::BalanceOnly
+                    }
+                };
+            (record.account_id, mode)
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -64,6 +111,7 @@ pub(crate) fn would_exceed_supported_account_hard_cap(
     current_supported_count.saturating_add(creating_supported_count) > SUPPORTED_ACCOUNT_HARD_CAP
 }
 
+#[cfg(test)]
 pub(crate) fn native_account_sync_eligible(
     account_state: AccountActivationState,
     account_supports_requested_sync: bool,
@@ -249,5 +297,74 @@ mod tests {
             true,
             false,
         ));
+    }
+
+    #[test]
+    fn independent_native_modes_keep_supported_admission_prefixes() {
+        use crate::payments::account_allowances::AccountAllowances;
+        use crate::wallets::DigitalAssetAccountId;
+
+        let ids = (0..202)
+            .map(|_| DigitalAssetAccountId::new())
+            .collect::<Vec<_>>();
+        let records = ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| NativeAccountModeRecord {
+                account_id: *id,
+                admitted_at: created_at(0) + chrono::Duration::microseconds(index as i64),
+                supports_balance_sync: true,
+                supports_transaction_sync: true,
+            })
+            .collect::<Vec<_>>();
+        let free = classify_native_account_modes(
+            records.clone(),
+            AccountAllowances::try_new(50, 3, 1000).unwrap(),
+        );
+        assert_eq!(free[&ids[0]], NativeAccountMode::Transactions);
+        assert_eq!(free[&ids[2]], NativeAccountMode::Transactions);
+        assert_eq!(free[&ids[3]], NativeAccountMode::BalanceOnly);
+        assert_eq!(free[&ids[49]], NativeAccountMode::BalanceOnly);
+        assert_eq!(free[&ids[50]], NativeAccountMode::Inactive);
+
+        let paid = classify_native_account_modes(
+            records,
+            AccountAllowances::try_new(200, 200, 1000).unwrap(),
+        );
+        assert_eq!(paid[&ids[199]], NativeAccountMode::Transactions);
+        assert_eq!(paid[&ids[200]], NativeAccountMode::Inactive);
+    }
+
+    #[test]
+    fn unsupported_native_does_not_use_allowance_and_deletion_fills_vacancy() {
+        use crate::payments::account_allowances::AccountAllowances;
+        use crate::wallets::DigitalAssetAccountId;
+
+        let ids = (0..4)
+            .map(|_| DigitalAssetAccountId::new())
+            .collect::<Vec<_>>();
+        let records = ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| NativeAccountModeRecord {
+                account_id: *id,
+                admitted_at: created_at(0) + chrono::Duration::microseconds(index as i64),
+                supports_balance_sync: index != 0,
+                supports_transaction_sync: index != 0,
+            })
+            .collect::<Vec<_>>();
+        let allowances = AccountAllowances::try_new(2, 1, 0).unwrap();
+        let modes = classify_native_account_modes(records.clone(), allowances);
+        assert_eq!(modes[&ids[0]], NativeAccountMode::Inactive);
+        assert_eq!(modes[&ids[1]], NativeAccountMode::Transactions);
+        assert_eq!(modes[&ids[2]], NativeAccountMode::BalanceOnly);
+        assert_eq!(modes[&ids[3]], NativeAccountMode::Inactive);
+
+        let remaining = classify_native_account_modes(
+            records.into_iter().skip(1).skip(1).collect(),
+            allowances,
+        );
+        assert_eq!(remaining[&ids[2]], NativeAccountMode::Transactions);
+        assert_eq!(remaining[&ids[3]], NativeAccountMode::BalanceOnly);
     }
 }

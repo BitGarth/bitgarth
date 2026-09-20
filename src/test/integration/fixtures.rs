@@ -180,18 +180,6 @@ pub(crate) async fn add_ethereum_wallet_account(
     }
 }
 
-pub(crate) async fn select_account_sync_slot(server: &IntegrationTestServer, account_id: &str) {
-    server
-        .post("/_app/user/wallets/account/sync-slot/select")
-        .json(&json!({
-            "request": {
-                "account_id": account_id
-            }
-        }))
-        .await
-        .assert_status_ok();
-}
-
 pub(crate) async fn add_native_segwit_xpub_account(
     server: &IntegrationTestServer,
     wallet_label: &str,

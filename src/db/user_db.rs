@@ -1141,9 +1141,11 @@ mod tests {
     };
     use crate::db::settings::{load_settings, save_currency};
     use crate::db::user_data_repairs::{
-        BITCOIN_HISTORY_FULL_RESYNC_REPAIR, UserDataRepairStatus, load_user_data_repair_status_conn,
+        ACCOUNT_ADMISSION_ORDER_REPAIR, BITCOIN_HISTORY_FULL_RESYNC_REPAIR, UserDataRepairStatus,
+        load_user_data_repair_status_conn,
     };
     use crate::models::CurrencyCode;
+    use crate::wallets::{WalletAccountId, WalletId};
     use std::sync::{Arc, Barrier, mpsc};
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
@@ -1163,6 +1165,103 @@ mod tests {
 
             f()
         })
+    }
+
+    #[test]
+    fn admission_repair_recovers_before_and_after_data_commit_on_reopen() {
+        let _runtime = crate::db::acquire_test_runtime().expect("test runtime should initialize");
+        let now = Utc::now();
+        for already_backfilled in [false, true] {
+            let user_id = UserId::new();
+            initialize_user_db_for_test(user_id).expect("user database should initialize");
+            let wallet_id = WalletId::new();
+            let native_older = WalletAccountId::new();
+            let native_selected = WalletAccountId::new();
+            let manual_older = WalletAccountId::new();
+            let manual_newer = WalletAccountId::new();
+            with_user_db_mut(user_id, |conn| -> Result<(), DbError> {
+                conn.execute(
+                    "INSERT INTO wallets (id, label, label_key, identity_source, created_at, updated_at)
+                     VALUES (?1, 'Repair Wallet', 'repair wallet', 'user_provided', ?2, ?2)",
+                    rusqlite::params![wallet_id.to_string(), now.to_rfc3339()],
+                ).map_err(|err| DbError::new(err.to_string()))?;
+                for (id, label, created_at) in [
+                    (native_older, "Older", "2026-04-01T00:00:00Z"),
+                    (native_selected, "Selected", "2026-04-03T00:00:00Z"),
+                ] {
+                    conn.execute(
+                        "INSERT INTO digital_asset_accounts
+                         (id, wallet_id, label, label_key, asset_id, network, account_kind, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?3, 'ethereum', 'mainnet', 'single_address', ?4, ?4)",
+                        rusqlite::params![id.to_string(), wallet_id.to_string(), label, created_at],
+                    ).map_err(|err| DbError::new(err.to_string()))?;
+                }
+                conn.execute(
+                    "INSERT INTO account_sync_slots (account_id, selected_at, selected_under_tier)
+                     VALUES (?1, '2026-04-02T00:00:00Z', 'free')",
+                    [native_selected.to_string()],
+                ).map_err(|err| DbError::new(err.to_string()))?;
+                for (id, label, created_at) in [
+                    (manual_older, "Manual older", "2026-04-01T00:00:00Z"),
+                    (manual_newer, "Manual newer", "2026-04-03T00:00:00Z"),
+                ] {
+                    conn.execute(
+                        "INSERT INTO manual_asset_accounts
+                         (id, wallet_id, label, label_key, asset_id, network_id, decimal_precision,
+                          unit_code, asset_name, network_name, coingecko_id, asset_source,
+                          precision_source, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?3, 'cardano', 'cardano-mainnet', 6,
+                                 'ADA', 'Cardano', 'Cardano', 'cardano', 'bitgarth_catalog',
+                                 'bitgarth_catalog', ?4, ?4)",
+                        rusqlite::params![id.to_string(), wallet_id.to_string(), label, created_at],
+                    ).map_err(|err| DbError::new(err.to_string()))?;
+                }
+                conn.execute(
+                    "UPDATE user_data_repairs SET status = 'pending', completed_at = NULL
+                     WHERE repair_key = ?1",
+                    [ACCOUNT_ADMISSION_ORDER_REPAIR],
+                ).map_err(|err| DbError::new(err.to_string()))?;
+                if already_backfilled {
+                    crate::db::account_admission::backfill_account_admission_conn(conn, now)?;
+                }
+                Ok(())
+            }).expect("repair fixture should seed");
+
+            close_user_db(user_id).expect("database should close before reopen");
+            initialize_user_db(user_id, UserDbOpenMode::PlaintextTest)
+                .expect("pending admission repair should recover on reopen");
+            with_user_db(user_id, |conn| -> Result<(), DbError> {
+                assert_eq!(
+                    load_user_data_repair_status_conn(conn, ACCOUNT_ADMISSION_ORDER_REPAIR)?,
+                    Some(UserDataRepairStatus::Completed)
+                );
+                let native_order = conn.prepare(
+                    "SELECT account_id FROM account_sync_slots ORDER BY selected_at, account_id"
+                ).map_err(|err| DbError::new(err.to_string()))?
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(|err| DbError::new(err.to_string()))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|err| DbError::new(err.to_string()))?;
+                assert_eq!(
+                    native_order,
+                    [native_selected.to_string(), native_older.to_string()]
+                );
+                let manual_order = conn
+                    .prepare("SELECT id FROM manual_asset_accounts ORDER BY admitted_at, id")
+                    .map_err(|err| DbError::new(err.to_string()))?
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(|err| DbError::new(err.to_string()))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|err| DbError::new(err.to_string()))?;
+                assert_eq!(
+                    manual_order,
+                    [manual_older.to_string(), manual_newer.to_string()]
+                );
+                Ok(())
+            })
+            .expect("reopened admission should be stable");
+            close_user_db(user_id).expect("database should close after verification");
+        }
     }
 
     #[test]
@@ -2738,7 +2837,7 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_v48_database_opens_at_v50_without_losing_financial_data() {
+    fn encrypted_v48_database_opens_at_v54_without_losing_financial_data() {
         let runtime = crate::db::acquire_test_runtime().expect("test runtime should initialize");
         let user_id = UserId::new();
         let db_path =
@@ -2877,7 +2976,7 @@ mod tests {
                 sqlcipher_compatibility: compatibility,
             },
         )
-        .expect("encrypted V48 fixture should open through V50");
+        .expect("encrypted V48 fixture should open through V54");
         let open_duration = started_at.elapsed();
 
         let (
@@ -2948,10 +3047,10 @@ mod tests {
         .expect("migrated financial data should load");
 
         eprintln!(
-            "representative encrypted V48→V50 database open: {} ms",
+            "representative encrypted V48→V54 database open: {} ms",
             open_duration.as_millis()
         );
-        assert_eq!(schema_version, 50);
+        assert_eq!(schema_version, 54);
         assert_eq!(repair_status, Some(UserDataRepairStatus::Pending));
         assert_eq!(canonical_before, canonical_after);
         assert_eq!(provider_balances_before, provider_balances_after);
@@ -2996,5 +3095,50 @@ mod tests {
 
         drop(conn);
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn v51_etherscan_transaction_tip_starts_null_for_legacy_balance_observation() {
+        let mut conn =
+            rusqlite::Connection::open_in_memory().expect("in-memory user db should open");
+        migrations_runner()
+            .expect("migration runner")
+            .set_target(refinery::Target::Version(50))
+            .run(&mut conn)
+            .expect("migrations through V50 should apply");
+        conn.execute(
+            "INSERT INTO digital_asset_addresses
+             (id, asset_id, network, address, address_normalized, address_scheme,
+              source_type, created_at, updated_at)
+             VALUES ('address', 'ethereum', 'mainnet', '0x1111111111111111111111111111111111111111',
+                     '0x1111111111111111111111111111111111111111', 'standard',
+                     'user_provided', '2026-09-20T00:00:00Z', '2026-09-20T00:00:00Z')",
+            [],
+        )
+        .expect("legacy address should insert");
+        conn.execute(
+            "INSERT INTO transaction_sync_state
+             (id, scope, address_id, last_run_id, last_started_at, last_completed_at,
+              last_result, last_tip_height, new_tx_count, updated_tx_count, created_at, updated_at)
+             VALUES ('state', 'address', 'address', 'run', '2026-09-20T00:00:00Z',
+                     '2026-09-20T00:00:00Z', 'success', 200, 0, 0,
+                     '2026-09-20T00:00:00Z', '2026-09-20T00:00:00Z')",
+            [],
+        )
+        .expect("legacy balance observation should insert");
+
+        conn.execute_batch(include_str!(
+            "../../migrations/user/V51__etherscan_transaction_tip.sql"
+        ))
+        .expect("V51 should apply to a pre-V51 database");
+        let tips: (Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT last_tip_height, etherscan_transaction_tip_height
+                 FROM transaction_sync_state WHERE id = 'state'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("migrated tips should load");
+        assert_eq!(tips, (Some(200), None));
     }
 }

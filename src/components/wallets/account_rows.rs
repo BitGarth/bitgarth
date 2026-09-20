@@ -215,8 +215,8 @@ fn NativeAccountRowSection(
     let network = scheme_view.balance.context.network;
     let supports_address_modal =
         scheme_view.has_derived_addresses || reference_kind == AccountReferenceKind::SingleAddress;
-    let _sync_slot = scheme_view.sync_slot.clone();
     let manual_sync = scheme_view.manual_sync.clone();
+    let account_mode = scheme_view.account_mode;
     let is_inactive = scheme_view.account_state == crate::backend::AccountStateView::Inactive;
     let sync_state = use_context::<super::sync_state::AccountSyncStateSignal>();
     let etherscan_history_status = sync_state
@@ -363,7 +363,7 @@ fn NativeAccountRowSection(
                                 span {
                                     class: "account-history-gap-badge",
                                     "data-testid": "account-history-gap-badge",
-                                    title: "This account has a transaction history gap. Upgrade to import the missing history.",
+                                    title: "This account has a transaction history gap. Some transactions may be missing until history sync completes.",
                                     "History gap"
                                 }
                             }
@@ -374,6 +374,11 @@ fn NativeAccountRowSection(
                                 "data-testid": "account-row-subline",
                                 "{subline}"
                             }
+                        }
+                        span {
+                            class: "account-row-subline",
+                            "data-testid": "account-mode",
+                            "{account_mode.label()}"
                         }
                     }
                 }
@@ -397,16 +402,10 @@ fn NativeAccountRowSection(
                                     "Upgrade to activate this account.".to_string()
                                 }
                             },
-                            (None, _, _) => match (&manual_sync.mode, &manual_sync.slot_effect) {
-                                (crate::backend::ManualSyncMode::BalanceRefresh, crate::backend::ManualSyncSlotEffect::WillSelectAvailableSlot) => {
-                                    format!("Refresh balance. Uses 1 of {} available synced accounts.", manual_sync.slot_limit.saturating_sub(manual_sync.used_slots))
-                                }
-                                (crate::backend::ManualSyncMode::TransactionHistory, crate::backend::ManualSyncSlotEffect::WillSelectAvailableSlot) => {
-                                    format!("Sync transactions. Uses 1 of {} available synced accounts.", manual_sync.slot_limit.saturating_sub(manual_sync.used_slots))
-                                }
-                                (crate::backend::ManualSyncMode::BalanceRefresh, _) => "Refresh balance".to_string(),
-                                (crate::backend::ManualSyncMode::TransactionHistory, _) => "Sync transactions".to_string(),
-                                (crate::backend::ManualSyncMode::Unavailable, _) => "Sync unavailable".to_string(),
+                            (None, _, _) => match manual_sync.mode {
+                                crate::backend::ManualSyncMode::BalanceRefresh => "Refresh balance".to_string(),
+                                crate::backend::ManualSyncMode::TransactionHistory => "Sync transactions".to_string(),
+                                crate::backend::ManualSyncMode::Unavailable => "Sync unavailable".to_string(),
                             },
                         };
                         rsx! {

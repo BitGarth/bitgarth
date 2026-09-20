@@ -690,19 +690,49 @@ struct ManualAssetAssertionWriteContext {
     current_precision: ManualAssetDisplayScale,
 }
 
-fn load_manual_asset_assertion_active_limit(
+fn load_manual_asset_assertion_policy(
     user_id: crate::models::UserId,
     now: DateTime<Utc>,
-) -> Result<usize, ManualAssetAssertionDbError> {
+) -> Result<crate::payments::types::AccountAllowancePolicy, ManualAssetAssertionDbError> {
     let entitlements = crate::payments::entitlements::load_feature_entitlements(user_id, now)?;
-    Ok(usize::from(entitlements.sync_account_slots_limit))
+    Ok(entitlements.account_allowance_policy)
 }
 
 fn ensure_manual_account_assertions_writable_in_tx(
     tx: &rusqlite::Transaction<'_>,
     account_id: WalletAccountId,
-    active_limit: usize,
+    policy: crate::payments::types::AccountAllowancePolicy,
 ) -> Result<(), ManualAssetAssertionDbError> {
+    if let crate::payments::types::AccountAllowancePolicy::Independent(allowances) = policy {
+        let admitted_at: String = tx
+            .query_row(
+                "SELECT admitted_at FROM manual_asset_accounts WHERE id = ?1",
+                [account_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|err| {
+                DbError::from_rusqlite_error("Failed to load manual account admission", err)
+            })?;
+        let position: usize = tx
+            .query_row(
+                "SELECT COUNT(*) FROM manual_asset_accounts
+             WHERE admitted_at < ?1 OR (admitted_at = ?1 AND id <= ?2)",
+                params![admitted_at, account_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|err| {
+                DbError::from_rusqlite_error("Failed to rank manual account admission", err)
+            })?;
+        return if position <= usize::from(allowances.manual()) {
+            Ok(())
+        } else {
+            Err(ManualAssetAssertionDbError::InactiveAccountReadOnly)
+        };
+    }
+    let crate::payments::types::AccountAllowancePolicy::LegacyCombined { total } = policy else {
+        unreachable!("independent policy returned above")
+    };
+    let active_limit = usize::from(total);
     let mut stmt = tx
         .prepare(
             "SELECT id, 'native' AS kind, created_at
@@ -1066,13 +1096,13 @@ pub(crate) fn add_manual_asset_balance_assertion(
     request: ValidatedAddManualAssetBalanceAssertionRequest,
     now: DateTime<Utc>,
 ) -> Result<ManualAssetBalanceAssertionId, ManualAssetAssertionDbError> {
-    let active_limit = load_manual_asset_assertion_active_limit(user_id, now)?;
+    let policy = load_manual_asset_assertion_policy(user_id, now)?;
     with_user_db_mut(user_id, |conn| {
         let tx = conn.transaction().map_err(|err| {
             DbError::new(format!("Failed to start manual assertion insert: {err}"))
         })?;
         let context = load_add_assertion_write_context_in_tx(&tx, request.account_id)?;
-        ensure_manual_account_assertions_writable_in_tx(&tx, context.account_id, active_limit)?;
+        ensure_manual_account_assertions_writable_in_tx(&tx, context.account_id, policy)?;
 
         let assertion_id = ManualAssetBalanceAssertionId::new();
         let balance = request
@@ -1132,13 +1162,13 @@ pub(crate) fn update_manual_asset_balance_assertion(
     request: ValidatedUpdateManualAssetBalanceAssertionRequest,
     now: DateTime<Utc>,
 ) -> Result<(), ManualAssetAssertionDbError> {
-    let active_limit = load_manual_asset_assertion_active_limit(user_id, now)?;
+    let policy = load_manual_asset_assertion_policy(user_id, now)?;
     with_user_db_mut(user_id, |conn| {
         let tx = conn.transaction().map_err(|err| {
             DbError::new(format!("Failed to start manual assertion update: {err}"))
         })?;
         let context = load_update_assertion_write_context_in_tx(&tx, request.assertion_id)?;
-        ensure_manual_account_assertions_writable_in_tx(&tx, context.account_id, active_limit)?;
+        ensure_manual_account_assertions_writable_in_tx(&tx, context.account_id, policy)?;
 
         let balance = request
             .balance
@@ -1201,13 +1231,13 @@ pub(crate) fn delete_manual_asset_balance_assertion(
     user_id: crate::models::UserId,
     assertion_id: ManualAssetBalanceAssertionId,
 ) -> Result<(), ManualAssetAssertionDbError> {
-    let active_limit = load_manual_asset_assertion_active_limit(user_id, Utc::now())?;
+    let policy = load_manual_asset_assertion_policy(user_id, Utc::now())?;
     with_user_db_mut(user_id, |conn| {
         let tx = conn.transaction().map_err(|err| {
             DbError::new(format!("Failed to start manual assertion delete: {err}"))
         })?;
         let account_id = load_manual_assertion_account_id_for_write_in_tx(&tx, assertion_id)?;
-        ensure_manual_account_assertions_writable_in_tx(&tx, account_id, active_limit)?;
+        ensure_manual_account_assertions_writable_in_tx(&tx, account_id, policy)?;
 
         let deleted = tx
             .execute(
@@ -1606,10 +1636,10 @@ mod inactive_account_tests {
                  (id, wallet_id, label, label_key, asset_id, network_id, decimal_precision,
                   unit_code, symbol, asset_name, network_name, coingecko_id, asset_source,
                   precision_source, coingecko_platform_id, provider_platform_asset_ref,
-                  created_at, updated_at)
+                  created_at, updated_at, admitted_at)
                  VALUES (?1, ?2, ?3, ?4, 'algorand', 'algorand-mainnet', 6,
                          'ALGO', NULL, 'Algorand', 'Algorand', 'algorand',
-                         'bitgarth_catalog', 'bitgarth_catalog', NULL, NULL, ?5, ?5)",
+                         'bitgarth_catalog', 'bitgarth_catalog', NULL, NULL, ?5, ?5, ?5)",
                 params![
                     account_id.to_string(),
                     wallet_id.to_string(),
@@ -1653,6 +1683,38 @@ mod inactive_account_tests {
         .expect("assertion fixture inserts");
     }
 
+    #[test]
+    fn independent_manual_write_limit_uses_admission_order_only() {
+        use crate::payments::account_allowances::AccountAllowances;
+        use crate::payments::types::AccountAllowancePolicy;
+
+        let mut conn = rusqlite::Connection::open_in_memory().expect("database opens");
+        conn.execute_batch(
+            "CREATE TABLE manual_asset_accounts (id TEXT PRIMARY KEY, admitted_at TEXT NOT NULL);",
+        )
+        .expect("table created");
+        let first = WalletAccountId::new();
+        let second = WalletAccountId::new();
+        conn.execute(
+            "INSERT INTO manual_asset_accounts VALUES (?1, '2026-01-01T00:00:00.000001Z')",
+            [first.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO manual_asset_accounts VALUES (?1, '2026-01-01T00:00:00.000002Z')",
+            [second.to_string()],
+        )
+        .unwrap();
+        let tx = conn.transaction().unwrap();
+        let policy =
+            AccountAllowancePolicy::Independent(AccountAllowances::try_new(1, 1, 1).unwrap());
+        assert!(ensure_manual_account_assertions_writable_in_tx(&tx, first, policy).is_ok());
+        assert!(matches!(
+            ensure_manual_account_assertions_writable_in_tx(&tx, second, policy),
+            Err(ManualAssetAssertionDbError::InactiveAccountReadOnly)
+        ));
+    }
+
     fn inactive_manual_account_fixture() -> InactiveManualAccountFixture {
         let user_id = crate::models::UserId::new();
         super::super::app_db::enable_test_mode();
@@ -1676,7 +1738,7 @@ mod inactive_account_tests {
             .capabilities
             .limits
             .accounts
-            .total;
+            .manual;
         for index in 0..free_account_limit {
             insert_manual_account(
                 user_id,

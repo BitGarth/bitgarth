@@ -1,4 +1,5 @@
 use super::error::DbError;
+use crate::db::account_admission::backfill_account_admission_conn;
 use crate::db::account_transactions::rebuild_account_transaction_ledger_conn;
 use crate::db::chain_cleanup::{
     begin_chain_cleanup_scope, execute_chain_cleanup_for_marked_candidates,
@@ -26,6 +27,7 @@ pub(crate) const NATIVE_LEDGER_BALANCE_DELTA_REPAIR: &str = "native_ledger_balan
 pub(crate) const ETHERSCAN_PROVIDER_TRANSFER_KEY_REPAIR: &str =
     "etherscan_provider_transfer_key_v1";
 pub(crate) const BITCOIN_HISTORY_FULL_RESYNC_REPAIR: &str = "bitcoin_history_full_resync_v1";
+pub(crate) const ACCOUNT_ADMISSION_ORDER_REPAIR: &str = "account_admission_order_v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UserDataRepairStatus {
@@ -358,6 +360,13 @@ pub(crate) fn run_pending_user_data_repairs_conn(
         ETHERSCAN_PROVIDER_TRANSFER_KEY_REPAIR,
         now,
         repair_etherscan_provider_transfer_keys_conn,
+    )?;
+    run_registered_user_data_repair_conn(
+        conn,
+        user_id,
+        ACCOUNT_ADMISSION_ORDER_REPAIR,
+        now,
+        backfill_account_admission_conn,
     )
 }
 

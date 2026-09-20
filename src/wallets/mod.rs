@@ -127,10 +127,9 @@ pub(crate) use requests::{
     ManualAssetDiscoveryPlatformRow, ManualAssetDiscoveryPriceRequest,
     ManualAssetDiscoveryPriceResponse, ManualAssetInstanceSearchRow, ManualAssetSearchSource,
     MoveAccountRequest, MoveAccountResponse, MoveDestination, RawTransactionFilters,
-    SearchManualAssetInstancesRequest, SearchManualAssetInstancesResponse,
-    SelectAccountSyncSlotRequest, TransactionsEmptyHint, TrezorAccountLinkRequest,
-    UpdateAccountLabelRequest, UpdateWalletLabelRequest, ValidateXpubRequest,
-    WalletAccountHistoryResponse,
+    SearchManualAssetInstancesRequest, SearchManualAssetInstancesResponse, TransactionsEmptyHint,
+    TrezorAccountLinkRequest, UpdateAccountLabelRequest, UpdateWalletLabelRequest,
+    ValidateXpubRequest, WalletAccountHistoryResponse,
 };
 
 // requests — server-only items

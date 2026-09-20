@@ -47,17 +47,15 @@ use crate::db::update_manual_asset_balance_assertion as update_manual_asset_bala
 use crate::db::with_user_db;
 #[cfg(feature = "server")]
 use crate::db::{
-    AccountSyncSlotRecord, WalletAccountRecordKind, account_exists as account_exists_db,
-    active_sync_slot_account_ids,
+    WalletAccountRecordKind, account_exists as account_exists_db,
     add_manual_asset_balance_assertion as add_manual_asset_balance_assertion_db,
     address_exists as address_exists_db,
     delete_manual_asset_balance_assertion as delete_manual_asset_balance_assertion_db,
-    load_account_sync_slots, resolve_address_sync_slot_account,
+    resolve_address_sync_slot_account,
 };
 #[cfg(feature = "server")]
 use crate::models::SessionToken;
 #[cfg(feature = "server")]
-use crate::payments::types::EntitlementTier;
 #[cfg(feature = "server")]
 use crate::sync_control::is_sync_control_enabled;
 #[cfg(all(
@@ -252,12 +250,11 @@ fn initialized_session_from_cookie(
 }
 
 #[cfg(feature = "server")]
-fn load_sync_slot_context(
+fn load_account_mode_context(
     user_id: crate::models::UserId,
 ) -> Result<
     (
-        Vec<AccountSyncSlotRecord>,
-        HashSet<crate::wallets::DigitalAssetAccountId>,
+        HashMap<crate::wallets::DigitalAssetAccountId, crate::account_limits::NativeAccountMode>,
         crate::payments::types::FeatureEntitlements,
     ),
     TransactionsError,
@@ -265,10 +262,9 @@ fn load_sync_slot_context(
     let entitlements =
         crate::payments::entitlements::load_feature_entitlements(user_id, Utc::now())
             .map_err(|err| internal_error("load_feature_entitlements", err))?;
-    let records =
-        load_account_sync_slots(user_id).map_err(|err| internal_error("load_sync_slots", err))?;
-    let active = active_sync_slot_account_ids(&records, entitlements.sync_account_slots_limit);
-    Ok((records, active, entitlements))
+    let modes = crate::db::account_limits::native_account_modes_for_user(user_id, &entitlements)
+        .map_err(|err| internal_error("load_account_modes", err))?;
+    Ok((modes, entitlements))
 }
 
 #[cfg(feature = "server")]
@@ -281,9 +277,8 @@ fn ensure_active_native_account_for_sync(
             .map_err(|err| internal_error("load_feature_entitlements", err))?;
     let eligible = crate::db::account_limits::native_account_sync_eligible_for_user(
         user_id,
-        usize::from(entitlements.sync_account_slots_limit),
+        &entitlements,
         account_id,
-        entitlements.tier == EntitlementTier::Free,
     )
     .map_err(|err| internal_error("classify_supported_accounts_for_user", err))?;
 
@@ -297,54 +292,6 @@ fn ensure_active_native_account_for_sync(
         );
         Err(validation_error(errors))
     }
-}
-
-#[cfg(feature = "server")]
-fn native_account_sync_slot_view(
-    account_id: crate::wallets::DigitalAssetAccountId,
-    records: &[AccountSyncSlotRecord],
-    active: &HashSet<crate::wallets::DigitalAssetAccountId>,
-    limit: u16,
-    balance_sync_available_on_free: bool,
-) -> crate::backend::NativeAccountSyncSlotView {
-    let selected = records
-        .iter()
-        .find(|record| record.account_id == account_id);
-    crate::backend::NativeAccountSyncSlotView {
-        selected: selected.is_some(),
-        active: active.contains(&account_id),
-        can_select: balance_sync_available_on_free
-            && selected.is_none()
-            && records.len() < usize::from(limit),
-        limit,
-        selected_at: selected.map(|record| record.selected_at.to_rfc3339()),
-        selected_under_tier: selected.map(|record| record.selected_under_tier.as_str().to_string()),
-    }
-}
-
-#[cfg(feature = "server")]
-fn apply_inactive_manual_sync_override(
-    manual_sync: &mut crate::backend::NativeAccountManualSyncView,
-    user_id: crate::models::UserId,
-    account_id: crate::wallets::DigitalAssetAccountId,
-    active_limit: u16,
-) -> Result<(), TransactionsError> {
-    let classified = crate::db::account_limits::classify_supported_accounts_for_user(
-        user_id,
-        usize::from(active_limit),
-    )
-    .map_err(|err| internal_error("classify_supported_accounts_for_user", err))?;
-    let state = crate::db::account_limits::account_state_for(
-        &classified,
-        &crate::wallets::WalletAccountId::from(account_id),
-    );
-    if state == crate::account_limits::AccountActivationState::Inactive {
-        manual_sync.mode = crate::backend::ManualSyncMode::Unavailable;
-        manual_sync.slot_effect = crate::backend::ManualSyncSlotEffect::NoCapacity;
-        manual_sync.disabled_reason =
-            Some(crate::backend::ManualSyncDisabledReason::AccountInactive);
-    }
-    Ok(())
 }
 
 #[cfg(feature = "server")]
@@ -366,6 +313,13 @@ fn transaction_history_coverage_notice(
         &entitlements.tier,
         crate::payments::types::EntitlementTier::Free
     ) {
+        if entitlements.historical_backfill_enabled {
+            return Some(
+                crate::wallets::requests::TransactionHistoryCoverageNoticeView::FreeWithHistory {
+                    approximate_unsynced_count,
+                },
+            );
+        }
         return Some(
             crate::wallets::requests::TransactionHistoryCoverageNoticeView::Free {
                 approximate_unsynced_count,
@@ -583,6 +537,7 @@ fn confirmed_transactions_empty_hint(
 
     if entitlements.tier == crate::payments::types::EntitlementTier::Free
         && !supports_balance_only_sync
+        && !entitlements.historical_backfill_enabled
     {
         return Some(TransactionsEmptyHint::FreePlanBalanceUnavailable);
     }
@@ -656,9 +611,9 @@ fn manual_asset_account_state_view(
     let entitlements =
         crate::payments::entitlements::load_feature_entitlements(user_id, Utc::now())
             .map_err(|err| internal_error("load_feature_entitlements", err))?;
-    let classified = crate::db::account_limits::classify_supported_accounts_for_user(
+    let classified = crate::db::account_limits::classify_supported_accounts_for_entitlements(
         user_id,
-        usize::from(entitlements.sync_account_slots_limit),
+        &entitlements,
     )
     .map_err(|err| internal_error("classify_supported_accounts_for_user", err))?;
     let state = crate::db::account_limits::account_state_for(&classified, &account_id);
@@ -761,8 +716,7 @@ pub(crate) async fn get_account_transactions(
             let native_account_id =
                 crate::wallets::DigitalAssetAccountId::from_str(&validated.account_id.to_string())
                     .map_err(|err| internal_error("native_wallet_account_id_parse", err))?;
-            let (sync_slot_records, active_sync_slots, entitlements) =
-                load_sync_slot_context(user_id)?;
+            let (account_modes, entitlements) = load_account_mode_context(user_id)?;
             let db_response = load_account_transactions_pages_db(
                 user_id,
                 native_account_id,
@@ -839,38 +793,51 @@ pub(crate) async fn get_account_transactions(
             } else {
                 crate::backend::AccountReferenceKind::SingleAddress
             };
-            let confirmed_empty_hint = confirmed_transactions_empty_hint(
-                &entitlements,
-                provider.capabilities.supports_balance_only_sync,
-                &validated.filters,
-                db_response.confirmed.total,
-                db_response.closing_balance_state,
-                estimated_tx_count.map(|count| count.value()),
+            let account_mode = account_modes
+                .get(&native_account_id)
+                .copied()
+                .unwrap_or(crate::account_limits::NativeAccountMode::Inactive);
+            let threshold = entitlements.historical_backfill_transactions_per_account;
+            let canonical_count = crate::db::load_canonical_account_transaction_count_bounded(
+                user_id,
+                native_account_id,
+                crate::transactions::TransactionCount::from_u32(threshold),
+            )
+            .map_err(|err| internal_error("load_canonical_account_transaction_count_bounded", err))?
+            .value();
+            let transaction_sync_pause_reason = crate::account_mode::transaction_sync_pause_reason(
+                account_mode,
+                canonical_count,
+                threshold,
             );
+            let confirmed_empty_hint = transaction_sync_pause_reason
+                .is_none()
+                .then(|| {
+                    confirmed_transactions_empty_hint(
+                        &entitlements,
+                        provider.capabilities.supports_balance_only_sync,
+                        &validated.filters,
+                        db_response.confirmed.total,
+                        db_response.closing_balance_state,
+                        estimated_tx_count.map(|count| count.value()),
+                    )
+                })
+                .flatten();
             let opening_balance_state = opening_balance_state_for_history(
                 db_response.has_ingested_history,
                 db_response.bitcoin_history_coverage,
                 db_response.opening_balance_state,
             );
-            let sync_slot_map = sync_slot_records
-                .iter()
-                .map(|record| (record.account_id, record.clone()))
-                .collect::<HashMap<_, _>>();
             let free_balance_unavailable_account_ids = if !balance_sync_available_on_free {
                 std::iter::once(native_account_id).collect()
             } else {
                 HashSet::new()
             };
-            let mut manual_sync = crate::backend::wallets::native_account_manual_sync_view(
+            let manual_sync = crate::backend::wallets::native_account_manual_sync_view(
                 native_account_id,
-                db_response
-                    .confirmed
-                    .total
-                    .saturating_add(db_response.pending.total),
+                canonical_count,
                 crate::backend::wallets::NativeAccountManualSyncContext {
-                    sync_slots: &sync_slot_map,
-                    active_sync_slot_account_ids: &active_sync_slots,
-                    slot_limit: entitlements.sync_account_slots_limit,
+                    account_modes: &account_modes,
                     tier: entitlements.tier.clone(),
                     historical_backfill_enabled: entitlements.historical_backfill_enabled,
                     historical_backfill_transactions_per_account: entitlements
@@ -878,13 +845,6 @@ pub(crate) async fn get_account_transactions(
                     free_balance_unavailable_account_ids: &free_balance_unavailable_account_ids,
                 },
             );
-            apply_inactive_manual_sync_override(
-                &mut manual_sync,
-                user_id,
-                native_account_id,
-                entitlements.sync_account_slots_limit,
-            )?;
-
             Ok(WalletAccountHistoryResponse::Native(
                 GetAccountTransactionsResponse {
                     account_id: validated.account_id,
@@ -901,13 +861,8 @@ pub(crate) async fn get_account_transactions(
                     unit_code: instance.unit_code.as_str().to_string(),
                     symbol: instance.symbol.as_ref().map(|s| s.to_string()),
                     bitcoin_history_coverage: db_response.bitcoin_history_coverage.map(Into::into),
-                    sync_slot: Box::new(native_account_sync_slot_view(
-                        native_account_id,
-                        &sync_slot_records,
-                        &active_sync_slots,
-                        entitlements.sync_account_slots_limit,
-                        balance_sync_available_on_free,
-                    )),
+                    account_mode,
+                    transaction_sync_pause_reason,
                     manual_sync: Box::new(manual_sync),
                     etherscan_history_status,
                     is_free_tier: matches!(
@@ -1187,22 +1142,15 @@ mod tests {
             unit_code: "BTC".to_string(),
             symbol: Some("₿".to_string()),
             bitcoin_history_coverage: Some(
-                crate::balance_reliability::BitcoinHistoryCoverageView::Complete,
+                crate::balance_reliability::BitcoinHistoryCoverageView::CompleteThrough {
+                    block_height: 900_000,
+                },
             ),
-            sync_slot: Box::new(crate::backend::NativeAccountSyncSlotView {
-                selected: true,
-                active: true,
-                can_select: false,
-                limit: 1,
-                selected_at: None,
-                selected_under_tier: None,
-            }),
+            account_mode: crate::account_limits::NativeAccountMode::Transactions,
+            transaction_sync_pause_reason: None,
             manual_sync: Box::new(crate::backend::NativeAccountManualSyncView {
                 mode: crate::backend::ManualSyncMode::TransactionHistory,
-                slot_effect: crate::backend::ManualSyncSlotEffect::AlreadySelected,
                 disabled_reason: None,
-                used_slots: 1,
-                slot_limit: 1,
                 next_tier_display_name: None,
             }),
             etherscan_history_status: None,
@@ -1247,6 +1195,25 @@ mod tests {
             ),
             Some(
                 crate::wallets::requests::TransactionHistoryCoverageNoticeView::Free {
+                    approximate_unsynced_count: 28,
+                }
+            ),
+        );
+    }
+
+    #[test]
+    fn limited_coverage_notice_for_free_with_history_does_not_prompt_upgrade() {
+        let mut entitlements = crate::payments::types::FeatureEntitlements::free();
+        entitlements.historical_backfill_enabled = true;
+        assert_eq!(
+            transaction_history_coverage_notice(
+                Some(crate::db::BitcoinAccountHistoryCoverage::Limited),
+                &entitlements,
+                Some(crate::transactions::TransactionCount::from_u32(28)),
+                crate::transactions::TransactionCount::from_u32(2),
+            ),
+            Some(
+                crate::wallets::requests::TransactionHistoryCoverageNoticeView::FreeWithHistory {
                     approximate_unsynced_count: 28,
                 }
             ),

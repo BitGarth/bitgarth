@@ -8,17 +8,19 @@
       "hledger_export": true,
       "price_overrides": true,
       "tax_reports": false,
-      "transaction_history_sync": false
+      "transaction_history_sync": true
     },
     "limits": {
       "accounts": {
-        "total": 50
+        "balance_sync": 50,
+        "manual": 1000,
+        "transaction_history_sync": 3
       },
       "history": {
-        "max_transactions_per_account": 0
+        "max_transactions_per_account": 1000
       }
     }
   },
-  "capability_schema_version": 3,
-  "captured_at": "2026-07-05T11:48:36.543803Z"
+  "capability_schema_version": 4,
+  "captured_at": "2026-09-20T00:27:44.767662Z"
 }

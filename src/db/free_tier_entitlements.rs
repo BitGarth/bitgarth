@@ -1,6 +1,6 @@
 use super::error::DbError;
 use crate::payments::free_tier::{FreeTierCapabilities, FreeTierObservation};
-use crate::payments::types::CAPABILITY_SCHEMA_VERSION_V3;
+use crate::payments::types::CAPABILITY_SCHEMA_VERSION_V4;
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
 
@@ -35,7 +35,7 @@ pub(crate) fn load_free_tier_entitlement_cache() -> Result<Option<FreeTierObserv
             return Ok(None);
         };
 
-        if capability_schema_version != CAPABILITY_SCHEMA_VERSION_V3 {
+        if capability_schema_version != CAPABILITY_SCHEMA_VERSION_V4 {
             return Err(DbError::new(format!(
                 "unsupported free tier entitlement capability schema version: {capability_schema_version}"
             )));
@@ -47,6 +47,9 @@ pub(crate) fn load_free_tier_entitlement_cache() -> Result<Option<FreeTierObserv
                     "invalid free tier entitlement capabilities JSON: {err}"
                 ))
             })?;
+        if capabilities.limits.accounts.validated().is_none() {
+            return Err(DbError::new("unsupported free tier account allowances"));
+        }
 
         Ok(Some(FreeTierObservation {
             observed_at: parse_utc(fetched_at, "fetched_at")?,
@@ -59,11 +62,20 @@ pub(crate) fn load_free_tier_entitlement_cache() -> Result<Option<FreeTierObserv
 pub(crate) fn upsert_free_tier_entitlement_cache(
     observation: &FreeTierObservation,
 ) -> Result<(), DbError> {
-    if observation.capability_schema_version != CAPABILITY_SCHEMA_VERSION_V3 {
+    if observation.capability_schema_version != CAPABILITY_SCHEMA_VERSION_V4 {
         return Err(DbError::new(format!(
             "unsupported free tier entitlement capability schema version: {}",
             observation.capability_schema_version
         )));
+    }
+    if observation
+        .capabilities
+        .limits
+        .accounts
+        .validated()
+        .is_none()
+    {
+        return Err(DbError::new("unsupported free tier account allowances"));
     }
 
     let capabilities_json = serde_json::to_string(&observation.capabilities).map_err(|err| {
@@ -111,7 +123,7 @@ mod tests {
     fn observation(accounts: u16, hour: u32) -> FreeTierObservation {
         FreeTierObservation {
             observed_at: Utc.with_ymd_and_hms(2026, 6, 30, hour, 0, 0).unwrap(),
-            capability_schema_version: CAPABILITY_SCHEMA_VERSION_V3,
+            capability_schema_version: CAPABILITY_SCHEMA_VERSION_V4,
             capabilities: free_tier_capabilities_for_test(accounts),
         }
     }
@@ -143,7 +155,7 @@ mod tests {
 
         assert_eq!(row_count, 1);
         assert_eq!(loaded.observed_at, observation(30, 2).observed_at);
-        assert_eq!(loaded.capabilities.limits.accounts.total, 30);
+        assert_eq!(loaded.capabilities.limits.accounts.balance_sync, 30);
     }
 
     #[test]
@@ -155,7 +167,20 @@ mod tests {
 
         let loaded = load_free_tier_entitlement_cache().unwrap().unwrap();
         assert_eq!(loaded.observed_at, observation(30, 2).observed_at);
-        assert_eq!(loaded.capabilities.limits.accounts.total, 30);
+        assert_eq!(loaded.capabilities.limits.accounts.balance_sync, 30);
+    }
+
+    #[test]
+    fn unsupported_v4_allowances_are_not_cached() {
+        setup();
+        let mut invalid = observation(20, 1);
+        invalid
+            .capabilities
+            .limits
+            .accounts
+            .transaction_history_sync = 21;
+        assert!(upsert_free_tier_entitlement_cache(&invalid).is_err());
+        assert_eq!(load_free_tier_entitlement_cache().unwrap(), None);
     }
 
     #[test]
@@ -170,7 +195,7 @@ mod tests {
                  VALUES (?1, ?2, ?3, ?4, ?4)",
                 params![
                     FREE_TIER_CACHE_ID,
-                    CAPABILITY_SCHEMA_VERSION_V3,
+                    CAPABILITY_SCHEMA_VERSION_V4,
                     r#"{"limits":{"history":{"max_transactions_per_account":0}},"features":{"transaction_history_sync":false,"balance_sync":true,"exchange_rates_current":true,"exchange_rates_history":false,"price_overrides":false,"balance_assertions":false,"hledger_export":false,"tax_reports":false}}"#,
                     fetched_at,
                 ],
@@ -181,5 +206,40 @@ mod tests {
         .unwrap();
 
         assert!(load_free_tier_entitlement_cache().is_err());
+    }
+
+    #[test]
+    fn v11_discards_legacy_cache_and_accepts_v4() {
+        let conn = rusqlite::Connection::open_in_memory().expect("raw app DB");
+        conn.execute_batch(include_str!(
+            "../../migrations/app/V9__free_tier_entitlement_cache.sql"
+        ))
+        .expect("v9 migration");
+        conn.execute(
+            "INSERT INTO free_tier_entitlement_cache
+             (id, capability_schema_version, capabilities_json, fetched_at, updated_at)
+             VALUES ('singleton', 3, '{}', '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z')",
+            [],
+        )
+        .expect("legacy cache row");
+        conn.execute_batch(include_str!(
+            "../../migrations/app/V11__free_tier_capability_schema_v4.sql"
+        ))
+        .expect("v11 migration");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM free_tier_entitlement_cache",
+                [],
+                |row| row.get(0),
+            )
+            .expect("cache count");
+        assert_eq!(count, 0);
+        conn.execute(
+            "INSERT INTO free_tier_entitlement_cache
+             (id, capability_schema_version, capabilities_json, fetched_at, updated_at)
+             VALUES ('singleton', 4, '{}', '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z')",
+            [],
+        )
+        .expect("v4 cache row");
     }
 }

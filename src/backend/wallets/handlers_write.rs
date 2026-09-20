@@ -9,16 +9,14 @@ use crate::db::{
     derive_address_from_extended_pubkey as derive_address_db,
     find_extended_pubkey_scheme_link as find_extended_pubkey_scheme_link_db,
     find_wallet_for_extended_pubkey as find_wallet_for_extended_pubkey_db,
-    link_trezor_wallet as link_trezor_wallet_db, load_account_sync_slot_map, load_settings,
+    link_trezor_wallet as link_trezor_wallet_db, load_settings,
     move_account_to_wallet as move_account_to_wallet_db,
-    select_account_sync_slot as select_account_sync_slot_db,
     update_wallet_account_label as update_wallet_account_label_db,
     update_wallet_label as update_wallet_label_db,
 };
 #[cfg(feature = "server")]
 use crate::models::{FieldErrors, resolve_effective_mempool_base_url};
 #[cfg(feature = "server")]
-use crate::payments::types::EntitlementTier;
 #[cfg(feature = "server")]
 use crate::tasks::automatic_sync::AutomaticSyncAddTarget;
 #[cfg(feature = "server")]
@@ -33,8 +31,8 @@ use crate::wallets::{
     AddBtcAddressRequest, AddBtcAddressResponse, AddEthAddressRequest, AddEthAddressResponse,
     AddManualAssetAccountRequest, AddManualAssetAccountResponse, AddXpubRequest,
     DeleteAccountRequest, DeleteWalletRequest, LinkTrezorRequest, LinkTrezorResponse,
-    MoveAccountRequest, MoveAccountResponse, SelectAccountSyncSlotRequest,
-    UpdateAccountLabelRequest, UpdateWalletLabelRequest, ValidateXpubRequest,
+    MoveAccountRequest, MoveAccountResponse, UpdateAccountLabelRequest, UpdateWalletLabelRequest,
+    ValidateXpubRequest,
 };
 #[cfg(feature = "server")]
 use axum_extra::extract::cookie::CookieJar;
@@ -94,9 +92,8 @@ fn native_account_sync_eligible_for_entitlements(
 ) -> Result<bool, WalletError> {
     crate::db::account_limits::native_account_sync_eligible_for_user(
         user_id,
-        usize::from(entitlements.sync_account_slots_limit),
+        entitlements,
         account_id,
-        entitlements.tier == EntitlementTier::Free,
     )
     .map_err(|e| internal_error("wallets", e))
 }
@@ -105,19 +102,68 @@ fn native_account_sync_eligible_for_entitlements(
 fn classify_created_account_for_user(
     user_id: crate::models::UserId,
     account_id: crate::wallets::WalletAccountId,
-    active_account_limit: u16,
+    entitlements: &crate::payments::types::FeatureEntitlements,
 ) -> Result<AccountCreationStateView, WalletError> {
-    let classified_accounts = crate::db::account_limits::classify_supported_accounts_for_user(
-        user_id,
-        usize::from(active_account_limit),
-    )
-    .map_err(|e| internal_error("classify_created_account", e))?;
+    let classified_accounts =
+        crate::db::account_limits::classify_supported_accounts_for_entitlements(
+            user_id,
+            entitlements,
+        )
+        .map_err(|e| internal_error("classify_created_account", e))?;
     let state = crate::db::account_limits::account_state_for(&classified_accounts, &account_id);
     Ok(created_account_state_view(
         account_id,
         state,
-        active_account_limit,
+        match entitlements.account_allowance_policy {
+            crate::payments::types::AccountAllowancePolicy::Independent(allowances) => {
+                if classified_accounts
+                    .iter()
+                    .find(|record| record.account_id == account_id)
+                    .is_some_and(|record| {
+                        record.kind == crate::account_limits::SupportedAccountKind::ManualAsset
+                    })
+                {
+                    allowances.manual()
+                } else {
+                    allowances.balance_sync()
+                }
+            }
+            crate::payments::types::AccountAllowancePolicy::LegacyCombined { total } => total,
+        },
     ))
+}
+
+#[cfg(feature = "server")]
+pub(super) fn created_native_accounts_from_snapshot(
+    created_account_ids: &[crate::wallets::DigitalAssetAccountId],
+    classified_accounts: Vec<crate::account_limits::ClassifiedAccount>,
+    account_modes: &std::collections::HashMap<
+        crate::wallets::DigitalAssetAccountId,
+        crate::account_mode::NativeAccountMode,
+    >,
+    active_account_limit: u16,
+) -> (Vec<AccountCreationStateView>, bool) {
+    let states = classified_accounts
+        .into_iter()
+        .map(|account| (account.account_id, account.state))
+        .collect::<std::collections::HashMap<_, _>>();
+    let created_accounts = created_account_ids
+        .iter()
+        .map(|account_id| {
+            let account_id = crate::wallets::WalletAccountId::from(*account_id);
+            let state = states
+                .get(&account_id)
+                .copied()
+                .unwrap_or(crate::account_limits::AccountActivationState::Inactive);
+            created_account_state_view(account_id, state, active_account_limit)
+        })
+        .collect();
+    let has_sync_eligible_created_account = created_account_ids.iter().any(|account_id| {
+        account_modes
+            .get(account_id)
+            .is_some_and(|mode| *mode != crate::account_mode::NativeAccountMode::Inactive)
+    });
+    (created_accounts, has_sync_eligible_created_account)
 }
 
 #[post("/_app/user/wallets/trezor/link", cookies: CookieJar)]
@@ -155,35 +201,30 @@ pub(crate) async fn link_trezor_wallet(
     let now = Utc::now();
     let entitlements = crate::payments::entitlements::load_feature_entitlements(user_id, now)
         .map_err(|e| internal_error("wallets", e))?;
-    let result = link_trezor_wallet_db(
-        user_id,
-        validated,
-        usize::from(entitlements.sync_account_slots_limit),
-        now,
-    )
-    .map_err(map_link_trezor_db_error)?;
-    let created_accounts = result
+    let result = link_trezor_wallet_db(user_id, validated, &entitlements, now)
+        .map_err(map_link_trezor_db_error)?;
+    let (created_accounts, has_sync_eligible_created_account) = if result
         .created_account_ids
-        .iter()
-        .map(|account_id| {
-            classify_created_account_for_user(
-                user_id,
-                (*account_id).into(),
-                entitlements.sync_account_slots_limit,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let has_sync_eligible_created_account = result.created_account_ids.iter().try_fold(
-        false,
-        |found, account_id| -> Result<bool, WalletError> {
-            Ok(found
-                || native_account_sync_eligible_for_entitlements(
-                    user_id,
-                    *account_id,
-                    &entitlements,
-                )?)
-        },
-    )?;
+        .is_empty()
+    {
+        (Vec::new(), false)
+    } else {
+        let (classified_accounts, account_modes) =
+            crate::db::account_limits::load_account_mode_snapshot_for_user(user_id, &entitlements)
+                .map_err(|e| internal_error("classify_created_accounts", e))?;
+        let active_account_limit = match entitlements.account_allowance_policy {
+            crate::payments::types::AccountAllowancePolicy::Independent(allowances) => {
+                allowances.balance_sync()
+            }
+            crate::payments::types::AccountAllowancePolicy::LegacyCombined { total } => total,
+        };
+        created_native_accounts_from_snapshot(
+            &result.created_account_ids,
+            classified_accounts,
+            &account_modes,
+            active_account_limit,
+        )
+    };
     if has_sync_eligible_created_account {
         enqueue_automatic_add_sync(user_id, AutomaticSyncAddTarget::MultiAccountImport).await;
     }
@@ -337,76 +378,6 @@ pub(crate) async fn move_wallet_account(
     Ok(MoveAccountResponse {
         destination_wallet_id,
     })
-}
-
-#[post("/_app/user/wallets/account/sync-slot/select", cookies: CookieJar)]
-pub(crate) async fn select_account_sync_slot(
-    request: SelectAccountSyncSlotRequest,
-) -> Result<(), WalletError> {
-    tracing::debug!(
-        account_id = %request.account_id,
-        "wallets: select account sync slot requested"
-    );
-    let session_token = session_token_from_cookie(&cookies)?;
-    let initialized_session =
-        require_initialized_session("wallets", &session_token, unauthorized_error, |message| {
-            internal_error("require_initialized_session", message)
-        })?;
-    let user_id = initialized_session.session.user_id;
-    let now = Utc::now();
-    let entitlements = crate::payments::entitlements::load_feature_entitlements(user_id, now)
-        .map_err(|e| internal_error("wallets", e))?;
-    if !crate::db::account_exists(user_id, request.account_id)
-        .map_err(|e| internal_error("wallets", e))?
-    {
-        return Err(not_found_error("Account not found"));
-    }
-
-    let eligibility = crate::db::account_limits::native_account_sync_eligibility_for_user(
-        user_id,
-        usize::from(entitlements.sync_account_slots_limit),
-        request.account_id,
-        entitlements.tier == EntitlementTier::Free,
-    )
-    .map_err(|e| internal_error("wallets", e))?;
-
-    if !eligibility.account_active {
-        let mut errors = FieldErrors::new();
-        errors.add(
-            "account_id",
-            "Upgrade to activate this account.".to_string(),
-        );
-        return Err(validation_error(errors));
-    }
-
-    if !eligibility.provider_or_plan_supports_requested_sync {
-        let mut errors = FieldErrors::new();
-        errors.add(
-            "account_id",
-            "Balance sync unavailable on Free.".to_string(),
-        );
-        return Err(validation_error(errors));
-    }
-
-    let existing_slots =
-        load_account_sync_slot_map(user_id).map_err(|e| internal_error("wallets", e))?;
-    if existing_slots.contains_key(&request.account_id) {
-        return Ok(());
-    }
-
-    if existing_slots.len() >= usize::from(entitlements.sync_account_slots_limit) {
-        let mut errors = FieldErrors::new();
-        errors.add(
-            "account_id",
-            "Your plan has no free sync slots.".to_string(),
-        );
-        return Err(validation_error(errors));
-    }
-
-    select_account_sync_slot_db(user_id, request.account_id, &entitlements.tier, now)
-        .map_err(|e| internal_error("wallets", e))?;
-
-    Ok(())
 }
 
 #[post("/_app/user/wallets/delete", cookies: CookieJar)]
@@ -653,15 +624,12 @@ pub(crate) async fn add_xpub(request: AddXpubRequest) -> Result<AddXpubResponse,
         validated.wallet_id,
         validated.wallet_label.as_ref(),
         validated.account_label.as_ref(),
-        usize::from(entitlements.sync_account_slots_limit),
+        &entitlements,
         Utc::now(),
     )
     .map_err(|e| map_wallet_db_error(e, "wallet_label"))?;
-    let created_account = classify_created_account_for_user(
-        user_id,
-        result.account_id.into(),
-        entitlements.sync_account_slots_limit,
-    )?;
+    let created_account =
+        classify_created_account_for_user(user_id, result.account_id.into(), &entitlements)?;
 
     tracing::debug!(
         user_id = %user_id,
@@ -738,11 +706,8 @@ pub(crate) async fn add_manual_asset_account(
     let entitlements =
         crate::payments::entitlements::load_feature_entitlements(user_id, Utc::now())
             .map_err(|e| internal_error("wallets", e))?;
-    let created_account = classify_created_account_for_user(
-        user_id,
-        result.account_id,
-        entitlements.sync_account_slots_limit,
-    )?;
+    let created_account =
+        classify_created_account_for_user(user_id, result.account_id, &entitlements)?;
 
     Ok(AddManualAssetAccountResponse {
         wallet_id: result.wallet_id,
@@ -789,11 +754,8 @@ pub(crate) async fn add_ethereum_address(
     let entitlements =
         crate::payments::entitlements::load_feature_entitlements(user_id, Utc::now())
             .map_err(|e| internal_error("wallets", e))?;
-    let created_account = classify_created_account_for_user(
-        user_id,
-        result.account_id.into(),
-        entitlements.sync_account_slots_limit,
-    )?;
+    let created_account =
+        classify_created_account_for_user(user_id, result.account_id.into(), &entitlements)?;
 
     tracing::debug!(
         user_id = %user_id,
@@ -860,11 +822,8 @@ pub(crate) async fn add_bitcoin_address(
     let entitlements =
         crate::payments::entitlements::load_feature_entitlements(user_id, Utc::now())
             .map_err(|e| internal_error("wallets", e))?;
-    let created_account = classify_created_account_for_user(
-        user_id,
-        result.account_id.into(),
-        entitlements.sync_account_slots_limit,
-    )?;
+    let created_account =
+        classify_created_account_for_user(user_id, result.account_id.into(), &entitlements)?;
 
     tracing::debug!(
         user_id = %user_id,

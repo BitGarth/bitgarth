@@ -8,6 +8,7 @@
 //! - App migrations run at startup (first database access)
 //! - User migrations run after login (when user database is initialized)
 
+mod account_admission;
 mod account_balance_resolution;
 pub(crate) mod account_limits;
 mod account_transactions;
@@ -96,8 +97,7 @@ pub(crate) use settings::{
     save_mempool_base_url, save_number_format, save_session_duration, save_timezone,
 };
 pub(crate) use sync_slots::{
-    AccountSyncSlotRecord, active_sync_slot_account_ids, load_account_sync_slot_map,
-    load_account_sync_slots, resolve_address_sync_slot_account, select_account_sync_slot,
+    AccountSyncSlotRecord, load_account_sync_slots, resolve_address_sync_slot_account,
 };
 
 pub(crate) use client_capabilities::{
@@ -227,13 +227,14 @@ pub(crate) use transaction_sync::AccountSyncStateRow;
 pub(crate) use transaction_sync::reconcile_address_transactions;
 pub(crate) use transaction_sync::{
     AccountIntegrationSyncStart, AccountSyncBundle, AddressSyncSuccess,
-    BitcoinAccountHistoryCoverage, CoverageInvalidationTargets, HdAccountChainFrontierPhase,
-    HdAccountChainSyncState, HdMempoolHistoryFrontierUpdate, MempoolAddressObservationSuccess,
-    MempoolHistoryPageWorkUpdate, MempoolHistoryProof, ProviderTransferKey,
-    StrictMempoolScanValidation, SyncAccountTransactionRecord, SyncAccountTransferRecord,
-    SyncAddress, SyncTransactionInputRecord, SyncTransactionOutputRecord, SyncTransactionRecord,
-    TransactionSyncReconcileSummary, account_has_incomplete_mempool_history_with_conn,
-    address_has_pending_txs, begin_mempool_history_scan, commit_mempool_history_page_work,
+    BitcoinAccountHistoryCoverage, CoverageInvalidationTargets, EtherscanPendingRange,
+    HdAccountChainFrontierPhase, HdAccountChainSyncState, HdMempoolHistoryFrontierUpdate,
+    MempoolAddressObservationSuccess, MempoolHistoryPageWorkUpdate, MempoolHistoryProof,
+    ProviderTransferKey, StrictMempoolScanValidation, SyncAccountTransactionRecord,
+    SyncAccountTransferRecord, SyncAddress, SyncTransactionInputRecord,
+    SyncTransactionOutputRecord, SyncTransactionRecord, TransactionSyncReconcileSummary,
+    account_has_incomplete_mempool_history_with_conn, address_has_pending_txs,
+    begin_mempool_history_scan, commit_etherscan_transaction_tip, commit_mempool_history_page_work,
     complete_hd_account_discovery, delete_hd_account_chain_sync_state, get_hd_account_sync_bundles,
     get_non_hd_sync_addresses, get_sync_addresses_for_account,
     invalidate_mempool_account_history_coverage, invalidate_mempool_history_coverage,
@@ -242,13 +243,14 @@ pub(crate) use transaction_sync::{
     load_account_sync_snapshots, load_address_ids_with_activity, load_address_ids_with_pending_txs,
     load_aggregate_sync_snapshot, load_canonical_account_transaction_count_bounded,
     load_canonical_confirmed_account_transaction_count, load_chain_tip_state,
-    load_confirmed_tx_hashes_for_address, load_hd_account_chain_sync_state,
-    load_known_tx_hashes_for_address, mark_account_integration_sync_started,
-    mark_address_sync_completed_failure, mark_address_sync_completed_success,
-    mark_address_sync_started, persist_mempool_address_observation_success,
-    publish_mempool_history_proof, publish_strict_mempool_history_proof,
-    reconcile_account_transactions, reconcile_address_transactions_preserving_invalidation,
-    refresh_account_integration_sync_state, restart_strict_mempool_history_scan,
+    load_confirmed_tx_hashes_for_address, load_etherscan_pending_range,
+    load_hd_account_chain_sync_state, load_known_tx_hashes_for_address,
+    mark_account_integration_sync_started, mark_address_sync_completed_failure,
+    mark_address_sync_completed_success, mark_address_sync_started,
+    persist_mempool_address_observation_success, publish_mempool_history_proof,
+    publish_strict_mempool_history_proof, reconcile_account_transactions,
+    reconcile_address_transactions_preserving_invalidation, refresh_account_integration_sync_state,
+    restart_strict_mempool_history_scan, save_etherscan_pending_range,
     update_address_etherscan_backfill_cursor, update_address_etherscan_history_status,
     update_address_mempool_backfill_cursor, update_address_mempool_expected_tx_count,
     upsert_account_sync_state, upsert_chain_tip_state, upsert_hd_account_chain_sync_state,

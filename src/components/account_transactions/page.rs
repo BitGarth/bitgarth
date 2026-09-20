@@ -389,7 +389,6 @@ pub(crate) fn AccountTransactions(
                             let current_account_label = data.account_label.clone().unwrap_or_default();
                             let asset = data.asset;
                             let network = data.network;
-                            let _sync_slot = data.sync_slot.clone();
                             let manual_sync = (*data.manual_sync).clone();
 
                             let addresses_loader = AccountAddressesLoader {
@@ -470,6 +469,10 @@ pub(crate) fn AccountTransactions(
                                             }
                                         }
                                         AccountSyncStatusPill { account_id: native_account_id }
+                                        span { "data-testid": "account-mode", "{data.account_mode.label()}" }
+                                        if let Some(coverage @ crate::balance_reliability::BitcoinHistoryCoverageView::CompleteThrough { .. }) = data.bitcoin_history_coverage {
+                                            span { class: "tx-history-coverage", "data-testid": "bitcoin-history-coverage", "{coverage.label()}" }
+                                        }
                                     }
                                     div { class: "tx-header-actions",
                                         {
@@ -492,16 +495,10 @@ pub(crate) fn AccountTransactions(
                                                         "Upgrade to activate this account.".to_string()
                                                     }
                                                 },
-                                                (None, _, _) => match (&manual_sync.mode, &manual_sync.slot_effect) {
-                                                    (crate::backend::ManualSyncMode::BalanceRefresh, crate::backend::ManualSyncSlotEffect::WillSelectAvailableSlot) => {
-                                                        format!("Refresh balance. Uses 1 of {} available synced accounts.", manual_sync.slot_limit.saturating_sub(manual_sync.used_slots))
-                                                    }
-                                                    (crate::backend::ManualSyncMode::TransactionHistory, crate::backend::ManualSyncSlotEffect::WillSelectAvailableSlot) => {
-                                                        format!("Sync transactions. Uses 1 of {} available synced accounts.", manual_sync.slot_limit.saturating_sub(manual_sync.used_slots))
-                                                    }
-                                                    (crate::backend::ManualSyncMode::BalanceRefresh, _) => "Refresh balance".to_string(),
-                                                    (crate::backend::ManualSyncMode::TransactionHistory, _) => "Sync transactions".to_string(),
-                                                    (crate::backend::ManualSyncMode::Unavailable, _) => "Sync unavailable".to_string(),
+                                                (None, _, _) => match manual_sync.mode {
+                                                    crate::backend::ManualSyncMode::BalanceRefresh => "Refresh balance".to_string(),
+                                                    crate::backend::ManualSyncMode::TransactionHistory => "Sync transactions".to_string(),
+                                                    crate::backend::ManualSyncMode::Unavailable => "Sync unavailable".to_string(),
                                                 },
                                             };
                                             rsx! {
@@ -886,17 +883,33 @@ pub(crate) fn AccountTransactions(
                 matches!(
                     data,
                     WalletAccountHistoryResponse::Native(native)
-                        if native.etherscan_history_status == Some(EtherscanHistoryStatus::Gap)
+                        if native.transaction_sync_pause_reason.is_none()
+                            && native.etherscan_history_status == Some(EtherscanHistoryStatus::Gap)
                 )
             }) {
                 div { class: "history-gap-notice", "data-testid": "history-gap-notice",
-                    "This account has a transaction history gap. Upgrade to import the missing history."
+                    "This account has a transaction history gap. Some transactions may be missing until history sync completes."
+                }
+            }
+
+            if let Some(reason) = response().as_ref().and_then(|data| match data {
+                WalletAccountHistoryResponse::Native(native) => native.transaction_sync_pause_reason,
+                WalletAccountHistoryResponse::Custom(_) => None,
+            }) {
+                div {
+                    class: "history-gap-notice",
+                    "data-testid": "transaction-sync-pause-notice",
+                    "{reason.notice()}"
                 }
             }
 
             if let Some(notice) = response().as_ref().and_then(|data| match data {
                 WalletAccountHistoryResponse::Native(native) => {
-                    native.transaction_history_coverage_notice.clone()
+                    if native.transaction_sync_pause_reason.is_none() {
+                        native.transaction_history_coverage_notice.clone()
+                    } else {
+                        None
+                    }
                 }
                 WalletAccountHistoryResponse::Custom(_) => None,
             }) {
@@ -910,6 +923,11 @@ pub(crate) fn AccountTransactions(
                             "This account has approximately {approximate_unsynced_count} unsynced transactions. "
                             Link { to: Route::Payments, "Upgrade " }
                             "to sync transaction history."
+                        },
+                        TransactionHistoryCoverageNoticeView::FreeWithHistory {
+                            approximate_unsynced_count,
+                        } => rsx! {
+                            "This account has approximately {approximate_unsynced_count} unsynced transactions. Transaction syncing can continue under your current plan."
                         },
                         TransactionHistoryCoverageNoticeView::Paid {
                             approximate_unsynced_count,

@@ -1,7 +1,10 @@
 use super::error::DbError;
 use super::user_db::with_user_db_mut;
 use crate::models::UserId;
-use crate::wallets::{AccountKind, BIP44_GAP_LIMIT, DigitalAssetAccountId, KeyRole};
+use crate::payments::types::FeatureEntitlements;
+use crate::wallets::{
+    AccountKind, BIP44_GAP_LIMIT, DigitalAssetAccountId, KeyRole, WalletAccountId,
+};
 use chrono::{DateTime, Utc};
 use std::str::FromStr;
 
@@ -129,9 +132,8 @@ fn bootstrap_created_hd_account_if_needed(
 
 fn import_into_transaction(
     tx: &rusqlite::Transaction<'_>,
-    user_id: UserId,
     imported_wallets: &[parse::ParsedImportedWallet],
-    active_limit: usize,
+    entitlements: &FeatureEntitlements,
     now: DateTime<Utc>,
 ) -> Result<WalletDataImportResult, WalletDataImportDbError> {
     let mut state = resolve::load_import_state(tx)?;
@@ -153,8 +155,10 @@ fn import_into_transaction(
         assertions_skipped: 0,
         validation_warnings: Vec::new(),
     };
-    let mut supported_account_sequence = 0usize;
     let mut created_hd_accounts = Vec::new();
+    let mut native_admissions = Vec::new();
+    let mut manual_admissions = Vec::new();
+    let mut supported_account_sequence = 0usize;
 
     for imported_wallet in imported_wallets {
         if imported_wallet.ignored_accessors_count > 0 {
@@ -174,9 +178,10 @@ fn import_into_transaction(
         )?;
 
         for native_account in &imported_wallet.native_accounts {
-            let created_at = native_account.created_at.unwrap_or_else(|| {
-                merge::fallback_import_created_at(now, supported_account_sequence)
-            });
+            let index = supported_account_sequence;
+            let created_at = native_account
+                .created_at
+                .unwrap_or_else(|| merge::fallback_import_created_at(now, index));
             supported_account_sequence = supported_account_sequence.saturating_add(1);
             let resolved_account = resolve::resolve_or_create_native_account(
                 tx,
@@ -188,7 +193,6 @@ fn import_into_transaction(
                 &mut result,
             )?;
             let target_account_id = resolved_account.account_id;
-
             merge::merge_native_account_identifiers(
                 tx,
                 &mut state,
@@ -197,36 +201,33 @@ fn import_into_transaction(
                 now,
                 &mut result,
             )?;
-
-            if resolved_account.was_created && native_account.account_kind == AccountKind::HdPubkey
-            {
-                created_hd_accounts.push((target_account_id, native_account.clone()));
-            }
-
-            if let Some(sync_slot) = native_account.sync_slot.as_ref() {
-                let native_account_id = DigitalAssetAccountId::from_str(
-                    &target_account_id.to_string(),
-                )
-                .map_err(|err| {
-                    WalletDataImportDbError::Internal(format!(
-                        "Failed to convert imported account id for sync slot: {err}"
-                    ))
-                })?;
-                super::sync_slots::upsert_imported_account_sync_slot(
-                    tx,
-                    native_account_id,
-                    sync_slot.selected_at,
-                    &sync_slot.selected_under_tier,
-                )
-                .map_err(WalletDataImportDbError::from)?;
+            if resolved_account.was_created {
+                native_admissions.push((
+                    target_account_id,
+                    native_account
+                        .sync_slot
+                        .as_ref()
+                        .map(|slot| slot.selected_at),
+                    index,
+                ));
+                if native_account.account_kind == AccountKind::HdPubkey {
+                    created_hd_accounts.push((target_account_id, native_account.clone()));
+                }
             }
         }
 
         for manual_account in &imported_wallet.manual_accounts {
-            let created_at = manual_account.created_at.unwrap_or_else(|| {
-                merge::fallback_import_created_at(now, supported_account_sequence)
-            });
+            let index = supported_account_sequence;
+            let created_at = manual_account
+                .created_at
+                .unwrap_or_else(|| merge::fallback_import_created_at(now, index));
             supported_account_sequence = supported_account_sequence.saturating_add(1);
+            let key = resolve::ManualAccountLookupKey {
+                wallet_id,
+                asset_id: manual_account.snapshot.asset_id.clone(),
+                network_id: manual_account.snapshot.network_id.clone(),
+            };
+            let is_new = !state.manual_account_lookup.contains_key(&key);
             let manual_account_id = resolve::resolve_or_create_manual_account(
                 tx,
                 &mut state,
@@ -235,14 +236,14 @@ fn import_into_transaction(
                 created_at,
                 now,
             )?;
-
+            if is_new {
+                manual_admissions.push((manual_account_id, manual_account.admitted_at, index));
+            }
             let target_scale = manual_account.snapshot.decimal_precision;
-
             let assertion_dates = state
                 .manual_asset_assertion_dates
                 .entry(manual_account_id)
                 .or_default();
-
             for assertion in &manual_account.assertions {
                 if assertion_dates.contains(&assertion.asserted_on) {
                     result.assertions_skipped =
@@ -253,7 +254,6 @@ fn import_into_transaction(
                         })?;
                     continue;
                 }
-
                 merge::insert_manual_asset_assertion_in_tx(
                     tx,
                     manual_account_id,
@@ -261,7 +261,6 @@ fn import_into_transaction(
                     target_scale,
                     now,
                 )?;
-
                 assertion_dates.insert(assertion.asserted_on);
                 result.assertions_created =
                     result.assertions_created.checked_add(1).ok_or_else(|| {
@@ -273,8 +272,27 @@ fn import_into_transaction(
         }
     }
 
-    let classified = crate::db::account_limits::classify_supported_accounts_in_tx(tx, active_limit)
+    crate::db::account_limits::ensure_supported_account_hard_cap_before_insert_in_tx(tx, 0)
         .map_err(WalletDataImportDbError::from)?;
+
+    reorder_new_admissions(
+        tx,
+        native_admissions,
+        "SELECT selected_at FROM account_sync_slots ORDER BY selected_at DESC LIMIT ?1",
+        "UPDATE account_sync_slots SET selected_at = ?2 WHERE account_id = ?1",
+    )?;
+    reorder_new_admissions(
+        tx,
+        manual_admissions,
+        "SELECT admitted_at FROM manual_asset_accounts ORDER BY admitted_at DESC LIMIT ?1",
+        "UPDATE manual_asset_accounts SET admitted_at = ?2 WHERE id = ?1",
+    )?;
+
+    let classified = crate::db::account_limits::classify_supported_accounts_for_entitlements_in_tx(
+        tx,
+        entitlements,
+    )
+    .map_err(WalletDataImportDbError::from)?;
     for (target_account_id, native_account) in created_hd_accounts {
         if crate::db::account_limits::account_state_for(&classified, &target_account_id)
             == crate::account_limits::AccountActivationState::Active
@@ -283,15 +301,70 @@ fn import_into_transaction(
         }
     }
 
-    let _ = user_id;
-
     Ok(result)
+}
+
+fn reorder_new_admissions(
+    tx: &rusqlite::Transaction<'_>,
+    mut accounts: Vec<(WalletAccountId, Option<DateTime<Utc>>, usize)>,
+    newest_timestamps_sql: &'static str,
+    update_timestamp_sql: &'static str,
+) -> Result<(), WalletDataImportDbError> {
+    if accounts.len() < 2 {
+        return Ok(());
+    }
+    let original_ids = accounts.iter().map(|entry| entry.0).collect::<Vec<_>>();
+    accounts.sort_by(|left, right| {
+        left.1
+            .is_none()
+            .cmp(&right.1.is_none())
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    if accounts.iter().map(|entry| entry.0).eq(original_ids) {
+        return Ok(());
+    }
+
+    // New rows receive canonical values after the destination maximum. Reassign
+    // only those values so source clocks cannot move an import ahead of existing rows.
+    let limit = i64::try_from(accounts.len())
+        .map_err(|_| WalletDataImportDbError::Internal("Too many imported accounts".to_string()))?;
+    let mut statement = tx.prepare(newest_timestamps_sql).map_err(|err| {
+        WalletDataImportDbError::Internal(format!("Failed to prepare admission reorder: {err}"))
+    })?;
+    let mut local_timestamps = statement
+        .query_map([limit], |row| row.get::<_, String>(0))
+        .map_err(|err| {
+            WalletDataImportDbError::Internal(format!("Failed to read new admissions: {err}"))
+        })?
+        .map(|row| {
+            row.map_err(|err| {
+                WalletDataImportDbError::Internal(format!("Invalid new admission: {err}"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if local_timestamps.len() != accounts.len() {
+        return Err(WalletDataImportDbError::Internal(
+            "Missing new account admission".to_string(),
+        ));
+    }
+    local_timestamps.reverse();
+    for ((account_id, _, _), timestamp) in accounts.into_iter().zip(local_timestamps) {
+        tx.execute(
+            update_timestamp_sql,
+            rusqlite::params![account_id.to_string(), timestamp],
+        )
+        .map_err(|err| {
+            WalletDataImportDbError::Internal(format!("Failed to reorder admission: {err}"))
+        })?;
+    }
+    Ok(())
 }
 
 pub(crate) fn import_wallet_data(
     user_id: UserId,
     payload_json: &str,
-    active_limit: usize,
+    entitlements: &FeatureEntitlements,
     now: DateTime<Utc>,
 ) -> Result<WalletDataImportResult, WalletDataImportDbError> {
     let payload = parse::parse_payload(payload_json)?;
@@ -304,7 +377,7 @@ pub(crate) fn import_wallet_data(
             ))
         })?;
 
-        let result = import_into_transaction(&tx, user_id, &imported_wallets, active_limit, now)?;
+        let result = import_into_transaction(&tx, &imported_wallets, entitlements, now)?;
 
         tx.commit().map_err(|err| {
             WalletDataImportDbError::Internal(format!(
@@ -366,6 +439,22 @@ mod legacy_promotion_tests {
     const TEST_ACTIVE_LIMIT: usize = 10;
     const TEST_NATIVE_SEGWIT_ZPUB: &str = "zpub6qU5MALAB8Bscej9sTEkgSocaxvLzAYYeytsL9fXfv8W4BTykA99FNDNpftwXMGomwc2KatVrbXo4qXsdBC1DiNHCHGapas9enpPBo8y8Y4";
 
+    fn import_wallet_data(
+        user_id: UserId,
+        payload_json: &str,
+        active_limit: usize,
+        now: DateTime<Utc>,
+    ) -> Result<WalletDataImportResult, WalletDataImportDbError> {
+        let mut entitlements = crate::payments::types::FeatureEntitlements::free();
+        entitlements.account_allowance_policy =
+            crate::payments::types::AccountAllowancePolicy::LegacyCombined {
+                total: u16::try_from(active_limit).expect("test limit fits u16"),
+            };
+        entitlements.sync_account_slots_limit =
+            u16::try_from(active_limit).expect("test limit fits u16");
+        super::import_wallet_data(user_id, payload_json, &entitlements, now)
+    }
+
     fn fixed_import_started_at() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, 18, 12, 0, 0)
             .single()
@@ -389,6 +478,33 @@ mod legacy_promotion_tests {
             },
         )
         .expect("test user db should initialize");
+    }
+
+    #[test]
+    fn manual_only_import_preserves_distinct_fingerprints_and_assertions() {
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let now = fixed_import_started_at();
+        let mut payload: serde_json::Value = serde_json::from_str(&manual_import_payload(
+            6,
+            vec![manual_account_json(1, None)],
+        ))
+        .expect("fixture should parse");
+        for (fingerprint, amount) in [("a1b2c3d4", "10"), ("b1c2d3e4", "20")] {
+            payload["wallets"][0]["master_fingerprint"] = fingerprint.into();
+            payload["wallets"][0]["manual_asset_accounts"][0]["balance_assertions"] = serde_json::json!([{"asserted_on":"2026-04-01", "balance_amount":amount, "note":null}]);
+            let imported =
+                import_wallet_data(user_id, &payload.to_string(), TEST_ACTIVE_LIMIT, now)
+                    .expect("distinct wallet should import");
+            assert_eq!(imported.wallets_created.len(), 1);
+            assert_eq!(imported.assertions_created, 1);
+            let repeated =
+                import_wallet_data(user_id, &payload.to_string(), TEST_ACTIVE_LIMIT, now)
+                    .expect("same fingerprint should match on repeat import");
+            assert!(repeated.wallets_created.is_empty());
+            assert_eq!(repeated.assertions_created, 0);
+        }
+        assert_eq!(manual_account_count(user_id), 2);
     }
 
     fn manual_account_json(index: usize, created_at: Option<&str>) -> String {
@@ -510,6 +626,395 @@ mod legacy_promotion_tests {
             native_accounts.join(","),
             manual_accounts.join(",")
         )
+    }
+
+    fn admission_labels(user_id: UserId, table: &str, timestamp: &str) -> Vec<String> {
+        with_user_db(user_id, |conn| -> Result<Vec<String>, super::super::error::DbError> {
+            let sql = match (table, timestamp) {
+                ("native", "selected_at") => "SELECT a.label FROM digital_asset_accounts a JOIN account_sync_slots s ON s.account_id = a.id ORDER BY s.selected_at, a.id",
+                ("manual", "admitted_at") => "SELECT label FROM manual_asset_accounts ORDER BY admitted_at, id",
+                _ => unreachable!(),
+            };
+            let mut stmt = conn.prepare(sql).map_err(|err| super::super::error::DbError::new(err.to_string()))?;
+            stmt.query_map([], |row| row.get::<_, String>(0))
+                .map_err(|err| super::super::error::DbError::new(err.to_string()))?
+                .map(|row| row.map_err(|err| super::super::error::DbError::new(err.to_string())))
+                .collect()
+        })
+        .expect("admission labels should load")
+    }
+
+    #[test]
+    fn fresh_v6_restore_preserves_saved_native_and_manual_priority() {
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let first_native = native_eth_account_json(1, Some("2026-04-01T00:00:00Z"))
+            .replace("\"sync_slot\":null", "\"sync_slot\":{\"selected_at\":\"2026-04-02T00:00:00Z\",\"selected_under_tier\":\"free\"}");
+        let second_native = native_eth_account_json(2, Some("2026-04-01T00:00:00Z"))
+            .replace("\"sync_slot\":null", "\"sync_slot\":{\"selected_at\":\"2026-04-01T00:00:00Z\",\"selected_under_tier\":\"free\"}");
+        let first_manual = manual_account_json(1, Some("2026-04-01T00:00:00Z")).replace(
+            "\"balance_assertions\":[]",
+            "\"admitted_at\":\"2026-04-02T00:00:00Z\",\"balance_assertions\":[]",
+        );
+        let second_manual = manual_account_json(2, Some("2026-04-01T00:00:00Z")).replace(
+            "\"balance_assertions\":[]",
+            "\"admitted_at\":\"2026-04-01T00:00:00Z\",\"balance_assertions\":[]",
+        );
+        let payload = mixed_import_payload(
+            6,
+            vec![first_native, second_native],
+            vec![first_manual, second_manual],
+        );
+
+        import_wallet_data(
+            user_id,
+            &payload,
+            TEST_ACTIVE_LIMIT,
+            fixed_import_started_at(),
+        )
+        .expect("v6 restore should import");
+        assert_eq!(
+            admission_labels(user_id, "native", "selected_at"),
+            vec!["ETH 002", "ETH 001"]
+        );
+        assert_eq!(
+            admission_labels(user_id, "manual", "admitted_at"),
+            vec!["Manual 002", "Manual 001"]
+        );
+    }
+
+    #[test]
+    fn import_appends_new_native_after_inactive_destination_and_keeps_duplicates_stable() {
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let now = fixed_import_started_at();
+        let destination = mixed_import_payload(
+            5,
+            (1..=3)
+                .map(|index| native_eth_account_json(index, None))
+                .collect(),
+            Vec::new(),
+        );
+        import_wallet_data(user_id, &destination, 2, now).expect("destination should seed");
+
+        let source_slot = "\"sync_slot\":{\"selected_at\":\"2020-01-01T00:00:00Z\",\"selected_under_tier\":\"free\"}";
+        let new_account = |index| {
+            native_eth_account_json(index, Some("2019-01-01T00:00:00Z"))
+                .replace("\"sync_slot\":null", source_slot)
+        };
+        let incoming = mixed_import_payload(
+            6,
+            vec![new_account(4), new_account(1), new_account(5)],
+            Vec::new(),
+        );
+        import_wallet_data(user_id, &incoming, 2, now).expect("new accounts should append");
+        let expected = vec!["ETH 001", "ETH 002", "ETH 003", "ETH 004", "ETH 005"];
+        assert_eq!(admission_labels(user_id, "native", "selected_at"), expected);
+        import_wallet_data(user_id, &incoming, 2, now).expect("repeat import should succeed");
+        assert_eq!(admission_labels(user_id, "native", "selected_at"), expected);
+    }
+
+    #[test]
+    fn import_appends_manual_after_destination_even_with_older_source_priority() {
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let now = fixed_import_started_at();
+        let anchor = native_eth_account_json(1, None);
+        let destination = mixed_import_payload(
+            5,
+            vec![anchor.clone()],
+            vec![manual_account_json(1, None), manual_account_json(2, None)],
+        );
+        import_wallet_data(user_id, &destination, 1, now).expect("destination should seed");
+
+        let older = manual_account_json(3, Some("2019-01-01T00:00:00Z")).replace(
+            "\"balance_assertions\":[]",
+            "\"admitted_at\":\"2020-01-01T00:00:00Z\",\"balance_assertions\":[]",
+        );
+        let future = manual_account_json(4, Some("2030-01-01T00:00:00Z")).replace(
+            "\"balance_assertions\":[]",
+            "\"admitted_at\":\"2030-01-01T00:00:00Z\",\"balance_assertions\":[]",
+        );
+        let incoming = mixed_import_payload(6, vec![anchor], vec![future, older]);
+        import_wallet_data(user_id, &incoming, 1, now).expect("manual accounts should append");
+        let expected = vec!["Manual 001", "Manual 002", "Manual 003", "Manual 004"];
+        assert_eq!(admission_labels(user_id, "manual", "admitted_at"), expected);
+        import_wallet_data(user_id, &incoming, 1, now).expect("repeat import should succeed");
+        assert_eq!(admission_labels(user_id, "manual", "admitted_at"), expected);
+    }
+
+    #[test]
+    fn wallet_data_import_storage_boundary_is_exact_and_atomic() {
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let now = fixed_import_started_at();
+        let wallet_id = crate::wallets::WalletId::new();
+        super::super::user_db::with_user_db_mut(user_id, |conn| -> Result<(), super::super::error::DbError> {
+            let tx = conn.transaction().map_err(|err| super::super::error::DbError::new(err.to_string()))?;
+            tx.execute(
+                "INSERT INTO wallets (id, label, label_key, identity_source, created_at, updated_at)
+                 VALUES (?1, 'Seed Wallet', 'seed wallet', 'user_provided', ?2, ?2)",
+                rusqlite::params![wallet_id.to_string(), now.to_rfc3339()],
+            ).map_err(|err| super::super::error::DbError::new(err.to_string()))?;
+            let mut insert = tx.prepare(
+                "INSERT INTO manual_asset_accounts
+                 (id, wallet_id, label, label_key, asset_id, network_id, decimal_precision,
+                  unit_code, asset_name, network_name, coingecko_id, asset_source,
+                  precision_source, created_at, updated_at, admitted_at)
+                 VALUES (?1, ?2, ?3, ?3, ?4, ?5, 6, 'TOK', 'Token',
+                         'Manual Network', 'token', 'bitgarth_catalog', 'bitgarth_catalog', ?6, ?6, ?7)"
+            ).map_err(|err| super::super::error::DbError::new(err.to_string()))?;
+            for index in 0..4_999 {
+                let label = format!("Seed {index:04}");
+                let admitted_at = crate::db::account_admission::format_admission_timestamp(
+                    now + chrono::Duration::microseconds(index),
+                );
+                insert.execute(rusqlite::params![
+                    crate::wallets::WalletAccountId::new().to_string(),
+                    wallet_id.to_string(), label, format!("manual-asset-{index:03}"),
+                    format!("manual-network-{index:03}"),
+                    now.to_rfc3339(), admitted_at,
+                ]).map_err(|err| super::super::error::DbError::new(err.to_string()))?;
+            }
+            drop(insert);
+            tx.commit().map_err(|err| super::super::error::DbError::new(err.to_string()))
+        }).expect("4,999 accounts should seed");
+
+        let two_new = mixed_import_payload(
+            6,
+            vec![
+                native_eth_account_json(1, None),
+                native_eth_account_json(2, None),
+            ],
+            Vec::new(),
+        );
+        assert!(matches!(
+            import_wallet_data(user_id, &two_new, TEST_ACTIVE_LIMIT, now),
+            Err(WalletDataImportDbError::Validation(message)) if message.contains("Supported account hard cap exceeded")
+        ));
+        assert_eq!(manual_account_count(user_id), 4_999);
+        assert!(admission_labels(user_id, "native", "selected_at").is_empty());
+
+        let one_new = mixed_import_payload(6, vec![native_eth_account_json(1, None)], Vec::new());
+        import_wallet_data(user_id, &one_new, TEST_ACTIVE_LIMIT, now)
+            .expect("exact cap should succeed");
+        assert_eq!(
+            admission_labels(user_id, "native", "selected_at"),
+            ["ETH 001"]
+        );
+        import_wallet_data(user_id, &one_new, TEST_ACTIVE_LIMIT, now)
+            .expect("duplicate-only import at cap should succeed");
+        assert_eq!(
+            admission_labels(user_id, "native", "selected_at"),
+            ["ETH 001"]
+        );
+        assert_eq!(manual_account_count(user_id), 4_999);
+        let manual_duplicate = manual_import_payload(6, vec![manual_account_json(1, None)])
+            .replace("\"label\":\"Manual Wallet\"", "\"label\":\"Seed Wallet\"");
+        import_wallet_data(user_id, &manual_duplicate, TEST_ACTIVE_LIMIT, now)
+            .expect("manual duplicate-only import at cap should succeed");
+        assert_eq!(manual_account_count(user_id), 4_999);
+
+        let mut augmented =
+            serde_json::from_str::<serde_json::Value>(&native_eth_account_json(1, None))
+                .expect("native fixture should parse");
+        let second = serde_json::from_str::<serde_json::Value>(&native_eth_account_json(2, None))
+            .expect("second native fixture should parse");
+        augmented["addresses"]
+            .as_array_mut()
+            .expect("addresses array")
+            .push(second["addresses"][0].clone());
+        let overlapping = mixed_import_payload(
+            6,
+            vec![augmented.to_string(), second.to_string()],
+            Vec::new(),
+        );
+        import_wallet_data(user_id, &overlapping, TEST_ACTIVE_LIMIT, now)
+            .expect("new identifier on matched account must not count as a new account");
+        assert_eq!(
+            admission_labels(user_id, "native", "selected_at"),
+            ["ETH 001"]
+        );
+    }
+
+    #[test]
+    fn import_plan_keeps_existing_identifier_owner_when_new_hd_account_overlaps() {
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let now = fixed_import_started_at();
+        let manual = manual_account_json(1, None);
+        let destination_x = manual_import_payload(6, vec![manual.clone()]).replace(
+            "\"master_fingerprint\":null",
+            "\"master_fingerprint\":\"a1b2c3d4\"",
+        );
+        import_wallet_data(user_id, &destination_x, TEST_ACTIVE_LIMIT, now)
+            .expect("manual wallet should seed");
+
+        let address = serde_json::json!({
+            "address": "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+            "address_scheme": "native_segwit",
+            "source_type": "imported"
+        });
+        let single = serde_json::json!({
+            "label": "BTC B", "asset_id": "bitcoin", "network": "mainnet",
+            "account_kind": "single_address", "sync_slot": null,
+            "hd_keys": [], "addresses": [address.clone()]
+        });
+        let destination_y = mixed_import_payload(6, vec![single.to_string()], Vec::new());
+        import_wallet_data(user_id, &destination_y, TEST_ACTIVE_LIMIT, now)
+            .expect("native wallet should seed");
+
+        let mut hd = serde_json::from_str::<serde_json::Value>(&native_hd_account_json(1, None))
+            .expect("HD fixture should parse");
+        hd["addresses"] = serde_json::json!([address]);
+        let mut source_x = serde_json::from_str::<serde_json::Value>(&mixed_import_payload(
+            6,
+            vec![hd.to_string()],
+            vec![manual.clone()],
+        ))
+        .expect("source X should parse");
+        source_x["wallets"][0]["label"] = "Manual Wallet".into();
+        source_x["wallets"][0]["master_fingerprint"] = "a1b2c3d4".into();
+        let source_y = serde_json::from_str::<serde_json::Value>(&mixed_import_payload(
+            6,
+            vec![single.to_string()],
+            vec![manual],
+        ))
+        .expect("source Y should parse");
+        let incoming = serde_json::json!({
+            "version": 6, "exported_at": "2026-04-04T12:00:00Z",
+            "bitgarth_version": "0.1.0",
+            "wallets": [source_x["wallets"][0].clone(), source_y["wallets"][0].clone()]
+        })
+        .to_string();
+        let payload = parse::parse_payload(&incoming).expect("incoming payload should parse");
+        let parsed = parse::parse_imported_wallets(&payload, now.date_naive())
+            .expect("incoming wallets should parse");
+        let plan = super::super::user_db::with_user_db_mut(user_id, |conn| {
+            let tx = conn
+                .transaction()
+                .map_err(|err| WalletDataImportDbError::Internal(err.to_string()))?;
+            let state = resolve::load_import_state(&tx)?;
+            merge::plan_import_creations(&state, &parsed)
+        })
+        .expect("creation plan should succeed");
+        assert_eq!(plan.supported_accounts_to_create, 2);
+    }
+
+    #[test]
+    fn manual_admission_prefix_of_one_thousand_survives_older_import() {
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let now = fixed_import_started_at();
+        let anchor = native_eth_account_json(1, None);
+        let destination = mixed_import_payload(
+            6,
+            vec![anchor.clone()],
+            (0..1_000)
+                .map(|index| manual_account_json(index, None))
+                .collect(),
+        );
+        import_wallet_data(user_id, &destination, TEST_ACTIVE_LIMIT, now)
+            .expect("first thousand manual accounts should import");
+        let before = admission_labels(user_id, "manual", "admitted_at");
+        let older = manual_account_json(1_000, Some("2010-01-01T00:00:00Z")).replace(
+            "\"balance_assertions\":[]",
+            "\"admitted_at\":\"2010-01-01T00:00:00Z\",\"balance_assertions\":[]",
+        );
+        let incoming = mixed_import_payload(6, vec![anchor], vec![older]);
+        import_wallet_data(user_id, &incoming, TEST_ACTIVE_LIMIT, now)
+            .expect("older source account should append");
+        let after = admission_labels(user_id, "manual", "admitted_at");
+        assert_eq!(before, after[..1_000]);
+        assert_eq!(after[1_000], "Manual 1000");
+    }
+
+    #[test]
+    fn restore_orders_new_accounts_across_wallets_with_stable_ties_and_missing_metadata() {
+        let now = fixed_import_started_at();
+        for (first_slot, second_slot, expected) in [
+            (
+                Some("2026-04-02T00:00:00Z"),
+                Some("2026-04-01T00:00:00Z"),
+                ["ETH 002", "ETH 001"],
+            ),
+            (
+                Some("2026-04-01T00:00:00Z"),
+                Some("2026-04-01T00:00:00Z"),
+                ["ETH 001", "ETH 002"],
+            ),
+            (None, Some("2030-04-01T00:00:00Z"), ["ETH 002", "ETH 001"]),
+            (None, None, ["ETH 001", "ETH 002"]),
+        ] {
+            let user_id = unique_user_id();
+            setup_test_user(user_id);
+            let account = |index, slot: Option<&str>| {
+                let json = native_eth_account_json(index, None);
+                match slot {
+                    Some(timestamp) => json.replace(
+                        "\"sync_slot\":null",
+                        &format!("\"sync_slot\":{{\"selected_at\":\"{timestamp}\",\"selected_under_tier\":\"free\"}}"),
+                    ),
+                    None => json,
+                }
+            };
+            let payload = format!(
+                "{{\"version\":6,\"exported_at\":\"2026-04-04T12:00:00Z\",\"bitgarth_version\":\"0.1.0\",\"wallets\":[{{\"label\":\"Wallet A\",\"master_fingerprint\":null,\"identity_source\":\"user_provided\",\"verified_at\":null,\"accessors\":[],\"digital_asset_accounts\":[{}],\"manual_asset_accounts\":[]}},{{\"label\":\"Wallet B\",\"master_fingerprint\":null,\"identity_source\":\"user_provided\",\"verified_at\":null,\"accessors\":[],\"digital_asset_accounts\":[{}],\"manual_asset_accounts\":[]}}]}}",
+                account(1, first_slot),
+                account(2, second_slot),
+            );
+            import_wallet_data(user_id, &payload, TEST_ACTIVE_LIMIT, now)
+                .expect("multi-wallet restore should succeed");
+            assert_eq!(admission_labels(user_id, "native", "selected_at"), expected);
+        }
+    }
+
+    #[test]
+    fn import_uses_newly_created_account_to_match_later_wallet() {
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let account = native_eth_account_json(1, None);
+        let payload = format!(
+            "{{\"version\":6,\"exported_at\":\"2026-04-04T12:00:00Z\",\"bitgarth_version\":\"0.1.0\",\"wallets\":[{{\"label\":\"Wallet A\",\"master_fingerprint\":null,\"identity_source\":\"user_provided\",\"verified_at\":null,\"accessors\":[],\"digital_asset_accounts\":[{account}],\"manual_asset_accounts\":[]}},{{\"label\":\"Wallet B\",\"master_fingerprint\":null,\"identity_source\":\"user_provided\",\"verified_at\":null,\"accessors\":[],\"digital_asset_accounts\":[{account}],\"manual_asset_accounts\":[]}}]}}"
+        );
+        import_wallet_data(
+            user_id,
+            &payload,
+            TEST_ACTIVE_LIMIT,
+            fixed_import_started_at(),
+        )
+        .expect("duplicate wallet import should succeed");
+        let counts = with_user_db(
+            user_id,
+            |conn| -> Result<(i64, i64), super::super::error::DbError> {
+                let wallets = conn
+                    .query_row("SELECT COUNT(*) FROM wallets", [], |row| row.get(0))
+                    .map_err(|err| super::super::error::DbError::new(err.to_string()))?;
+                let accounts = conn
+                    .query_row("SELECT COUNT(*) FROM digital_asset_accounts", [], |row| {
+                        row.get(0)
+                    })
+                    .map_err(|err| super::super::error::DbError::new(err.to_string()))?;
+                Ok((wallets, accounts))
+            },
+        )
+        .expect("counts should load");
+        assert_eq!(counts, (1, 1));
+    }
+
+    #[test]
+    fn repeating_manual_only_import_keeps_one_wallet_and_admission() {
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let payload = manual_import_payload(6, vec![manual_account_json(1, None)]);
+        let now = fixed_import_started_at();
+        import_wallet_data(user_id, &payload, TEST_ACTIVE_LIMIT, now).expect("first import");
+        import_wallet_data(user_id, &payload, TEST_ACTIVE_LIMIT, now).expect("repeat import");
+        assert_eq!(manual_account_count(user_id), 1);
+        assert_eq!(
+            admission_labels(user_id, "manual", "admitted_at"),
+            ["Manual 001"]
+        );
     }
 
     fn account_created_at_values(user_id: crate::models::UserId) -> Vec<(String, DateTime<Utc>)> {
@@ -894,13 +1399,38 @@ mod legacy_promotion_tests {
     }
 
     #[test]
+    fn wallet_data_import_bootstraps_native_hd_despite_earlier_manual_admission_under_v4() {
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let now = fixed_import_started_at();
+        let payload = mixed_import_payload(
+            6,
+            vec![native_hd_account_json(0, Some("2026-01-02T03:04:05Z"))],
+            vec![manual_account_json(0, Some("2026-01-01T03:04:05Z"))],
+        );
+        let mut entitlements = crate::payments::types::FeatureEntitlements::free();
+        entitlements.account_allowance_policy =
+            crate::payments::types::AccountAllowancePolicy::Independent(
+                crate::payments::account_allowances::AccountAllowances::try_new(1, 1, 1)
+                    .expect("valid test allowances"),
+            );
+        entitlements.balance_sync_enabled = true;
+        entitlements.transaction_history_sync_enabled = true;
+
+        super::import_wallet_data(user_id, &payload, &entitlements, now)
+            .expect("import should succeed");
+
+        assert!(derived_address_count_for_label(user_id, "BTC HD 000") > 0);
+    }
+
+    #[test]
     fn wallet_data_import_account_limit_rejects_hard_cap_without_committed_rows() {
         let user_id = unique_user_id();
         setup_test_user(user_id);
         let now = fixed_import_started_at();
         let payload = manual_import_payload(
             4,
-            (0..101)
+            (0..crate::account_limits::SUPPORTED_ACCOUNT_HARD_CAP + 1)
                 .map(|index| manual_account_json(index, None))
                 .collect(),
         );

@@ -1,4 +1,5 @@
 use super::errors::db_error_from_sqlite;
+use crate::db::account_admission::next_manual_admission_timestamp_in_tx;
 use crate::db::account_limits::ensure_supported_account_hard_cap_before_insert_in_tx;
 use crate::db::error::DbError;
 use crate::db::user_db::with_user_db_mut;
@@ -105,13 +106,14 @@ pub(crate) fn add_manual_asset_account(
         let label_key = label.key();
         let account_id = WalletAccountId::new();
         ensure_supported_account_hard_cap_before_insert_in_tx(&tx, 1)?;
+        let admitted_at = next_manual_admission_timestamp_in_tx(&tx, now)?;
         tx.execute(
             "INSERT INTO manual_asset_accounts
              (id, wallet_id, label, label_key, asset_id, network_id, decimal_precision,
               unit_code, symbol, asset_name, network_name, coingecko_id, asset_source,
               precision_source, coingecko_platform_id, provider_platform_asset_ref,
-              created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+              created_at, updated_at, admitted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 account_id.to_string(),
                 wallet_id.to_string(),
@@ -131,6 +133,7 @@ pub(crate) fn add_manual_asset_account(
                 snapshot.provider_platform_asset_ref,
                 &timestamp,
                 &timestamp,
+                admitted_at,
             ],
         )
         .map_err(|e| db_error_from_sqlite("Failed to insert manual asset account", e))?;

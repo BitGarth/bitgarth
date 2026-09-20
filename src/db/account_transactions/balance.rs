@@ -344,7 +344,10 @@ pub(super) fn resolve_native_balance_at_boundary(
     let account_model = account_model_for(meta.asset_id);
     let has_complete_bitcoin_history = matches!(
         balance_reliability_context.bitcoin_history_coverage,
-        Some(crate::db::transaction_sync::BitcoinAccountHistoryCoverage::Complete { .. })
+        Some(crate::db::transaction_sync::BitcoinAccountHistoryCoverage::Complete { coverage_height })
+            if balance_reliability_context
+                .bitcoin_history_observed_tip
+                .is_none_or(|tip| coverage_height.value() >= tip.value())
     );
     if meta.asset_id == crate::wallets::SyncedAssetId::Bitcoin && !has_complete_bitcoin_history {
         return Ok(unknown_balance_resolution(

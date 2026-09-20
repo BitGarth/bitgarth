@@ -21,6 +21,7 @@ pub(super) fn map_sync_address_row(
     last_completed_at: Option<String>,
     last_result: Option<String>,
     last_tip_height: Option<i64>,
+    etherscan_transaction_tip_height: Option<i64>,
     mempool_backfill_cursor_txid: Option<String>,
     mempool_expected_tx_count: Option<i64>,
     mempool_history_complete_tx_count: Option<i64>,
@@ -51,6 +52,9 @@ pub(super) fn map_sync_address_row(
         last_completed_at,
         last_result,
         last_tip_height: parse_optional_tip_height(last_tip_height)?,
+        etherscan_transaction_tip_height: parse_optional_tip_height(
+            etherscan_transaction_tip_height,
+        )?,
         mempool_backfill_cursor_txid: parse_optional_mempool_cursor_txid(
             mempool_backfill_cursor_txid,
         )?,
@@ -96,6 +100,7 @@ pub(crate) fn get_non_hd_sync_addresses(user_id: UserId) -> Result<Vec<SyncAddre
                     t.last_completed_at,
                     t.last_result,
                     t.last_tip_height,
+                    t.etherscan_transaction_tip_height,
                     t.mempool_backfill_cursor_txid,
                     t.mempool_expected_tx_count,
                     t.mempool_history_complete_tx_count,
@@ -139,15 +144,16 @@ pub(crate) fn get_non_hd_sync_addresses(user_id: UserId) -> Result<Vec<SyncAddre
                     row.get::<_, Option<String>>(8)?,
                     row.get::<_, Option<String>>(9)?,
                     row.get::<_, Option<i64>>(10)?,
-                    row.get::<_, Option<String>>(11)?,
-                    row.get::<_, Option<i64>>(12)?,
+                    row.get::<_, Option<i64>>(11)?,
+                    row.get::<_, Option<String>>(12)?,
                     row.get::<_, Option<i64>>(13)?,
                     row.get::<_, Option<i64>>(14)?,
-                    row.get::<_, Option<String>>(15)?,
-                    row.get::<_, Option<i64>>(16)?,
+                    row.get::<_, Option<i64>>(15)?,
+                    row.get::<_, Option<String>>(16)?,
                     row.get::<_, Option<i64>>(17)?,
-                    row.get::<_, bool>(18)?,
-                    row.get::<_, i64>(19)?,
+                    row.get::<_, Option<i64>>(18)?,
+                    row.get::<_, bool>(19)?,
+                    row.get::<_, i64>(20)?,
                 ))
             })
             .map_err(|err| {
@@ -168,6 +174,7 @@ pub(crate) fn get_non_hd_sync_addresses(user_id: UserId) -> Result<Vec<SyncAddre
                 last_completed_at,
                 last_result,
                 last_tip_height,
+                etherscan_transaction_tip_height,
                 mempool_backfill_cursor_txid,
                 mempool_expected_tx_count,
                 mempool_history_complete_tx_count,
@@ -191,6 +198,7 @@ pub(crate) fn get_non_hd_sync_addresses(user_id: UserId) -> Result<Vec<SyncAddre
                 last_completed_at,
                 last_result,
                 last_tip_height,
+                etherscan_transaction_tip_height,
                 mempool_backfill_cursor_txid,
                 mempool_expected_tx_count,
                 mempool_history_complete_tx_count,
@@ -226,6 +234,7 @@ pub(crate) fn get_sync_addresses_for_account(
                     t.last_completed_at,
                     t.last_result,
                     t.last_tip_height,
+                    t.etherscan_transaction_tip_height,
                     t.mempool_backfill_cursor_txid,
                     t.mempool_expected_tx_count,
                     t.mempool_history_complete_tx_count,
@@ -272,15 +281,16 @@ pub(crate) fn get_sync_addresses_for_account(
                         row.get::<_, Option<String>>(8)?,
                         row.get::<_, Option<String>>(9)?,
                         row.get::<_, Option<i64>>(10)?,
-                        row.get::<_, Option<String>>(11)?,
-                        row.get::<_, Option<i64>>(12)?,
+                        row.get::<_, Option<i64>>(11)?,
+                        row.get::<_, Option<String>>(12)?,
                         row.get::<_, Option<i64>>(13)?,
                         row.get::<_, Option<i64>>(14)?,
-                        row.get::<_, Option<String>>(15)?,
-                        row.get::<_, Option<i64>>(16)?,
+                        row.get::<_, Option<i64>>(15)?,
+                        row.get::<_, Option<String>>(16)?,
                         row.get::<_, Option<i64>>(17)?,
-                        row.get::<_, bool>(18)?,
-                        row.get::<_, i64>(19)?,
+                        row.get::<_, Option<i64>>(18)?,
+                        row.get::<_, bool>(19)?,
+                        row.get::<_, i64>(20)?,
                     ))
                 },
             )
@@ -304,6 +314,7 @@ pub(crate) fn get_sync_addresses_for_account(
                 last_completed_at,
                 last_result,
                 last_tip_height,
+                etherscan_transaction_tip_height,
                 mempool_backfill_cursor_txid,
                 mempool_expected_tx_count,
                 mempool_history_complete_tx_count,
@@ -328,6 +339,7 @@ pub(crate) fn get_sync_addresses_for_account(
                 last_completed_at,
                 last_result,
                 last_tip_height,
+                etherscan_transaction_tip_height,
                 mempool_backfill_cursor_txid,
                 mempool_expected_tx_count,
                 mempool_history_complete_tx_count,
@@ -564,7 +576,7 @@ pub(crate) fn load_api_confirmed_balances_for_account_conn(
     let mut stmt = conn
         .prepare(
             "SELECT da.id,
-                    tss.last_completed_at,
+                    tss.api_confirmed_balance_observed_at,
                     tss.api_confirmed_balance_hi,
                     tss.api_confirmed_balance_lo
              FROM digital_asset_addresses da
@@ -600,19 +612,19 @@ pub(crate) fn load_api_confirmed_balances_for_account_conn(
 
     let mut result = Vec::new();
     for row in rows {
-        let (address_id_raw, last_completed_at_raw, balance_hi, balance_lo) =
-            row.map_err(|err| {
-                DbError::new(format!("Failed to map api confirmed balance row: {err}"))
-            })?;
+        let (address_id_raw, observed_at_raw, balance_hi, balance_lo) = row.map_err(|err| {
+            DbError::new(format!("Failed to map api confirmed balance row: {err}"))
+        })?;
         let address_id = parse_address_id(&address_id_raw)?;
-        let last_completed_at = parse_optional_time(last_completed_at_raw, "last_completed_at")?;
+        let observed_at =
+            parse_optional_time(observed_at_raw, "api_confirmed_balance_observed_at")?;
         let api_confirmed_balance = match (balance_hi, balance_lo) {
             (Some(hi), Some(lo)) => parse_optional_api_confirmed_balance(Some(hi), Some(lo))?,
             _ => None,
         };
         result.push(AddressApiConfirmedBalanceRow {
             address_id,
-            last_completed_at,
+            observed_at,
             api_confirmed_balance,
         });
     }

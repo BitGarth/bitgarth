@@ -1,13 +1,15 @@
 use super::derivation::{InitialHdAddressBootstrapRequest, bootstrap_initial_hd_account_addresses};
 use super::errors::{LinkTrezorDbError, db_error_from_sqlite};
 use crate::account_limits::AccountActivationState;
+use crate::db::account_admission::enroll_native_account_in_tx;
 use crate::db::account_limits::{
-    account_state_for, classify_supported_accounts_in_tx,
+    account_state_for, classify_supported_accounts_for_entitlements_in_tx,
     ensure_supported_account_hard_cap_before_insert_in_tx,
 };
 use crate::db::error::DbError;
 use crate::db::user_db::with_user_db_mut;
 use crate::db::wallet_accounts::query_wallet_account_label_keys_in_tx;
+use crate::payments::types::{EntitlementTier, FeatureEntitlements};
 use crate::wallets::{
     AccessorKind, AccountKind, BIP44_GAP_LIMIT, DigitalAssetAccountId, HdKeyId, IdentitySource,
     KeyRole, KeySource, Label, LinkTrezorOutcome, Network, SyncedAssetId,
@@ -66,7 +68,7 @@ fn attach_master_fingerprint_to_wallet_in_tx(
 pub(crate) fn link_trezor_wallet(
     user_id: crate::models::UserId,
     request: ValidatedLinkTrezorRequest,
-    active_limit: usize,
+    entitlements: &FeatureEntitlements,
     now: DateTime<Utc>,
 ) -> Result<LinkTrezorDbResult, LinkTrezorDbError> {
     with_user_db_mut(user_id, |conn| {
@@ -293,6 +295,8 @@ pub(crate) fn link_trezor_wallet(
             .map_err(|e| {
                 LinkTrezorDbError::from(db_error_from_sqlite("Failed to insert account", e))
             })?;
+            enroll_native_account_in_tx(&tx, account_id, now, &EntitlementTier::Free)
+                .map_err(LinkTrezorDbError::from)?;
             created_account_ids.push(account_id);
 
             tx.execute(
@@ -324,7 +328,7 @@ pub(crate) fn link_trezor_wallet(
             ));
         }
 
-        let classified = classify_supported_accounts_in_tx(&tx, active_limit)
+        let classified = classify_supported_accounts_for_entitlements_in_tx(&tx, entitlements)
             .map_err(LinkTrezorDbError::from)?;
         for (account_id, address_scheme, extended_pubkey) in created_hd_accounts {
             if account_state_for(&classified, &account_id.into()) != AccountActivationState::Active

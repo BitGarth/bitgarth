@@ -74,7 +74,7 @@ If you run BitGarth yourself, this app database stays with your app instance and
 
 BitGarth does not need your name, address, or email address to use the app.
 
-For paid plans, BitGarth needs enough information to recognize payment history. It uses a privacy-preserving anonymous payment ID that is separate from your app user ID. That lets the app retrieve your payment status without building a normal identity account around you.
+For paid plans, BitGarth uses pseudonymous payment and subscription identifiers that are separate from your local app user ID. These let the app retrieve payment and plan status without requiring a separate account on BitGarth's servers. Requests also expose normal network metadata, so they should not be understood as anonymous.
 
 Cryptocurrency payments have different privacy properties depending on the asset and network used. If you want the strongest payment privacy among supported options, you can pay with Monero.
 
@@ -127,16 +127,23 @@ Where possible, BitGarth is designed so you can choose or self-host the services
 
 The goal is not to pretend public-chain privacy is solved. The goal is to give you clear control over where your data goes.
 
-## Software Update Checks
+## Requests to BitGarth's Servers
 
-If software update checks are enabled, your BitGarth app instance contacts BitGarthCentral to ask for the latest release for its install channel.
+Your app contacts BitGarth's servers for software updates, product and plan information, and payment and subscription services. Product and plan refreshes also run at login, including free-tier logins. Disabling automatic software update checks does not disable login refreshes, payment requests, or checks you explicitly request.
 
-The request sends two BitGarth-specific headers:
+These requests carry technical information about the app in BitGarth-specific headers:
 
-- `X-BitGarth-App-Version`, such as `0.1.4` or `0.1.4-a1b2c3d`
-- `X-BitGarth-App-Channel`, such as `docker`
+- `X-BitGarth-App-Version`: the app version, which can include a build revision, such as `0.3.1-a1b2c3d`.
+- `X-BitGarth-App-Channel`: the distribution channel or build type, such as `docker`.
+- Builds that provide platform information also send `X-BitGarth-App-Platform`: the operating system and processor architecture the app binary was built for, such as `linux/x86_64`.
 
-BitGarthCentral also sees normal HTTP metadata such as IP address, timing, and User-Agent. The update check does not send wallet data, user identifiers, instance IDs, addresses, xpubs, balances, labels, or API keys.
+Platform information describes the binary making the request, not the device you use to browse a remotely hosted app. A Linux container on a Mac reports Linux; a binary running under architecture emulation reports its compiled architecture. A distribution-channel label is supplied by the person packaging or configuring the app.
+
+We may use this information to diagnose compatibility problems, understand which builds and platforms contact our services, and guide platform support. These fields accompany existing requests; they do not create additional reporting requests or report screen views or recent CLI activity. These BitGarth-specific headers are sent to BitGarth's servers, not to blockchain or market-data providers.
+
+BitGarth does not derive these fields from wallet data or your local account username, and does not generate an installation or device identifier for this reporting. BitGarth's servers also receive normal network metadata such as IP address, request time, requested service, response status, and User-Agent. On payment and subscription requests, build information may be associated with the pseudonymous payment or subscription identifiers carried by that request. Those requests also carry the credentials needed for the payment service; the limits on build metadata do not mean that the entire request contains only build information.
+
+See the [Privacy Notice](https://bitgarth.app/privacy.html) for how this request metadata is used and retained.
 
 ## Responsible Disclosure
 

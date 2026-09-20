@@ -454,6 +454,12 @@ function currentProductOptionsResponse(scenario) {
   return response;
 }
 
+const defaultLatestAppVersions = () => ({ channels: {
+  default: { latest: "9.9.9", release_url: "https://github.com/BitGarth/bitgarth/releases/tag/v9.9.9" },
+  docker: { latest: "9.9.9", release_url: "https://hub.docker.com/r/bitgarth/bitgarth/tags?name=9.9.9" },
+  umbrel: { latest: "9.9.9", update_method: "umbrel" },
+} });
+
 export async function startMockCentralServer({ port = 0 } = {}) {
   const scenario = {
     signingKeyUnsupported: false,
@@ -467,16 +473,12 @@ export async function startMockCentralServer({ port = 0 } = {}) {
     productOptionsUnavailable: false,
     productOptionsUpgradeRequired: false,
     productOptionsResponse: null,
-    latestAppVersion: {
-      latest: "9.9.9",
-      image: "bitgarth/bitgarth:9.9.9",
-      release_url: "https://hub.docker.com/r/bitgarth/bitgarth/tags?name=9.9.9",
-      published_at: "2026-06-07T12:00:00Z",
-    },
+    latestAppVersions: defaultLatestAppVersions(),
   };
 
   const orders = new Map();
   const orderStatusRequests = new Map();
+  const latestAppVersionRequests = [];
 
   function setScenario(patch) {
     Object.assign(scenario, patch);
@@ -494,14 +496,10 @@ export async function startMockCentralServer({ port = 0 } = {}) {
     scenario.productOptionsUnavailable = false;
     scenario.productOptionsUpgradeRequired = false;
     scenario.productOptionsResponse = null;
-    scenario.latestAppVersion = {
-      latest: "9.9.9",
-      image: "bitgarth/bitgarth:9.9.9",
-      release_url: "https://hub.docker.com/r/bitgarth/bitgarth/tags?name=9.9.9",
-      published_at: "2026-06-07T12:00:00Z",
-    };
+    scenario.latestAppVersions = defaultLatestAppVersions();
     orders.clear();
     orderStatusRequests.clear();
+    latestAppVersionRequests.length = 0;
   }
 
   function signingKeyGate(res) {
@@ -540,27 +538,23 @@ export async function startMockCentralServer({ port = 0 } = {}) {
             ...order,
           })),
           orderStatusRequests: Object.fromEntries(orderStatusRequests.entries()),
+          latestAppVersionRequests,
         });
         return;
       }
 
-      if (req.method === "GET" && url.pathname === "/api/v1/latest-app-version") {
-        const channel = req.headers["x-bitgarth-app-channel"];
-        if (!channel) {
-          writeJson(res, 400, {
-            error_code: "missing_app_channel",
-            message: "x-bitgarth-app-channel is required",
-          });
-          return;
+      if (req.method === "GET" && /^\/api\/v[12]\/latest-app-version$/.test(url.pathname)) {
+        latestAppVersionRequests.push({
+          path: url.pathname,
+          channel: req.headers["x-bitgarth-app-channel"],
+          version: req.headers["x-bitgarth-app-version"],
+          platform: req.headers["x-bitgarth-app-platform"],
+        });
+        if (url.pathname === "/api/v2/latest-app-version") {
+          writeJson(res, 200, scenario.latestAppVersions);
+        } else {
+          writeJson(res, 404, { error_code: "not_found" });
         }
-        if (channel !== "docker") {
-          writeJson(res, 422, {
-            error_code: "unsupported_app_channel",
-            message: "latest app version is only available for docker",
-          });
-          return;
-        }
-        writeJson(res, 200, scenario.latestAppVersion);
         return;
       }
 

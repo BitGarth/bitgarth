@@ -232,12 +232,6 @@ export async function addAndSyncLimitedBitcoinAccount(
   expect(addResponse.ok()).toBeTruthy();
   const added = await addResponse.json();
 
-  const selectResponse = await page.request.post(
-    "/_app/user/wallets/account/sync-slot/select",
-    { data: { request: { account_id: added.account_id } } },
-  );
-  expect(selectResponse.ok()).toBeTruthy();
-
   const syncResponse = await page.request.post("/_app/user/transactions/sync", {
     data: { request: { source: "manual" } },
   });

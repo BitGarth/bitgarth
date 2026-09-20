@@ -856,7 +856,7 @@ async fn test_export_wallet_data_happy_path_filters_derived_and_returns_summary(
             .expect("zip_base64 should be a string"),
         None,
     );
-    assert_eq!(export_payload["version"], 5);
+    assert_eq!(export_payload["version"], 6);
     assert!(
         export_payload["settings"]
             .get("etherscan_api_key")
@@ -920,7 +920,7 @@ async fn test_export_wallet_data_with_premium_opt_in_includes_transfer_without_o
             .expect("zip_base64 should be a string"),
         Some("weak"),
     );
-    assert_eq!(export_payload["version"], 5);
+    assert_eq!(export_payload["version"], 6);
     assert!(export_payload.get("premium_transfer").is_none());
     assert_eq!(
         export_payload["subscription_transfer"]["management_secret"],

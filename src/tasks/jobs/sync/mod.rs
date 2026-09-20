@@ -37,6 +37,7 @@ pub(crate) use self::context::{
     UserTransactionMonitorScheduleReason, UserTransactionMonitorScheduleUrgency,
 };
 pub(crate) use self::error::UserTransactionMonitorError;
+pub(crate) use self::gate::TransactionFetchPolicy;
 pub(crate) use self::progress::approximate_account_unsynced_count;
 pub(crate) use self::rate_limit::blocked_integrations_for_user;
 pub(crate) use self::rate_limit::earliest_rate_limit_unblock_for_integrations as earliest_rate_limit_unblock_for_integrations_public;

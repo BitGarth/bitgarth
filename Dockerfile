@@ -68,7 +68,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
         target/dx/bitgarth-app/release/web && \
     dx build --web --release --debug-symbols=false && \
     mkdir -p /build-output && \
-    cp target/dx/bitgarth-app/release/web/server /build-output/bitgarth-app && \
+    cp target/dx/bitgarth-app/release/web/server /build-output/bitgarth-web && \
     cp -r target/dx/bitgarth-app/release/web/public /build-output/public && \
     mkdir -p /build-output/assets/catalog && \
     cp assets/catalog/unsynced_asset_catalog.json /build-output/assets/catalog/unsynced_asset_catalog.json
@@ -96,7 +96,7 @@ RUN groupadd --gid 1000 bitgarth && \
 RUN mkdir -p /data && chown bitgarth:bitgarth /data
 
 # Copy server binary and static assets (co-located, matching dx build layout)
-COPY --from=builder /build-output/bitgarth-app /srv/bitgarth-app
+COPY --from=builder /build-output/bitgarth-web /srv/bitgarth-web
 COPY --from=builder /build-output/public /srv/public
 COPY --from=builder /build-output/assets /srv/assets
 
@@ -116,4 +116,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 USER bitgarth
 
-ENTRYPOINT ["/srv/bitgarth-app"]
+ENTRYPOINT ["/srv/bitgarth-web"]

@@ -28,7 +28,7 @@ pub(crate) fn maybe_run_from_args() -> Result<bool, String> {
         .map_err(|err| format!("product options: {err}"))?;
     let captured_at = Utc::now();
     let observation = free_observation_from_product_options(&options, captured_at)
-        .ok_or_else(|| "product options did not include a valid v3 free tier".to_string())?;
+        .ok_or_else(|| "product options did not include a valid v4 free tier".to_string())?;
     let snapshot = serde_json::json!({
         "captured_at": observation.observed_at,
         "capability_schema_version": observation.capability_schema_version,

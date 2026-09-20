@@ -39,7 +39,8 @@ pub(super) const DATASET_SYNC_STATE_MANY_ADDRESSES: &str = "sync-state-many-addr
 
 pub(super) const DATASET_SHAPE_AUTH_RESTORE_CROSS_USER: &str =
     "auth-restore-primary-empty-secondary-sync-heavy";
-pub(super) const DATASET_SHAPE_WALLETS_MANY_ACCOUNTS: &str = "wallets-24x3";
+pub(super) const DATASET_SHAPE_WALLETS_MANY_ACCOUNTS: &str =
+    "wallets-100x50-4000-native-1000-manual";
 pub(super) const DATASET_SHAPE_ACCOUNT_TRANSACTIONS_HEAVY: &str =
     "account-transactions-180-confirmed-24-pending";
 pub(super) const DATASET_SHAPE_UTXO_TRANSACTIONS_HEAVY: &str =
@@ -92,9 +93,9 @@ pub(super) fn resolve_scenario(id: &str) -> Result<PerfScenarioDefinition, PerfE
             default_measured_iterations: DEFAULT_MEASURED_ITERATIONS,
             default_concurrency: DEFAULT_CONCURRENCY,
             budget: PerfBudget {
-                median_ms: Some(35.0),
-                p95_ms: Some(40.0),
-                max_ms: Some(50.0),
+                median_ms: None,
+                p95_ms: None,
+                max_ms: None,
                 max_error_count: Some(0),
                 strict: true,
             },

@@ -95,18 +95,20 @@ impl WalletDataExportVersion {
     pub(crate) const V3: Self = Self(3);
     pub(crate) const V4: Self = Self(4);
     pub(crate) const V5: Self = Self(5);
+    pub(crate) const V6: Self = Self(6);
 }
 
 #[cfg(feature = "server")]
-const SUPPORTED_WALLET_DATA_EXPORT_VERSIONS: [WalletDataExportVersion; 3] = [
+const SUPPORTED_WALLET_DATA_EXPORT_VERSIONS: [WalletDataExportVersion; 4] = [
     WalletDataExportVersion::V3,
     WalletDataExportVersion::V4,
     WalletDataExportVersion::V5,
+    WalletDataExportVersion::V6,
 ];
 
 #[cfg(feature = "server")]
 fn current_wallet_data_export_version() -> WalletDataExportVersion {
-    SUPPORTED_WALLET_DATA_EXPORT_VERSIONS[2]
+    SUPPORTED_WALLET_DATA_EXPORT_VERSIONS[3]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,6 +212,8 @@ pub(crate) struct WalletDataExportManualAssetAccount {
     pub(crate) asset_instance_id: ManualAssetInstanceIdView,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) created_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) admitted_at: Option<DateTime<Utc>>,
     pub(crate) unit_code: String,
     pub(crate) decimal_precision: u8,
     pub(crate) symbol: Option<String>,
@@ -481,6 +485,7 @@ struct WalletDataManualAssetAccountExportSource {
     label: String,
     asset_instance_id: ManualAssetInstanceIdView,
     created_at: DateTime<Utc>,
+    admitted_at: DateTime<Utc>,
     unit_code: String,
     decimal_precision: u8,
     symbol: Option<String>,
@@ -553,6 +558,12 @@ fn parse_manual_asset_accounts_for_wallet_data(
             label: row.account_label.as_str().to_string(),
             asset_instance_id,
             created_at: row.created_at,
+            admitted_at: row.manual_admitted_at.ok_or_else(|| {
+                ExportError::Internal(format!(
+                    "Manual asset export row {} missing admitted_at",
+                    row.account_id
+                ))
+            })?,
             unit_code: row.commodity.unit_code.clone(),
             decimal_precision: row.commodity.decimal_precision,
             symbol: row.manual_symbol.clone(),
@@ -1174,6 +1185,7 @@ fn build_wallet_data_export_payload_view(
                 label: manual_account.label,
                 asset_instance_id: manual_account.asset_instance_id,
                 created_at: Some(manual_account.created_at),
+                admitted_at: Some(manual_account.admitted_at),
                 unit_code: manual_account.unit_code,
                 decimal_precision: manual_account.decimal_precision,
                 symbol: manual_account.symbol,
@@ -2293,7 +2305,7 @@ pub(crate) async fn import_wallet_data(
     let import_result = import_wallet_data_db(
         user_id,
         &translated_payload_json,
-        usize::from(entitlements.sync_account_slots_limit),
+        &entitlements,
         import_started_at,
     )
     .map_err(map_import_error)?;
@@ -2743,6 +2755,7 @@ mod tests {
                 network_id: "cardano-mainnet".to_string(),
             },
             created_at: fixed_datetime(),
+            admitted_at: fixed_datetime(),
             unit_code: "ADA".to_string(),
             decimal_precision: 6,
             symbol: Some("A".to_string()),
@@ -2783,7 +2796,7 @@ mod tests {
             export.file_name,
             "bitgarth-walletdata-testuser-20260404.zip"
         );
-        assert_eq!(export.payload.version, WalletDataExportVersion::V5);
+        assert_eq!(export.payload.version, WalletDataExportVersion::V6);
         assert_eq!(export.payload.bitgarth_version, "0.1.0-test");
         assert!(export.payload.settings.is_none());
         assert!(export.payload.api_keys.is_empty());
@@ -2906,7 +2919,7 @@ mod tests {
         let json =
             serde_json::to_value(&export.payload).expect("wallet data export should serialize");
 
-        assert_eq!(export.payload.version, WalletDataExportVersion::V5);
+        assert_eq!(export.payload.version, WalletDataExportVersion::V6);
         assert_eq!(
             json.pointer("/wallets/0/digital_asset_accounts/0/created_at"),
             Some(&serde_json::json!("2026-04-04T12:00:00Z"))
@@ -2914,7 +2927,7 @@ mod tests {
     }
 
     #[test]
-    fn wallet_data_export_v5_manual_account_includes_created_at() {
+    fn wallet_data_export_v6_manual_account_includes_admitted_at() {
         let wallet = sample_wallet();
         let wallet_id = wallet.wallet.id;
         let manual_account_id = WalletAccountId::new();
@@ -2928,6 +2941,7 @@ mod tests {
                 network_id: "cardano-mainnet".to_string(),
             },
             created_at: fixed_datetime(),
+            admitted_at: fixed_datetime(),
             unit_code: "ADA".to_string(),
             decimal_precision: 6,
             symbol: Some("A".to_string()),
@@ -2957,15 +2971,19 @@ mod tests {
         let json =
             serde_json::to_value(&export.payload).expect("wallet data export should serialize");
 
-        assert_eq!(export.payload.version, WalletDataExportVersion::V5);
+        assert_eq!(export.payload.version.0, 6);
         assert_eq!(
             json.pointer("/wallets/0/manual_asset_accounts/0/created_at"),
+            Some(&serde_json::json!("2026-04-04T12:00:00Z"))
+        );
+        assert_eq!(
+            json.pointer("/wallets/0/manual_asset_accounts/0/admitted_at"),
             Some(&serde_json::json!("2026-04-04T12:00:00Z"))
         );
     }
 
     #[test]
-    fn wallet_data_export_payload_has_v5_version_and_api_keys() {
+    fn wallet_data_export_payload_has_v6_version_and_api_keys() {
         let wallet = sample_wallet();
         let api_key = SimpleApiKey::new("etherscan-export-key".to_string()).expect("valid key");
 
@@ -2983,7 +3001,7 @@ mod tests {
         })
         .expect("wallet data export should build");
 
-        assert_eq!(export.payload.version, WalletDataExportVersion::V5);
+        assert_eq!(export.payload.version, WalletDataExportVersion::V6);
         assert_eq!(export.payload.api_keys.len(), 1);
         assert_eq!(export.payload.api_keys[0].provider, "etherscan");
         assert_eq!(export.payload.api_keys[0].api_key, "etherscan-export-key");
@@ -3089,6 +3107,7 @@ mod tests {
                 network_id: "cardano-mainnet".to_string(),
             },
             created_at: fixed_datetime(),
+            admitted_at: fixed_datetime(),
             unit_code: "ADA".to_string(),
             decimal_precision: 6,
             symbol: Some("A".to_string()),
@@ -3201,6 +3220,7 @@ mod tests {
                 network_id: "cardano-mainnet".to_string(),
             },
             created_at: fixed_datetime(),
+            admitted_at: fixed_datetime(),
             unit_code: "ADA".to_string(),
             decimal_precision: 6,
             symbol: Some("A".to_string()),

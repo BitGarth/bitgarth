@@ -788,7 +788,9 @@ pub(crate) fn request_attempt_outcome_for_etherscan_error(
                 response_body: None,
             },
         )),
-        EtherscanError::ApiError { message, .. } => Ok(RequestAttemptOutcome::HttpResponse(
+        // Etherscan reports API failures with HTTP 200; retain them in the allowed
+        // failure-diagnostic outcome rather than as a successful HTTP response.
+        EtherscanError::ApiError { message, .. } => Ok(RequestAttemptOutcome::DeserializeError(
             RequestAttemptHttpResponse {
                 http_status_code: HttpStatusCode::try_new(200)?,
                 response_headers_json: None,
@@ -1011,7 +1013,7 @@ mod pure_tests {
     }
 
     #[test]
-    fn request_attempt_outcome_for_etherscan_error_maps_api_error_to_http_response() {
+    fn request_attempt_outcome_for_etherscan_error_retains_api_error_diagnostics() {
         let outcome = request_attempt_outcome_for_etherscan_error(&EtherscanError::ApiError {
             status: "0".to_string(),
             message: "Max rate limit reached".to_string(),
@@ -1020,7 +1022,7 @@ mod pure_tests {
 
         assert_eq!(
             outcome,
-            RequestAttemptOutcome::HttpResponse(RequestAttemptHttpResponse {
+            RequestAttemptOutcome::DeserializeError(RequestAttemptHttpResponse {
                 http_status_code: HttpStatusCode::try_new(200).expect("http status"),
                 response_headers_json: None,
                 response_body: CapturedResponseBody::truncate(

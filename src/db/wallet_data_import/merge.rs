@@ -6,6 +6,10 @@ use super::parse::{
 };
 use crate::amounts::AmountSplitParts;
 use crate::amounts::UnsignedAmount;
+use crate::db::account_admission::{
+    enroll_native_account_in_tx, next_manual_admission_timestamp_in_tx,
+};
+use crate::payments::types::EntitlementTier;
 
 fn split_unsigned_amount(
     amount: UnsignedAmount,
@@ -17,20 +21,21 @@ fn split_unsigned_amount(
 }
 use super::resolve::{
     AddressLookupKey, ExistingNativeAccountMeta, ExistingWalletMeta, HdKeyLookupKey, ImportState,
-    ManualAccountLookupKey, resolve_native_account_candidates,
+    ManualAccountLookupKey, matching_manual_only_wallet, resolve_native_account_candidates,
 };
 use super::{
     ImportDuplicateSkipView, ImportGlobalDuplicateSkipView, WalletDataImportDbError,
     WalletDataImportResult,
 };
 use crate::wallets::{
-    AddressSourceType, DigitalAssetAddressId, HdKeyId, IdentitySource, KeySource, Label,
-    ManualAssetBalanceAssertionId, ManualAssetDisplayScale, ValidatedManualAssetAssertionNote,
-    WalletAccountId, WalletId,
+    AddressSourceType, DigitalAssetAccountId, DigitalAssetAddressId, HdKeyId, IdentitySource,
+    KeySource, Label, ManualAssetBalanceAssertionId, ManualAssetDisplayScale,
+    ValidatedManualAssetAssertionNote, WalletAccountId, WalletId,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::params;
 use std::collections::HashSet;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ImportCreationPlan {
@@ -48,9 +53,15 @@ pub(super) fn plan_import_creations(
         let wallet_id = plan_wallet_id(&mut state, imported_wallet)?;
 
         for native_account in &imported_wallet.native_accounts {
-            if resolve_native_account_candidates(native_account, &state)?.is_empty() {
-                supported_accounts_to_create = supported_accounts_to_create.saturating_add(1);
-                plan_created_native_account(&mut state, wallet_id, native_account)?;
+            match resolve_native_account_candidates(native_account, &state)?
+                .into_iter()
+                .next()
+            {
+                Some(account_id) => plan_native_identifiers(&mut state, account_id, native_account),
+                None => {
+                    supported_accounts_to_create = supported_accounts_to_create.saturating_add(1);
+                    plan_created_native_account(&mut state, wallet_id, native_account)?;
+                }
             }
         }
 
@@ -106,6 +117,9 @@ fn plan_wallet_id(
     if let Some(wallet_id) = affinity_wallet_ids.iter().next().copied() {
         return Ok(wallet_id);
     }
+    if let Some(wallet_id) = matching_manual_only_wallet(state, imported_wallet) {
+        return Ok(wallet_id);
+    }
 
     let wallet_id = WalletId::new();
     state.wallet_meta.insert(
@@ -158,27 +172,35 @@ fn plan_created_native_account(
         .or_default()
         .insert(account.label.key());
 
+    plan_native_identifiers(state, account_id, account);
+
+    Ok(())
+}
+
+fn plan_native_identifiers(
+    state: &mut ImportState,
+    account_id: WalletAccountId,
+    account: &ParsedImportedNativeAccount,
+) {
     for hd_key in &account.hd_keys {
-        state.hd_key_lookup.insert(
-            HdKeyLookupKey {
+        state
+            .hd_key_lookup
+            .entry(HdKeyLookupKey {
                 normalized_extended_pubkey: hd_key.value.normalized_as_str().to_string(),
                 address_scheme: hd_key.address_scheme,
-            },
-            account_id,
-        );
+            })
+            .or_insert(account_id);
     }
     for address in &account.addresses {
-        state.address_lookup.insert(
-            AddressLookupKey {
+        state
+            .address_lookup
+            .entry(AddressLookupKey {
                 asset_id: address.asset_id.as_str().to_string(),
                 network: address.network.as_str().to_string(),
                 address_normalized: address.normalized_address.clone(),
-            },
-            account_id,
-        );
+            })
+            .or_insert(account_id);
     }
-
-    Ok(())
 }
 
 fn plan_created_manual_account(
@@ -280,6 +302,15 @@ pub(super) fn insert_native_account_in_tx(
         ))
     })?;
 
+    let native_account_id =
+        DigitalAssetAccountId::from_str(&account_id.to_string()).map_err(|err| {
+            WalletDataImportDbError::Internal(format!(
+                "Failed to convert imported account id for admission: {err}"
+            ))
+        })?;
+    enroll_native_account_in_tx(tx, native_account_id, updated_at, &EntitlementTier::Free)
+        .map_err(WalletDataImportDbError::from)?;
+
     Ok(account_id)
 }
 
@@ -375,14 +406,16 @@ pub(super) fn insert_manual_asset_account_in_tx(
     updated_at: DateTime<Utc>,
 ) -> Result<WalletAccountId, WalletDataImportDbError> {
     let account_id = WalletAccountId::new();
+    let admitted_at = next_manual_admission_timestamp_in_tx(tx, updated_at)
+        .map_err(WalletDataImportDbError::from)?;
     tx.execute(
         "INSERT INTO manual_asset_accounts
          (id, wallet_id, label, label_key, asset_id, network_id, decimal_precision,
           unit_code, symbol, asset_name, network_name, coingecko_id, asset_source,
           precision_source, coingecko_platform_id, provider_platform_asset_ref,
-          created_at, updated_at)
+          created_at, updated_at, admitted_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                 ?13, ?14, ?15, ?16, ?17, ?18)",
+                 ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             account_id.to_string(),
             wallet_id.to_string(),
@@ -402,6 +435,7 @@ pub(super) fn insert_manual_asset_account_in_tx(
             snapshot.provider_platform_asset_ref.as_deref(),
             created_at.to_rfc3339(),
             updated_at.to_rfc3339(),
+            admitted_at,
         ],
     )
     .map_err(|err| {

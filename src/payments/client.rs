@@ -1,11 +1,13 @@
 #![cfg(feature = "server")]
 
+use super::account_allowances::AccountAllowances;
 use super::keys::expected_signing_key_hash;
 use super::types::{
-    CAPABILITY_SCHEMA_VERSION_LEGACY, CAPABILITY_SCHEMA_VERSION_V3, CentralOrderNextAction,
-    CentralOrderStatus, CentralOrderVerificationState, CentralRefreshStatus, EntitlementHolderId,
-    PaymentAmount, PaymentAttemptId, PaymentOrderId, PaymentSecret, ProductOptionId,
-    RefreshRevokedReason, TokenId, default_capability_schema_version,
+    AccountAllowancePolicy, CAPABILITY_SCHEMA_VERSION_LEGACY, CAPABILITY_SCHEMA_VERSION_V3,
+    CAPABILITY_SCHEMA_VERSION_V4, CentralOrderNextAction, CentralOrderStatus,
+    CentralOrderVerificationState, CentralRefreshStatus, EntitlementHolderId, PaymentAmount,
+    PaymentAttemptId, PaymentOrderId, PaymentSecret, ProductOptionId, RefreshRevokedReason,
+    TokenId, default_capability_schema_version,
 };
 use crate::models::UserId;
 use crate::traces::client::{
@@ -18,7 +20,7 @@ use once_cell::sync::Lazy;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 #[cfg(all(test, not(bitgarth_db_unit_only)))]
 use std::sync::Mutex;
@@ -32,14 +34,16 @@ const SUPPORTED_CAPABILITY_SCHEMA_VERSION_HEADER: &str =
     "X-BitGarth-Supported-Capability-Schema-Version";
 const APP_VERSION_HEADER: &str = "X-BitGarth-App-Version";
 const APP_CHANNEL_HEADER: &str = "X-BitGarth-App-Channel";
+const APP_PLATFORM_HEADER: &str = "X-BitGarth-App-Platform";
 const CENTRAL_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn app_metadata_header_values() -> [(&'static str, String); 2] {
+fn app_metadata_header_values() -> [(&'static str, String); 3] {
     [
         (APP_VERSION_HEADER, crate::version::version().to_string()),
+        (APP_CHANNEL_HEADER, crate::channel::channel_id().to_string()),
         (
-            APP_CHANNEL_HEADER,
-            crate::channel::channel().as_header_value().to_string(),
+            APP_PLATFORM_HEADER,
+            format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
         ),
     ]
 }
@@ -77,12 +81,51 @@ pub(crate) struct BitGarthCentralClient {
     http: TracedAsyncClient,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug)]
 pub(crate) struct LatestAppVersionResponse {
     pub(crate) latest: String,
-    pub(crate) image: Option<String>,
-    pub(crate) release_url: String,
+    pub(crate) release_url: Option<String>,
     pub(crate) published_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LatestAppVersionsResponse {
+    channels: HashMap<String, Value>,
+}
+
+impl LatestAppVersionsResponse {
+    fn select_release(
+        &self,
+        channel: &str,
+    ) -> Result<LatestAppVersionResponse, CentralClientError> {
+        let selected = if matches!(channel, "docker" | "umbrel") {
+            self.channels.get(channel)
+        } else {
+            self.channels
+                .get(channel)
+                .or_else(|| self.channels.get("default"))
+        }
+        .ok_or_else(|| {
+            CentralClientError::Contract("selected release is unavailable".to_string())
+        })?;
+        let latest = selected
+            .get("latest")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                CentralClientError::Contract("selected release has no version string".to_string())
+            })?;
+        Ok(LatestAppVersionResponse {
+            latest: latest.to_string(),
+            release_url: selected
+                .get("release_url")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            published_at: selected
+                .get("published_at")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,6 +169,7 @@ pub(crate) struct CentralTierCapabilities {
     pub(crate) capability_set_id: Option<String>,
     pub(crate) capability_schema_version: u16,
     pub(crate) sync_account_slots: u16,
+    pub(crate) account_allowance_policy: AccountAllowancePolicy,
     pub(crate) historical_backfill_transactions_per_account: u32,
     pub(crate) historical_sync: bool,
     pub(crate) transaction_history_sync: bool,
@@ -437,7 +481,7 @@ impl BitGarthCentralClient {
         &self,
     ) -> Result<LatestAppVersionResponse, CentralClientError> {
         let response = self
-            .with_app_metadata(self.http.get(self.url("/api/v1/latest-app-version")?))
+            .with_app_metadata(self.http.get(self.url("/api/v2/latest-app-version")?))
             .send()
             .await
             .map_err(|error| {
@@ -450,7 +494,8 @@ impl BitGarthCentralClient {
         let text = response
             .text()
             .map_err(|err| CentralClientError::ResponseEncoding(err.to_string()))?;
-        parse_success(status, &text)
+        let response: LatestAppVersionsResponse = parse_success(status, &text)?;
+        response.select_release(crate::channel::channel_id())
     }
 
     pub(crate) async fn order_status(
@@ -637,7 +682,7 @@ impl BitGarthCentralClient {
     ) -> crate::traces::client::TracedAsyncRequestBuilder<'a> {
         self.with_app_metadata(request).header(
             SUPPORTED_CAPABILITY_SCHEMA_VERSION_HEADER,
-            CAPABILITY_SCHEMA_VERSION_V3.to_string(),
+            CAPABILITY_SCHEMA_VERSION_V4.to_string(),
         )
     }
 }
@@ -857,8 +902,16 @@ struct RawTierCapabilityLimits {
 }
 
 #[derive(Deserialize)]
-struct RawTierAccountLimits {
-    total: Option<u16>,
+#[serde(untagged)]
+enum RawTierAccountLimits {
+    Independent {
+        balance_sync: u16,
+        transaction_history_sync: u16,
+        manual: u16,
+    },
+    LegacyCombined {
+        total: Option<u16>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -1032,8 +1085,12 @@ fn parse_product_tier(
 
     let presentation = build_tier_presentation(&tier, raw.presentation)?;
     let capability_schema_version = raw.capability_schema_version;
-    let sync_account_slots =
-        account_limit_for_tier(capability_schema_version, &raw.capabilities.limits)?;
+    let account_allowance_policy =
+        account_policy_for_tier(capability_schema_version, &raw.capabilities.limits)?;
+    let sync_account_slots = match account_allowance_policy {
+        AccountAllowancePolicy::LegacyCombined { total } => total,
+        AccountAllowancePolicy::Independent(allowances) => allowances.balance_sync(),
+    };
     let transaction_history_sync =
         transaction_history_sync_for_tier(capability_schema_version, &raw.capabilities.features);
     let features = raw.capabilities.features;
@@ -1046,6 +1103,7 @@ fn parse_product_tier(
                 capability_set_id: raw.capability_set_id,
                 capability_schema_version,
                 sync_account_slots,
+                account_allowance_policy,
                 historical_backfill_transactions_per_account: raw
                     .capabilities
                     .limits
@@ -1067,25 +1125,51 @@ fn parse_product_tier(
     )))
 }
 
-fn account_limit_for_tier(
+fn account_policy_for_tier(
     capability_schema_version: u16,
     limits: &RawTierCapabilityLimits,
-) -> Result<u16, CentralClientError> {
+) -> Result<AccountAllowancePolicy, CentralClientError> {
     match capability_schema_version {
-        CAPABILITY_SCHEMA_VERSION_LEGACY => limits.synced_accounts.ok_or_else(|| {
-            CentralClientError::Contract(
-                "legacy product tier missing limits.synced_accounts".to_string(),
-            )
-        }),
+        CAPABILITY_SCHEMA_VERSION_LEGACY => limits
+            .synced_accounts
+            .map(|total| AccountAllowancePolicy::LegacyCombined { total })
+            .ok_or_else(|| {
+                CentralClientError::Contract(
+                    "legacy product tier missing limits.synced_accounts".to_string(),
+                )
+            }),
         CAPABILITY_SCHEMA_VERSION_V3 => limits
             .accounts
             .as_ref()
-            .and_then(|accounts| accounts.total)
+            .and_then(|accounts| match accounts {
+                RawTierAccountLimits::LegacyCombined { total } => *total,
+                RawTierAccountLimits::Independent { .. } => None,
+            })
+            .map(|total| AccountAllowancePolicy::LegacyCombined { total })
             .ok_or_else(|| {
                 CentralClientError::Contract(
                     "v3 product tier missing limits.accounts.total".to_string(),
                 )
             }),
+        CAPABILITY_SCHEMA_VERSION_V4 => {
+            let Some(RawTierAccountLimits::Independent {
+                balance_sync,
+                transaction_history_sync,
+                manual,
+            }) = limits.accounts.as_ref()
+            else {
+                return Err(CentralClientError::Contract(
+                    "v4 product tier missing independent account allowances".to_string(),
+                ));
+            };
+            AccountAllowances::try_new(*balance_sync, *transaction_history_sync, *manual)
+                .map(AccountAllowancePolicy::Independent)
+                .map_err(|error| {
+                    CentralClientError::Contract(format!(
+                        "v4 product tier has unsupported account allowances: {error:?}"
+                    ))
+                })
+        }
         _ => Err(CentralClientError::Contract(format!(
             "unsupported capability schema version {capability_schema_version}"
         ))),
@@ -1099,6 +1183,7 @@ fn transaction_history_sync_for_tier(
     match capability_schema_version {
         CAPABILITY_SCHEMA_VERSION_LEGACY => features.historical_sync,
         CAPABILITY_SCHEMA_VERSION_V3 => features.transaction_history_sync,
+        CAPABILITY_SCHEMA_VERSION_V4 => features.transaction_history_sync,
         _ => false,
     }
 }
@@ -1588,13 +1673,70 @@ mod tests {
     use axum::{
         Json, Router,
         extract::State,
-        http::HeaderMap,
+        http::{HeaderMap, Method, StatusCode as AxumStatusCode, Uri},
         response::{IntoResponse, Response},
         routing::post,
     };
     use serde_json::json;
     use std::str::FromStr as _;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn selects_channel_record_without_parsing_unrelated_records() {
+        let response: LatestAppVersionsResponse = serde_json::from_value(json!({
+            "channels": {
+                "default": {"latest": "0.3.9"},
+                "docker": {"latest": "0.3.8"},
+                "umbrel": {"latest": "0.3.1"},
+                "homebrew": {"latest": "0.3.2", "release_url": 42},
+                "broken": {"latest": false}
+            }
+        }))
+        .unwrap();
+        for (channel, expected) in [
+            ("docker", "0.3.8"),
+            ("umbrel", "0.3.1"),
+            ("homebrew", "0.3.2"),
+            ("web", "0.3.9"),
+            ("desktop", "0.3.9"),
+        ] {
+            assert_eq!(response.select_release(channel).unwrap().latest, expected);
+        }
+        assert!(response.select_release("broken").is_err());
+        assert_eq!(
+            response.select_release("homebrew").unwrap().release_url,
+            None
+        );
+        let default_only: LatestAppVersionsResponse = serde_json::from_value(json!({
+            "channels": {"default": {"latest": "0.3.9"}}
+        }))
+        .unwrap();
+        assert!(default_only.select_release("docker").is_err());
+        assert!(default_only.select_release("umbrel").is_err());
+        assert!(default_only.select_release("web").is_ok());
+        let no_default: LatestAppVersionsResponse = serde_json::from_value(json!({
+            "channels": {"docker": {"latest": "0.3.8"}}
+        }))
+        .unwrap();
+        assert!(no_default.select_release("custom").is_err());
+        assert!(
+            serde_json::from_value::<LatestAppVersionsResponse>(json!({"channels": []})).is_err()
+        );
+        for bad in [Value::Null, json!(7), json!({}), json!({"latest": false})] {
+            let response: LatestAppVersionsResponse = serde_json::from_value(json!({
+                "channels": {"web": bad, "default": {"latest": "0.3.9"}}
+            }))
+            .unwrap();
+            assert!(response.select_release("web").is_err());
+        }
+        let response: LatestAppVersionsResponse = serde_json::from_value(json!({
+            "channels": {"web": {"latest": "0.3.9", "release_url": null, "published_at": 7}}
+        }))
+        .unwrap();
+        let selected = response.select_release("web").unwrap();
+        assert_eq!(selected.release_url, None);
+        assert_eq!(selected.published_at, None);
+    }
 
     fn test_holder_id() -> EntitlementHolderId {
         EntitlementHolderId::from_str("01JQABCDEF000000000000000D")
@@ -1619,12 +1761,212 @@ mod tests {
     }
 
     #[test]
-    fn app_metadata_headers_use_version_and_declared_channel() {
+    fn app_metadata_headers_use_version_channel_and_platform() {
         let headers = app_metadata_header_values();
         assert_eq!(headers[0].0, APP_VERSION_HEADER);
         assert_eq!(headers[0].1, crate::version::version());
         assert_eq!(headers[1].0, APP_CHANNEL_HEADER);
-        assert_eq!(headers[1].1, crate::channel::channel().as_header_value());
+        assert_eq!(headers[1].1, crate::channel::channel_id());
+        assert_eq!(headers[2].0, APP_PLATFORM_HEADER);
+        assert_eq!(
+            headers[2].1,
+            format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH)
+        );
+        assert!(
+            headers
+                .iter()
+                .all(|(name, _)| !name.to_ascii_lowercase().starts_with("x-bitgarth-cli-"))
+        );
+    }
+
+    #[tokio::test]
+    async fn all_central_requests_include_build_metadata() -> Result<(), Box<dyn std::error::Error>>
+    {
+        type CapturedRequests = Arc<Mutex<Vec<(Method, Uri, HeaderMap)>>>;
+
+        async fn capture_request(
+            State(captured): State<CapturedRequests>,
+            method: Method,
+            uri: Uri,
+            headers: HeaderMap,
+        ) -> impl IntoResponse {
+            captured
+                .lock()
+                .expect("capture lock poisoned")
+                .push((method, uri, headers));
+            (
+                AxumStatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "unavailable"})),
+            )
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let base_url = format!("http://{}", listener.local_addr()?);
+        let router = Router::new()
+            .fallback(capture_request)
+            .with_state(Arc::clone(&captured));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let http = TracedAsyncClient::builder(
+            IntegrationLabel::new("bitgarth-central"),
+            crate::models::UserId::new(),
+        )
+        .build()
+        .expect("test client should build");
+        let client = BitGarthCentralClient {
+            base_url,
+            expected_signing_key_hash: "test-signing-key-hash".to_string(),
+            http,
+        };
+        let holder = test_holder_id();
+        let secret = PaymentSecret::from_raw("frPMkDek45GSAMEAFTXV5ORxF8p3c5_MqPg7Zq-bNuI")?;
+        let option = ProductOptionId::from_str("premium_12_months_usd")?;
+        let order = PaymentOrderId::from_str("01JQABCDEF000000000000000E")?;
+        let token = TokenId::from_str("01JQABCDEF000000000000000E")?;
+        assert!(
+            client
+                .create_order_session(holder, option, None)
+                .await
+                .is_err()
+        );
+        assert!(client.payment_product_options().await.is_err());
+        assert!(client.latest_app_version().await.is_err());
+        assert!(client.order_status(order, &secret).await.is_err());
+        assert!(
+            client
+                .refresh_subscription(holder, token, &secret, None)
+                .await
+                .is_err()
+        );
+        assert!(client.subscription_history(&secret).await.is_err());
+        assert!(
+            client
+                .transfer_subscription(&secret, holder, &secret)
+                .await
+                .is_err()
+        );
+
+        let requests = captured.lock().expect("capture lock poisoned");
+        assert_eq!(requests.len(), 7);
+        let paths = [
+            "/api/v1/payments/orders/session",
+            "/api/v1/payments/product-options",
+            "/api/v2/latest-app-version",
+            "/api/v1/payments/orders/01JQABCDEF000000000000000E/status",
+            "/api/v1/payments/subscription/refresh",
+            "/api/v1/payments/subscription/history",
+            "/api/v1/payments/subscription/transfer",
+        ];
+        for ((_, uri, headers), path) in requests.iter().zip(paths) {
+            assert_eq!(uri.path(), path);
+            assert_eq!(
+                headers
+                    .get(APP_VERSION_HEADER)
+                    .and_then(|v| v.to_str().ok()),
+                Some(crate::version::version())
+            );
+            assert_eq!(
+                headers
+                    .get(APP_CHANNEL_HEADER)
+                    .and_then(|v| v.to_str().ok()),
+                Some(crate::channel::channel_id())
+            );
+            let platform = format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH);
+            assert_eq!(
+                headers
+                    .get(APP_PLATFORM_HEADER)
+                    .and_then(|v| v.to_str().ok()),
+                Some(platform.as_str())
+            );
+            assert!(
+                !headers
+                    .keys()
+                    .any(|name| name.as_str().starts_with("x-bitgarth-cli-"))
+            );
+            if path.contains("/payments/") {
+                assert_eq!(
+                    headers
+                        .get(SUPPORTED_CAPABILITY_SCHEMA_VERSION_HEADER)
+                        .and_then(|v| v.to_str().ok()),
+                    Some("4")
+                );
+                assert_eq!(
+                    headers
+                        .get(EXPECTED_SIGNING_KEY_HASH_HEADER)
+                        .and_then(|v| v.to_str().ok()),
+                    Some("test-signing-key-hash")
+                );
+            } else {
+                assert!(
+                    headers
+                        .get(SUPPORTED_CAPABILITY_SCHEMA_VERSION_HEADER)
+                        .is_none()
+                );
+            }
+        }
+        assert!(requests[0].2.get("authorization").is_none());
+        assert!(requests[1].2.get("authorization").is_none());
+        for (_, _, headers) in &requests[3..] {
+            assert_eq!(
+                headers.get("authorization").and_then(|v| v.to_str().ok()),
+                Some(format!("Bearer {}", secret.as_str()).as_str())
+            );
+        }
+        drop(requests);
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn latest_version_uses_v2_selected_record() -> Result<(), Box<dyn std::error::Error>> {
+        async fn release(uri: Uri) -> impl IntoResponse {
+            if uri.path() != "/api/v2/latest-app-version" {
+                return (
+                    AxumStatusCode::NOT_FOUND,
+                    Json(json!({"error": "v1 disabled"})),
+                );
+            }
+            (
+                AxumStatusCode::OK,
+                Json(json!({"channels": {
+                    "default": {"latest": "0.3.9"},
+                    "web": {"latest": "0.3.8"},
+                    "docker": {"latest": "0.3.7"},
+                    "umbrel": {"latest": "0.3.1"}
+                }})),
+            )
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let base_url = format!("http://{}", listener.local_addr()?);
+        let server =
+            tokio::spawn(
+                async move { axum::serve(listener, Router::new().fallback(release)).await },
+            );
+        let http = TracedAsyncClient::builder(
+            IntegrationLabel::new("bitgarth-central"),
+            crate::models::UserId::new(),
+        )
+        .build()
+        .expect("test client should build");
+        let client = BitGarthCentralClient {
+            base_url,
+            expected_signing_key_hash: "test-signing-key-hash".to_string(),
+            http,
+        };
+        let result = client.latest_app_version().await?;
+        let expected = match crate::channel::channel_id() {
+            "web" => "0.3.8",
+            "docker" => "0.3.7",
+            "umbrel" => "0.3.1",
+            _ => "0.3.9",
+        };
+        assert_eq!(result.latest, expected);
+        let response: LatestAppVersionsResponse = serde_json::from_value(json!({
+            "channels": {"default": {"latest": "0.3.9"}, "docker": {"latest": "0.3.8"}, "umbrel": {"latest": "0.3.1"}}
+        }))?;
+        assert_eq!(response.select_release("umbrel")?.latest, "0.3.1");
+        server.abort();
+        Ok(())
     }
 
     #[tokio::test]
@@ -1702,7 +2044,7 @@ mod tests {
                 .expect("header capture lock should not be poisoned")
                 .supported_capability_schema_version
                 .as_deref(),
-            Some("3")
+            Some("4")
         );
     }
 
@@ -1753,6 +2095,69 @@ mod tests {
             session.payment_attempt.amount.atlos_decimal_amount(),
             "1.23"
         );
+    }
+
+    #[test]
+    fn generous_free_tier_fixture_parses_independent_allowances() {
+        let raw: RawProductOptionsResponse = serde_json::from_str(include_str!(
+            "../../tests/fixtures/payments/v4-product-options.json"
+        ))
+        .expect("Central fixture should deserialize");
+        let options = raw
+            .try_into_product_options()
+            .expect("v4 tiers should pass contract validation");
+        assert_eq!(options.tiers.len(), 2);
+        assert_eq!(options.options.len(), 1);
+        assert_eq!(options.tiers[0].capabilities.capability_schema_version, 4);
+        assert_eq!(options.tiers[0].capabilities.sync_account_slots, 50);
+        assert_eq!(
+            options.tiers[0].capabilities.account_allowance_policy,
+            AccountAllowancePolicy::Independent(
+                AccountAllowances::try_new(50, 3, 1000).expect("fixture allowances")
+            )
+        );
+        assert_eq!(
+            options.tiers[0]
+                .capabilities
+                .historical_backfill_transactions_per_account,
+            1000
+        );
+        assert_eq!(options.tiers[1].capabilities.sync_account_slots, 200);
+    }
+
+    #[test]
+    fn v4_product_options_reject_missing_or_unsupported_allowances() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/payments/v4-product-options.json"
+        ))
+        .expect("fixture JSON");
+        for field in ["balance_sync", "transaction_history_sync", "manual"] {
+            let mut value = fixture.clone();
+            value["tiers"][0]["capabilities"]["limits"]["accounts"]
+                .as_object_mut()
+                .expect("accounts object")
+                .remove(field);
+            let raw: RawProductOptionsResponse = serde_json::from_value(value).expect("envelope");
+            let options = raw
+                .try_into_product_options()
+                .expect("Harvest remains valid");
+            assert!(
+                options.tiers.iter().all(|tier| tier.tier != "free"),
+                "{field}"
+            );
+        }
+        for (balance, transactions, manual) in [(3, 4, 0), (4001, 3, 1000)] {
+            let mut value = fixture.clone();
+            let accounts = &mut value["tiers"][0]["capabilities"]["limits"]["accounts"];
+            accounts["balance_sync"] = balance.into();
+            accounts["transaction_history_sync"] = transactions.into();
+            accounts["manual"] = manual.into();
+            let raw: RawProductOptionsResponse = serde_json::from_value(value).expect("envelope");
+            let options = raw
+                .try_into_product_options()
+                .expect("Harvest remains valid");
+            assert!(options.tiers.iter().all(|tier| tier.tier != "free"));
+        }
     }
 
     #[test]

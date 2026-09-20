@@ -1,10 +1,12 @@
 use super::errors::db_error_from_sqlite;
+use crate::db::account_admission::enroll_native_account_in_tx;
 use crate::db::account_limits::ensure_supported_account_hard_cap_before_insert_in_tx;
 use crate::db::error::DbError;
 use crate::db::raw_ingestion::ensure_source_connection_for_address_tx;
 use crate::db::user_db::with_user_db_mut;
 use crate::ethereum::EthAddress;
 use crate::models::UserId;
+use crate::payments::types::EntitlementTier;
 use crate::wallets::{
     AccountKind, AddressScheme, AddressSourceType, BtcAddress, DigitalAssetAccountId,
     DigitalAssetAddressId, IdentitySource, Label, Network, SyncedAssetId, WalletId,
@@ -142,6 +144,7 @@ pub(crate) fn add_ethereum_address_with_account_label(
             ],
         )
         .map_err(|e| db_error_from_sqlite("Failed to insert ethereum account", e))?;
+        enroll_native_account_in_tx(&tx, account_id, now, &EntitlementTier::Free)?;
 
         // Create address (standard scheme, user_provided source)
         let address_id = DigitalAssetAddressId::new();
@@ -300,6 +303,7 @@ pub(crate) fn add_bitcoin_address_with_account_label(
             ],
         )
         .map_err(|e| db_error_from_sqlite("Failed to insert bitcoin account", e))?;
+        enroll_native_account_in_tx(&tx, account_id, now, &EntitlementTier::Free)?;
 
         // Create address (auto-detected scheme, user_provided source)
         let address_id = DigitalAssetAddressId::new();

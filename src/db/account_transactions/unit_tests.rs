@@ -53,7 +53,7 @@ fn api_balance_row(
 ) -> crate::db::transaction_sync::AddressApiConfirmedBalanceRow {
     crate::db::transaction_sync::AddressApiConfirmedBalanceRow {
         address_id,
-        last_completed_at: None,
+        observed_at: None,
         api_confirmed_balance,
     }
 }

@@ -1329,6 +1329,7 @@ fn bitcoin_dated_balance_gate_rejects_every_incomplete_coverage_state() {
                             reasons: vec![BalanceProvisionalReason::HistoricalBackfillInProgress],
                         },
                         bitcoin_history_coverage: Some(coverage),
+                        bitcoin_history_observed_tip: None,
                     },
                 )?;
                 assert_eq!(resolution.state, NativeBalanceState::Unknown);
@@ -1548,6 +1549,67 @@ fn bitcoin_account_success_exposes_complete_canonical_zero() {
     assert_eq!(
         report.accounts[0].opening_balance_reliability,
         BalanceReliability::finalized()
+    );
+}
+
+#[test]
+fn bitcoin_paused_history_keeps_proof_boundary_but_gates_newer_report_balance() {
+    let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+    let user_id = UserId::new();
+    initialize_user_db_for_test(user_id).expect("user db should initialize");
+    let fixture = seed_empty_bitcoin_completion_without_account_success(user_id);
+    refresh_account_integration_sync_state(
+        user_id,
+        fixture.account_id,
+        SyncIntegrationId::Mempool,
+        fixture.publication_at + chrono::Duration::seconds(1),
+    )
+    .expect("account integration success should persist");
+    crate::db::persist_mempool_address_observation_success(
+        user_id,
+        crate::db::MempoolAddressObservationSuccess {
+            address_id: fixture.address_id,
+            confirmed_tx_count: TransactionCount::zero(),
+            confirmed_balance: Some(ApiConfirmedBalance::from_amount(UnsignedAmount::zero())),
+            tip_height: ChainTipHeight::try_new(101).expect("new tip should parse"),
+            observed_at: fixture.publication_at + chrono::Duration::minutes(1),
+        },
+    )
+    .expect("new balance observation should persist");
+
+    let context = crate::db::with_user_db(user_id, |conn| {
+        crate::db::balance_reliability::load_account_balance_reliability_context_for_history(
+            conn,
+            fixture.account_id,
+            Some(TransactionCount::zero()),
+        )
+    })
+    .expect("reliability context should load");
+    assert_eq!(
+        context.bitcoin_history_coverage,
+        Some(BitcoinAccountHistoryCoverage::Complete {
+            coverage_height: ChainTipHeight::try_new(100).expect("proof height should parse"),
+        })
+    );
+    assert_eq!(
+        context.balance_reliability,
+        BalanceReliability::Provisional {
+            reasons: vec![BalanceProvisionalReason::HistoricalCoverageLimited],
+        }
+    );
+
+    let report = super::wallet_report::load_wallet_report(
+        user_id,
+        fixture.wallet_id,
+        Some(chrono::NaiveDate::from_ymd_opt(2026, 7, 24).expect("valid report date")),
+        Some(chrono::NaiveDate::from_ymd_opt(2026, 7, 24).expect("valid report date")),
+        crate::models::UserTimezone("UTC".parse().expect("timezone should parse")),
+        TransactionCount::zero(),
+    )
+    .expect("paused report should load");
+    assert_eq!(
+        report.accounts[0].closing_balance_state,
+        super::wallet_report::WalletReportBalanceState::Unknown,
     );
 }
 
@@ -2573,6 +2635,7 @@ fn resolve_native_balance_at_boundary_rejects_missing_bitcoin_coverage_at_first_
                 last_successful_sync_date: Some(last_successful_sync_date),
                 balance_reliability: BalanceReliability::finalized(),
                 bitcoin_history_coverage: None,
+                bitcoin_history_observed_tip: None,
             },
         )
     })
@@ -2609,6 +2672,7 @@ fn resolve_native_balance_at_boundary_rejects_missing_bitcoin_coverage_inside_hi
                 last_successful_sync_date: Some(last_successful_sync_date),
                 balance_reliability: BalanceReliability::finalized(),
                 bitcoin_history_coverage: None,
+                bitcoin_history_observed_tip: None,
             },
         )
     })
@@ -2645,6 +2709,7 @@ fn resolve_native_balance_at_boundary_rejects_missing_bitcoin_coverage_before_hi
                 last_successful_sync_date: Some(last_successful_sync_date),
                 balance_reliability: BalanceReliability::finalized(),
                 bitcoin_history_coverage: None,
+                bitcoin_history_observed_tip: None,
             },
         )
     })
@@ -2681,6 +2746,7 @@ fn resolve_native_balance_at_boundary_returns_unknown_for_early_to() {
                 last_successful_sync_date: Some(last_successful_sync_date),
                 balance_reliability: BalanceReliability::finalized(),
                 bitcoin_history_coverage: None,
+                bitcoin_history_observed_tip: None,
             },
         )
     })
@@ -2728,6 +2794,7 @@ fn resolve_native_balance_at_boundary_preserves_account_model_zero_behavior() {
                 last_successful_sync_date: None,
                 balance_reliability: BalanceReliability::finalized(),
                 bitcoin_history_coverage: None,
+                bitcoin_history_observed_tip: None,
             },
         )
     })

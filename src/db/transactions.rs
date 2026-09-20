@@ -71,7 +71,7 @@ fn load_utxo_address_balance(
         .query_row(
             "SELECT tss.api_confirmed_balance_hi,
                     tss.api_confirmed_balance_lo,
-                    tss.last_completed_at
+                    tss.api_confirmed_balance_observed_at
              FROM digital_asset_addresses AS address
              LEFT JOIN transaction_sync_state AS tss
                ON tss.address_id = address.id
@@ -106,12 +106,12 @@ fn load_utxo_address_balance(
 fn provider_balance_state(
     hi: Option<i64>,
     lo: Option<i64>,
-    last_completed_at: Option<&str>,
+    observed_at: Option<&str>,
 ) -> NativeBalanceState {
-    let (Some(hi), Some(lo), Some(last_completed_at)) = (hi, lo, last_completed_at) else {
+    let (Some(hi), Some(lo), Some(observed_at)) = (hi, lo, observed_at) else {
         return NativeBalanceState::Unknown;
     };
-    if parse_datetime(last_completed_at).is_err() {
+    if parse_datetime(observed_at).is_err() {
         return NativeBalanceState::Unknown;
     }
     crate::db::amount_storage::parse_split_amount(hi, lo)
@@ -163,7 +163,7 @@ fn load_bitcoin_provider_address_balances(
                     address.id,
                     tss.api_confirmed_balance_hi,
                     tss.api_confirmed_balance_lo,
-                    tss.last_completed_at
+                    tss.api_confirmed_balance_observed_at
              FROM digital_asset_addresses AS address
              LEFT JOIN transaction_sync_state AS tss
                ON tss.address_id = address.id
@@ -312,8 +312,7 @@ pub(in crate::db) fn complete_api_confirmed_balance_with_as_of(
     let mut total = UnsignedAmount::zero();
     let mut as_of: Option<DateTime<Utc>> = None;
     for row in api_balances {
-        let (Some(balance), Some(last_completed_at)) =
-            (row.api_confirmed_balance, row.last_completed_at)
+        let (Some(balance), Some(observed_at)) = (row.api_confirmed_balance, row.observed_at)
         else {
             return Ok(None);
         };
@@ -323,8 +322,8 @@ pub(in crate::db) fn complete_api_confirmed_balance_with_as_of(
             ))
         })?;
         as_of = Some(match as_of {
-            Some(current) => current.min(last_completed_at),
-            None => last_completed_at,
+            Some(current) => current.min(observed_at),
+            None => observed_at,
         });
     }
 

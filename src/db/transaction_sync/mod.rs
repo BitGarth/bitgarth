@@ -1,5 +1,6 @@
 mod address_loading;
 mod chain_tip;
+mod etherscan_progress;
 mod hd_chain;
 mod mempool_history;
 mod parsers;
@@ -25,6 +26,9 @@ pub(crate) use address_loading::{
     load_known_tx_hashes_for_address,
 };
 pub(crate) use chain_tip::{load_chain_tip_state, upsert_chain_tip_state};
+pub(crate) use etherscan_progress::{
+    EtherscanPendingRange, load_etherscan_pending_range, save_etherscan_pending_range,
+};
 pub(in crate::db) use hd_chain::complete_hd_account_discovery_conn;
 pub(crate) use hd_chain::{
     complete_hd_account_discovery, delete_hd_account_chain_sync_state, get_hd_account_sync_bundles,
@@ -45,15 +49,16 @@ pub(crate) use reconciliation::{
 };
 pub(crate) use snapshots::{load_account_sync_snapshots, load_aggregate_sync_snapshot};
 pub(crate) use sync_state::{
-    MempoolAddressObservationSuccess, begin_mempool_history_scan, commit_mempool_history_page_work,
-    invalidate_mempool_account_history_coverage, invalidate_mempool_history_coverage,
-    invalidate_mempool_history_proof, mark_account_integration_sync_started,
-    mark_address_sync_completed_failure, mark_address_sync_completed_success,
-    mark_address_sync_started, persist_mempool_address_observation_success,
-    publish_mempool_history_proof, publish_strict_mempool_history_proof,
-    refresh_account_integration_sync_state, update_address_etherscan_backfill_cursor,
-    update_address_etherscan_history_status, update_address_mempool_backfill_cursor,
-    update_address_mempool_expected_tx_count, upsert_account_sync_state,
+    MempoolAddressObservationSuccess, begin_mempool_history_scan, commit_etherscan_transaction_tip,
+    commit_mempool_history_page_work, invalidate_mempool_account_history_coverage,
+    invalidate_mempool_history_coverage, invalidate_mempool_history_proof,
+    mark_account_integration_sync_started, mark_address_sync_completed_failure,
+    mark_address_sync_completed_success, mark_address_sync_started,
+    persist_mempool_address_observation_success, publish_mempool_history_proof,
+    publish_strict_mempool_history_proof, refresh_account_integration_sync_state,
+    update_address_etherscan_backfill_cursor, update_address_etherscan_history_status,
+    update_address_mempool_backfill_cursor, update_address_mempool_expected_tx_count,
+    upsert_account_sync_state,
 };
 pub(in crate::db) use sync_state::{
     publish_mempool_history_proof_conn, publish_strict_mempool_history_proof_conn,
@@ -2492,7 +2497,7 @@ mod tests {
             .expect("load balances should succeed");
         assert_eq!(balances.len(), 1);
         assert_eq!(balances[0].address_id, add_result.address_id);
-        assert_eq!(balances[0].last_completed_at, Some(completed));
+        assert_eq!(balances[0].observed_at, Some(completed));
         let loaded_balance = balances[0]
             .api_confirmed_balance
             .expect("balance should be present");
@@ -2565,6 +2570,49 @@ mod tests {
             .api_confirmed_balance
             .expect("previous balance should be preserved");
         assert_eq!(loaded.amount().value(), 2_000_000_u128);
+        let (_, as_of) =
+            crate::db::transactions::complete_api_confirmed_balance_with_as_of(&balances)
+                .expect("balance should resolve")
+                .expect("balance should remain available");
+        assert_eq!(as_of, now + Duration::seconds(10));
+    }
+
+    #[test]
+    fn v53_backfills_only_complete_api_balance_observations() {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory DB should open");
+        conn.execute_batch(
+            "CREATE TABLE transaction_sync_state (
+                id TEXT PRIMARY KEY,
+                last_completed_at TEXT,
+                api_confirmed_balance_hi INTEGER,
+                api_confirmed_balance_lo INTEGER
+            );
+            INSERT INTO transaction_sync_state VALUES
+                ('complete', '2026-01-01T00:00:00Z', 0, 42),
+                ('half-null', '2026-01-02T00:00:00Z', 0, NULL),
+                ('missing', '2026-01-03T00:00:00Z', NULL, NULL);",
+        )
+        .expect("legacy sync states should insert");
+        conn.execute_batch(include_str!(
+            "../../../migrations/user/V53__api_confirmed_balance_observed_at.sql"
+        ))
+        .expect("V53 should apply");
+
+        for (id, expected) in [
+            ("complete", Some("2026-01-01T00:00:00Z")),
+            ("half-null", None),
+            ("missing", None),
+        ] {
+            let observed_at: Option<String> = conn
+                .query_row(
+                    "SELECT api_confirmed_balance_observed_at
+                     FROM transaction_sync_state WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .expect("migrated observation time should load");
+            assert_eq!(observed_at.as_deref(), expected);
+        }
     }
 
     #[test]

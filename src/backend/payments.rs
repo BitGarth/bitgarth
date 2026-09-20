@@ -497,8 +497,23 @@ fn catalog_capabilities_are_greater(
     let Some(token_capabilities) = token_capabilities_from_history(active_history) else {
         return false;
     };
-    catalog.sync_account_slots
-        > token_capabilities.account_limit_for_schema(active_history.capability_schema_version)
+    let independent_allowance_growth = match (
+        catalog.account_allowance_policy,
+        token_capabilities
+            .limits
+            .accounts
+            .and_then(crate::payments::types::AccountLimits::validated_v4),
+    ) {
+        (crate::payments::types::AccountAllowancePolicy::Independent(catalog), Some(token)) => {
+            catalog.balance_sync() > token.balance_sync()
+                || catalog.transaction_history_sync() > token.transaction_history_sync()
+                || catalog.manual() > token.manual()
+        }
+        _ => false,
+    };
+    independent_allowance_growth
+        || catalog.sync_account_slots
+            > token_capabilities.account_limit_for_schema(active_history.capability_schema_version)
         || catalog.historical_backfill_transactions_per_account
             > token_capabilities
                 .transaction_limit_for_schema(active_history.capability_schema_version)
@@ -2248,7 +2263,7 @@ mod tests {
             if capability_schema_version == crate::payments::types::CAPABILITY_SCHEMA_VERSION_V3 {
                 EntitlementCapabilities {
                     limits: EntitlementCapabilityLimits {
-                        accounts: Some(AccountLimits {
+                        accounts: Some(AccountLimits::LegacyCombined {
                             total: sync_account_slots,
                         }),
                         synced_accounts: sync_account_slots,
@@ -2329,6 +2344,10 @@ mod tests {
             capability_set_id: Some(capability_set_id.to_string()),
             capability_schema_version,
             sync_account_slots,
+            account_allowance_policy:
+                crate::payments::types::AccountAllowancePolicy::LegacyCombined {
+                    total: sync_account_slots,
+                },
             historical_backfill_transactions_per_account: 10_000,
             historical_sync: false,
             transaction_history_sync,
@@ -2340,6 +2359,48 @@ mod tests {
             hledger_export: false,
             tax_reports: false,
         })
+    }
+
+    #[test]
+    fn v4_catalog_refresh_detects_independent_allowance_growth() {
+        use crate::payments::account_allowances::AccountAllowances;
+        use crate::payments::types::{AccountAllowancePolicy, CAPABILITY_SCHEMA_VERSION_V4};
+
+        let mut history = active_history("basic.v4", 3, 200, true);
+        history.capability_schema_version = CAPABILITY_SCHEMA_VERSION_V4;
+        let mut stored: serde_json::Value = serde_json::from_str(
+            history
+                .capabilities_json
+                .as_deref()
+                .expect("stored capabilities"),
+        )
+        .expect("stored JSON");
+        stored["capability_schema_version"] = serde_json::json!(4);
+        stored["capabilities"]["limits"]["accounts"] = serde_json::json!({
+            "balance_sync": 200,
+            "transaction_history_sync": 100,
+            "manual": 1000
+        });
+        history.capabilities_json = Some(stored.to_string());
+
+        let mut catalog = basic_catalog("basic.v4", CAPABILITY_SCHEMA_VERSION_V4, 200, true);
+        catalog.tiers[0].capabilities.account_allowance_policy =
+            AccountAllowancePolicy::Independent(
+                AccountAllowances::try_new(200, 200, 1000).expect("catalog allowances"),
+            );
+        assert!(catalog_capabilities_are_greater(
+            &catalog.tiers[0].capabilities,
+            &history
+        ));
+
+        catalog.tiers[0].capabilities.account_allowance_policy =
+            AccountAllowancePolicy::Independent(
+                AccountAllowances::try_new(200, 100, 1001).expect("catalog allowances"),
+            );
+        assert!(catalog_capabilities_are_greater(
+            &catalog.tiers[0].capabilities,
+            &history
+        ));
     }
 
     #[test]

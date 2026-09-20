@@ -1,0 +1,110 @@
+{
+  "catalog_schema_version": 4,
+  "pricing_summary": "**Free** includes balance tracking, transaction history, and manual assets. **Harvest** adds more transaction-enabled accounts, historical market prices, and tax reports.",
+  "tiers": [
+    {
+      "tier": "free",
+      "display_name": "Free",
+      "presentation": {
+        "display_order": 10,
+        "summary": "Track what you hold \u2014 local, private, and yours.",
+        "bullets": [
+          "Balance tracking for 50 supported accounts, including transaction history for your first three eligible accounts",
+          "1,000-transaction sync threshold per account; the current batch finishes and may exceed it",
+          "1,000 active manual accounts; inactive account data is retained",
+          "Balance assertions, current market prices, price overrides, and hledger/ledger-cli export"
+        ],
+        "is_featured": false,
+        "ribbon_label": null
+      },
+      "capability_set_id": "free.v4",
+      "capability_schema_version": 4,
+      "minimum_app_version": "0.4.0",
+      "capabilities": {
+        "limits": {
+          "accounts": {
+            "balance_sync": 50,
+            "transaction_history_sync": 3,
+            "manual": 1000
+          },
+          "history": {
+            "max_transactions_per_account": 1000
+          }
+        },
+        "features": {
+          "transaction_history_sync": true,
+          "balance_sync": true,
+          "balance_assertions": true,
+          "hledger_export": true,
+          "tax_reports": false,
+          "exchange_rates_current": true,
+          "exchange_rates_history": false,
+          "price_overrides": true
+        }
+      },
+      "purchase_options": []
+    },
+    {
+      "tier": "basic",
+      "display_name": "Harvest",
+      "presentation": {
+        "display_order": 20,
+        "summary": "Your transaction history and your tax season.",
+        "bullets": [
+          "Balance tracking and transaction history for your first 200 eligible supported accounts",
+          "3,000-transaction sync threshold per account; the current batch finishes and may exceed it",
+          "1,000 active manual accounts; inactive account data is retained",
+          "Balance assertions, current market prices, price overrides, and hledger/ledger-cli export",
+          "Historical market prices and tax reports"
+        ],
+        "is_featured": true,
+        "ribbon_label": "Early adopter discount"
+      },
+      "capability_set_id": "basic.v4",
+      "capability_schema_version": 4,
+      "minimum_app_version": "0.4.0",
+      "capabilities": {
+        "limits": {
+          "accounts": {
+            "balance_sync": 200,
+            "transaction_history_sync": 200,
+            "manual": 1000
+          },
+          "history": {
+            "max_transactions_per_account": 3000
+          }
+        },
+        "features": {
+          "transaction_history_sync": true,
+          "balance_sync": true,
+          "balance_assertions": true,
+          "hledger_export": true,
+          "tax_reports": true,
+          "exchange_rates_current": true,
+          "exchange_rates_history": true,
+          "price_overrides": true
+        }
+      },
+      "purchase_options": [
+        {
+          "id": "basic_12_months_usd",
+          "term": {
+            "quantity": 12,
+            "unit": "month",
+            "label": "1 year"
+          },
+          "price": {
+            "minor_units": 4995,
+            "currency": "USD",
+            "currency_symbol": "$",
+            "display_scale": 2
+          },
+          "presentation": {
+            "display_order": 20,
+            "is_default": true
+          }
+        }
+      ]
+    }
+  ]
+}

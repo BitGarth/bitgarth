@@ -793,20 +793,14 @@ mod tests {
                     "total": 0,
                 },
                 "has_derived_addresses": false,
-                "sync_slot": {
-                    "selected": false,
-                    "active": false,
-                    "can_select": true,
-                    "limit": 1,
-                    "selected_at": null,
-                    "selected_under_tier": null,
+                "account_mode": if state == crate::backend::AccountStateView::Active {
+                    "balance_only"
+                } else {
+                    "inactive"
                 },
                 "manual_sync": {
                     "mode": "balance_refresh",
-                    "slot_effect": "will_select_available_slot",
                     "disabled_reason": null,
-                    "used_slots": 0,
-                    "slot_limit": 1,
                     "next_tier_display_name": null,
                 },
             }))
@@ -904,6 +898,7 @@ mod tests {
             precision_source: "bitgarth_catalog".to_string(),
             coingecko_platform_id: None,
             provider_platform_asset_ref: None,
+            admitted_at: now,
             created_at: now,
             updated_at: now,
         }
@@ -979,6 +974,7 @@ mod tests {
             precision_source: "bitgarth_catalog".to_string(),
             coingecko_platform_id: None,
             provider_platform_asset_ref: None,
+            admitted_at: now,
             created_at: now,
             updated_at: now,
         };
@@ -1625,6 +1621,7 @@ mod tests {
             precision_source: "bitgarth_catalog".to_string(),
             coingecko_platform_id: None,
             provider_platform_asset_ref: None,
+            admitted_at: now,
             created_at: now,
             updated_at: now,
         };

@@ -93,7 +93,7 @@ pub(crate) enum FakeSyncOutcome {
 pub(crate) struct FakeAddressSyncExecutor {
     pub(crate) outcomes: VecDeque<FakeSyncOutcome>,
     pub(crate) calls: Vec<DigitalAssetAddressId>,
-    pub(crate) historical_backfill_enabled_calls: Vec<bool>,
+    pub(crate) transaction_page_permitted_calls: Vec<bool>,
     pub(crate) legacy_mempool_history_repair_calls: Vec<bool>,
     pub(crate) mempool_history_frontier_calls:
         Vec<Option<crate::db::HdMempoolHistoryFrontierUpdate>>,
@@ -107,7 +107,7 @@ impl FakeAddressSyncExecutor {
         Self {
             outcomes: VecDeque::from(outcomes),
             calls: Vec::new(),
-            historical_backfill_enabled_calls: Vec::new(),
+            transaction_page_permitted_calls: Vec::new(),
             legacy_mempool_history_repair_calls: Vec::new(),
             mempool_history_frontier_calls: Vec::new(),
             observed_lock_free: Vec::new(),
@@ -143,8 +143,8 @@ impl AddressSyncExecutor for FakeAddressSyncExecutor {
         self.observed_lock_free
             .push(lock_state.read_locks == 0 && lock_state.write_locks == 0);
         self.calls.push(request.address.address_id);
-        self.historical_backfill_enabled_calls
-            .push(request.historical_backfill_enabled);
+        self.transaction_page_permitted_calls
+            .push(request.transaction_page_permitted);
         self.legacy_mempool_history_repair_calls
             .push(request.legacy_mempool_history_repair);
         self.mempool_history_frontier_calls
@@ -292,6 +292,7 @@ impl AddressDerivationProvider for FakeAddressDerivationProvider {
                 last_completed_at: None,
                 last_result: None,
                 last_tip_height: None,
+                etherscan_transaction_tip_height: None,
                 mempool_backfill_cursor_txid: None,
                 mempool_expected_tx_count: None,
                 mempool_history_proof: None,
@@ -348,6 +349,7 @@ pub(crate) fn make_sync_address(
         last_completed_at: None,
         last_result: None,
         last_tip_height: None,
+        etherscan_transaction_tip_height: None,
         mempool_backfill_cursor_txid: None,
         mempool_expected_tx_count: None,
         mempool_history_proof: None,

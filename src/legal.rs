@@ -3,7 +3,7 @@ use crate::models::FieldErrors;
 use serde::{Deserialize, Serialize};
 
 pub(crate) const TERMS_VERSION: &str = "2026-06-25";
-pub(crate) const PRIVACY_VERSION: &str = "2026-05-18";
+pub(crate) const PRIVACY_VERSION: &str = "2026-09-19";
 pub(crate) const TERMS_URL: &str = "https://bitgarth.app/terms.html";
 pub(crate) const PRIVACY_URL: &str = "https://bitgarth.app/privacy.html";
 
