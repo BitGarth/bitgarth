@@ -457,6 +457,20 @@ jobs:
                 ''
             fi
             printf '%s\n\n' '> The bitgarth-web downloads contain the BitGarth web server and its required browser assets and asset catalog. Extract the entire archive and run bitgarth-web (bitgarth-web.exe on Windows) from the extracted directory. The bitgarth-cli downloads contain the companion command-line client for a BitGarth server. See the [web server download instructions](https://github.com/BitGarth/bitgarth#web-server-downloads) for runtime requirements and the [installation options](https://bitgarth.app/#install) for other ways to run BitGarth.'
+            if [[ "$macos_any_available" == "true" ]]; then
+              printf '%s\n' \
+                '> [!IMPORTANT]' \
+                '> **Do not double-click the macOS downloads in Finder — run them from' \
+                '> your terminal.** These are command-line programs, not app bundles, so' \
+                '> Finder refuses them with "Apple could not verify" and offers no way to' \
+                '> continue. Instead, in your terminal, `cd` to the extracted directory and' \
+                '> run `./bitgarth` (or `./bitgarth-web`). macOS shows a one-time' \
+                '> "downloaded from the Internet" prompt: click **Open**. After that the' \
+                '> binary runs normally from anywhere, including from Finder. Both macOS' \
+                '> downloads are signed and notarized by FernTrail B.V.; Finder refuses' \
+                '> every bare command-line binary regardless of notarization.' \
+                ''
+            fi
             cat "$notes"
           } > "$github_notes"
 

@@ -45,6 +45,15 @@ the catalog's relative path resolves:
 ./bitgarth-web
 ```
 
+On macOS, do not double-click `bitgarth-web` in Finder — run it from your
+terminal. It is a command-line program, not an app bundle, so Finder refuses it
+with "Apple could not verify" and offers no way to continue. Run
+`./bitgarth-web` in your terminal instead, then click **Open** at the one-time
+"downloaded from the Internet" prompt; afterwards it launches normally from
+anywhere, including from Finder. The macOS downloads are signed and notarized
+by FernTrail B.V. — Finder refuses every bare command-line binary regardless of
+notarization.
+
 On Windows, run `./bitgarth-web.exe` in PowerShell instead. Open
 [http://127.0.0.1:8080](http://127.0.0.1:8080) in a browser. `IP` and `PORT`
 override the listen address; `BITGARTH_PROJECT_DIR` selects the persistent data
@@ -131,6 +140,16 @@ Build or install the `bitgarth` CLI from the workspace:
 ```shell
 cargo install --path crates/bitgarth-cli
 ```
+
+Prebuilt `bitgarth-cli` archives are also on
+[GitHub Releases](https://github.com/BitGarth/bitgarth/releases). On macOS, do
+not double-click the extracted `bitgarth` in Finder — run it from your
+terminal. It is a command-line program, not an app bundle, so Finder refuses it
+with "Apple could not verify" and offers no way to continue. Run `./bitgarth`
+in your terminal instead, then click **Open** at the one-time "downloaded from
+the Internet" prompt; afterwards it launches normally from anywhere, including
+from Finder. The macOS download is signed and notarized by FernTrail B.V. —
+Finder refuses every bare command-line binary regardless of notarization.
 
 Pair interactively, or provide every value for scripts:
 
