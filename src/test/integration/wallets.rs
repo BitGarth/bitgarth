@@ -308,23 +308,8 @@ async fn test_get_wallets_happy_path_returns_balances_contract() {
     assert_eq!(balance["network_id"], "ethereum-mainnet");
     assert_eq!(balance["unit_code"], "ETH");
     assert_eq!(balance["symbol"], "Ξ");
-    assert_eq!(
-        balance["balance_state"],
-        json!({
-            "kind": "known",
-            "amount": {
-                "raw_value": "0",
-                "formatted_value": "0"
-            }
-        })
-    );
-    assert_eq!(
-        balance["balance_reliability"],
-        json!({
-            "kind": "provisional",
-            "reasons": ["first_successful_sync_pending"]
-        })
-    );
+    assert_eq!(balance["balance_state"], json!({ "kind": "unknown" }));
+    assert_eq!(balance["balance_reliability"], json!({ "kind": "final" }));
 
     let accounts = wallet["accounts"]
         .as_array()
@@ -356,13 +341,7 @@ async fn test_get_wallets_happy_path_returns_balances_contract() {
     assert_eq!(account_balance["symbol"], "Ξ");
     assert_eq!(
         account_balance["balance_state"],
-        json!({
-            "kind": "known",
-            "amount": {
-                "raw_value": "0",
-                "formatted_value": "0"
-            }
-        })
+        json!({ "kind": "unknown" })
     );
     assert_eq!(
         account_balance["balance_reliability"],
@@ -458,14 +437,12 @@ async fn test_get_wallets_includes_value_summary_when_price_fetching_enabled() {
         .as_object()
         .expect("summary should be present");
     assert_eq!(summary["total_asset_count"], 1);
-    assert_eq!(summary["priced_asset_count"], 1);
+    assert_eq!(summary["priced_asset_count"], 0);
     assert_eq!(summary["priced_total"], "0");
     assert_eq!(summary["currency"], "USD");
 
     let current_value = &body["wallets"][0]["balances"][0]["current_value"];
-    assert_eq!(current_value["price"], "1000");
-    assert_eq!(current_value["converted_value"], "0");
-    assert_eq!(current_value["currency"], "USD");
+    assert!(current_value.is_null());
 }
 
 #[tokio::test(flavor = "current_thread")]

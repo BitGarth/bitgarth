@@ -158,6 +158,52 @@ use url as _;
 ))]
 const MAX_SERVER_FN_BODY_BYTES: usize = 12 * 1024 * 1024;
 
+/// How long in-flight requests may finish after a shutdown signal. Sync-event SSE
+/// streams never end on their own, so an unbounded graceful drain would last until
+/// the orchestrator's SIGKILL.
+#[cfg(all(
+    feature = "server",
+    not(feature = "desktop"),
+    not(target_arch = "wasm32")
+))]
+const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Resolves on SIGINT or SIGTERM. The Docker image runs this binary as PID 1, where
+/// the kernel ignores SIGTERM unless a handler is installed.
+#[cfg(all(
+    feature = "server",
+    not(feature = "desktop"),
+    not(target_arch = "wasm32")
+))]
+async fn shutdown_signal() {
+    let interrupt = async {
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            tracing::error!(error = %err, "failed to listen for SIGINT");
+            std::future::pending::<()>().await;
+        }
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "failed to listen for SIGTERM");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    let signal = tokio::select! {
+        () = interrupt => "SIGINT",
+        () = terminate => "SIGTERM",
+    };
+    tracing::info!(signal, "Shutting down");
+}
+
 /// Auth status for session restoration.
 #[derive(Clone, Debug)]
 pub enum AuthStatus {
@@ -571,12 +617,31 @@ fn main() {
         runtime.spawn(pairing_cleanup_store.run_expiry_cleanup());
         let result = runtime.block_on(async move {
             let listener = tokio::net::TcpListener::bind(address).await?;
-            axum::serve(
+            let (signal_tx, signal_rx) = tokio::sync::oneshot::channel();
+            let server = axum::serve(
                 listener,
                 router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )
-            .await
+            .with_graceful_shutdown(async move {
+                shutdown_signal().await;
+                let _ = signal_tx.send(());
+            });
+            tokio::select! {
+                result = server => result,
+                // The sleep must live inside the branch future: select! drops `server`
+                // before running a handler, which would skip the drain.
+                () = async {
+                    let _ = signal_rx.await;
+                    tokio::time::sleep(SHUTDOWN_DRAIN_TIMEOUT).await;
+                } => {
+                    tracing::warn!("Shutdown drain timed out; closing open connections");
+                    Ok(())
+                }
+            }
         });
+        // Don't wait on blocking tasks; in-flight requests already had the drain window.
+        runtime.shutdown_background();
+        tracing::info!("Shutdown complete");
         if let Err(err) = result {
             eprintln!("server failed: {err}");
             std::process::exit(1);

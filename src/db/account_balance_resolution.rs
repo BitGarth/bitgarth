@@ -46,6 +46,13 @@ pub(crate) struct BoundaryAccountBalanceInputs {
 pub(crate) fn resolve_current_account_balance_state(
     inputs: CurrentAccountBalanceInputs,
 ) -> AccountBalanceDisplayState {
+    if !inputs.free_balance_unavailable
+        && let (Some(amount), Some(as_of)) =
+            (inputs.api_confirmed_amount, inputs.api_confirmed_as_of)
+    {
+        return AccountBalanceDisplayState::KnownApiConfirmed { amount, as_of };
+    }
+
     if let Some(amount) = inputs.ledger_amount {
         return AccountBalanceDisplayState::KnownLedger {
             amount,
@@ -55,10 +62,6 @@ pub(crate) fn resolve_current_account_balance_state(
 
     if inputs.free_balance_unavailable {
         return AccountBalanceDisplayState::UnavailableOnFree;
-    }
-
-    if let (Some(amount), Some(as_of)) = (inputs.api_confirmed_amount, inputs.api_confirmed_as_of) {
-        return AccountBalanceDisplayState::KnownApiConfirmed { amount, as_of };
     }
 
     AccountBalanceDisplayState::Unknown
@@ -130,21 +133,21 @@ mod tests {
     }
 
     #[test]
-    fn current_balance_preserves_ledger_zero_over_api_confirmed_amount() {
-        let as_of = at(100);
+    fn current_balance_uses_api_confirmed_over_ledger_amount() {
+        let api_as_of = at(200);
         let state = resolve_current_account_balance_state(CurrentAccountBalanceInputs {
             ledger_amount: Some(UnsignedAmount::zero()),
-            ledger_as_of: Some(as_of),
+            ledger_as_of: Some(at(100)),
             api_confirmed_amount: Some(amount(50)),
-            api_confirmed_as_of: Some(at(200)),
+            api_confirmed_as_of: Some(api_as_of),
             free_balance_unavailable: false,
         });
 
         assert_eq!(
             state,
-            AccountBalanceDisplayState::KnownLedger {
-                amount: UnsignedAmount::zero(),
-                as_of: Some(as_of),
+            AccountBalanceDisplayState::KnownApiConfirmed {
+                amount: amount(50),
+                as_of: api_as_of,
             }
         );
     }

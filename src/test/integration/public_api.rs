@@ -677,7 +677,7 @@ async fn wallet_balances_authenticates_client_key_without_creating_a_session() {
         body["wallets"][0]["balances"][0]["network_id"],
         "ethereum-mainnet"
     );
-    assert_eq!(body["wallets"][0]["balances"][0]["amount"], "0");
+    assert!(body["wallets"][0]["balances"][0]["amount"].is_null());
 
     let capability_id = pairing["pairing_id"].as_str().unwrap().parse().unwrap();
     let capability = crate::db::load_client_capability(capability_id)

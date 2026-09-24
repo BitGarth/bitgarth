@@ -10,7 +10,7 @@ resolver = "3"
 members = ["crates/bitgarth-cli"]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.4.2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -50,7 +50,7 @@ zeroize = { version = "1.9.0", optional = true, features = ["derive"] }
 axum = { version = "0.8.9", optional = true }
 axum-extra = { version = "0.12.6", optional = true, features = ["cookie"] }
 cookie = { version = "0.18.2", optional = true }
-tokio = { version = "1.53.1", optional = true, features = ["rt", "rt-multi-thread", "sync", "time", "net"] }
+tokio = { version = "1.53.1", optional = true, features = ["rt", "rt-multi-thread", "sync", "time", "net", "signal"] }
 tokio-stream = { version = "0.1.19", optional = true }
 zip = { version = "8.6.0", optional = true, default-features = false, features = ["aes-crypto", "deflate-flate2"] }
 pulldown-cmark = { version = "0.13.4", optional = true, default-features = false, features = ["html"] }

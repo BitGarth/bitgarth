@@ -279,7 +279,7 @@ fn load_account_model_balance(
             NativeBalanceState::KnownAmount(UnsignedAmount::zero())
         }
         AccountBalanceDisplayState::Unknown | AccountBalanceDisplayState::UnavailableOnFree => {
-            NativeBalanceState::KnownAmount(UnsignedAmount::zero())
+            NativeBalanceState::Unknown
         }
     };
 
@@ -473,9 +473,7 @@ pub(super) fn load_grouped_account_ledger_balances(
                     NativeBalanceState::KnownAmount(UnsignedAmount::zero())
                 }
                 AccountBalanceDisplayState::Unknown
-                | AccountBalanceDisplayState::UnavailableOnFree => {
-                    NativeBalanceState::KnownAmount(UnsignedAmount::zero())
-                }
+                | AccountBalanceDisplayState::UnavailableOnFree => NativeBalanceState::Unknown,
             }
         };
 
@@ -1467,6 +1465,7 @@ pub(crate) fn seed_ethereum_account_balances_fixture(
 mod tests {
     use super::*;
     use crate::db::{acquire_test_runtime, initialize_user_db_for_test};
+    use crate::ethereum::{EthAddress, RawEthAddress};
     use crate::transactions::TxHash;
     use crate::wallets::{BtcAddress, Label, RawBtcAddress, WALLET_LABEL_MAX_LENGTH};
 
@@ -1553,6 +1552,48 @@ mod tests {
         let result = load_all_account_balances(user_id).expect("query should succeed");
         assert!(result.accounts.is_empty());
         assert!(result.totals.is_empty());
+    }
+
+    fn seed_empty_ethereum_account(user_id: UserId) -> DigitalAssetAccountId {
+        let raw = RawEthAddress::new("0x52908400098527886E0F7030069857D2E4169EE7".to_string());
+        let address = EthAddress::parse(&raw).expect("Ethereum fixture address should be valid");
+        let label = Label::parse_with_limit("ETH Unknown Wallet", WALLET_LABEL_MAX_LENGTH)
+            .expect("wallet label should be valid");
+        crate::db::add_ethereum_address(
+            user_id,
+            &address,
+            Network::Mainnet,
+            None,
+            Some(&label),
+            parse_datetime("2026-02-12T10:00:00Z").expect("fixture time should be valid"),
+        )
+        .expect("Ethereum account should be created")
+        .account_id
+    }
+
+    #[test]
+    fn load_all_account_balances_preserves_unknown_ethereum_balance() {
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let user_id = UserId::new();
+        initialize_user_db_for_test(user_id).expect("user db should initialize");
+        let account_id = seed_empty_ethereum_account(user_id);
+
+        let result = load_all_account_balances(user_id).expect("query should succeed");
+        let account = result
+            .accounts
+            .iter()
+            .find(|account| account.account_id == account_id)
+            .expect("Ethereum account should be present");
+
+        assert_eq!(
+            account.account_balance.confirmed,
+            NativeBalanceState::Unknown
+        );
+        assert_eq!(
+            account.addresses[0].balance.confirmed,
+            NativeBalanceState::Unknown
+        );
+        assert_eq!(result.totals[0].confirmed, NativeBalanceState::Unknown);
     }
 
     #[test]
@@ -1656,6 +1697,48 @@ mod tests {
     }
 
     #[test]
+    fn current_ethereum_provider_balance_overrides_truncated_ledger_closing() {
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let user_id = UserId::new();
+        initialize_user_db_for_test(user_id).expect("user db should initialize");
+        let (account_id, address_id) =
+            seed_ethereum_account_balances_fixture(user_id).expect("fixture should insert");
+        let run_id = crate::transactions::TransactionSyncRunId::new();
+        let started = parse_datetime("2026-05-03T18:00:00Z").expect("valid started_at");
+        let completed = parse_datetime("2026-05-03T18:02:05Z").expect("valid completed_at");
+        let provider_balance = UnsignedAmount::from_u128(6_717_890_894_598_020_373);
+
+        crate::db::mark_address_sync_started(user_id, address_id, run_id, started)
+            .expect("sync start should persist");
+        crate::db::mark_address_sync_completed_success(
+            user_id,
+            &crate::db::AddressSyncSuccess {
+                address_id,
+                run_id,
+                started_at: started,
+                completed_at: completed,
+                last_tip_height: crate::transactions::ChainTipHeight::try_new(1)
+                    .expect("tip should be valid"),
+                new_tx_count: crate::transactions::TransactionCount::zero(),
+                updated_tx_count: crate::transactions::TransactionCount::zero(),
+                api_confirmed_balance: Some(ApiConfirmedBalance::from_amount(provider_balance)),
+            },
+        )
+        .expect("sync success should persist");
+
+        let balances = with_user_db(user_id, load_grouped_account_ledger_balances)
+            .expect("query should succeed");
+
+        assert_eq!(
+            balances
+                .get(&account_id)
+                .expect("account should be present")
+                .confirmed,
+            NativeBalanceState::KnownAmount(provider_balance)
+        );
+    }
+
+    #[test]
     fn load_grouped_account_ledger_balances_returns_unknown_without_provider_balance() {
         let _runtime = acquire_test_runtime().expect("test runtime should initialize");
         let user_id = UserId::new();
@@ -1670,6 +1753,25 @@ mod tests {
             .get(&account_id)
             .expect("account should be present even without ledger entries");
         assert_eq!(balance.confirmed, NativeBalanceState::Unknown);
+    }
+
+    #[test]
+    fn load_grouped_account_balances_preserves_unknown_ethereum_balance() {
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let user_id = UserId::new();
+        initialize_user_db_for_test(user_id).expect("user db should initialize");
+        let account_id = seed_empty_ethereum_account(user_id);
+
+        let balances = with_user_db(user_id, load_grouped_account_ledger_balances)
+            .expect("query should succeed");
+
+        assert_eq!(
+            balances
+                .get(&account_id)
+                .expect("Ethereum account should be present")
+                .confirmed,
+            NativeBalanceState::Unknown
+        );
     }
 
     #[test]

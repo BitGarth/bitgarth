@@ -384,13 +384,31 @@ fn net_worth_sub_text(summary: &WalletsValueSummaryView) -> String {
             .total_asset_count
             .saturating_sub(summary.priced_asset_count);
         let noun = if unpriced == 1 { "asset" } else { "assets" };
-        format!("{wallets} · {unpriced} {noun} without a price")
+        format!("{wallets} · {unpriced} {noun} without a balance or price")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn net_worth_discloses_assets_without_balance_or_price() {
+        let summary = WalletsValueSummaryView {
+            priced_total: "100".to_string(),
+            currency: crate::models::CurrencyCode::from_code("USD")
+                .expect("currency should be valid"),
+            priced_asset_count: 1,
+            total_asset_count: 2,
+            priced_wallet_count: 1,
+            total_wallet_count: 1,
+        };
+
+        assert_eq!(
+            net_worth_sub_text(&summary),
+            "across 1 wallet · 1 asset without a balance or price"
+        );
+    }
 
     #[test]
     fn sync_bridge_script_keeps_single_cleanable_browser_bridge() {

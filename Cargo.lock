@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "bitgarth-app"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -699,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "bitgarth-cli"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -6960,6 +6960,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
