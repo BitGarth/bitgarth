@@ -164,8 +164,8 @@ echo "unexpected docker invocation: $*" >&2
 exit 1
 SH
 
-    ln -s /usr/bin/dirname "${FAKE_BIN}/dirname"
-    chmod +x "${FAKE_BIN}/uname" "${FAKE_BIN}/docker"
+    printf '#!/bin/bash\n/usr/bin/dirname "$@"\n' > "${FAKE_BIN}/dirname"
+    chmod +x "${FAKE_BIN}/uname" "${FAKE_BIN}/docker" "${FAKE_BIN}/dirname"
 }
 
 setup_fixture() {

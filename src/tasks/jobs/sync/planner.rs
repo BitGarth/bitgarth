@@ -367,8 +367,7 @@ pub(super) fn ordered_active_mempool_history_address_ids<'a>(
         .into_iter()
         .filter(|address| {
             active_address_ids.contains(&address.address_id)
-                || (address.mempool_history_proof.is_none()
-                    && mempool_history_requires_first_page_restart(address))
+                || mempool_history_requires_first_page_restart(address)
         })
         .collect::<Vec<_>>();
     let start = frontier_address_id
@@ -598,6 +597,22 @@ mod tests {
         assert!(!policy.permits_transaction_page(TransactionCount::from_u32(4)));
         assert_eq!(ordered[0], address_1.address_id);
         assert_eq!(ordered[1], address_3.address_id);
+    }
+
+    #[test]
+    fn breadth_selects_zero_proof_address_when_first_transaction_appears() {
+        let account_id = DigitalAssetAccountId::new();
+        let mut address = btc_address(account_id, "zeroproof");
+        address.mempool_history_proof = Some(crate::db::MempoolHistoryProof {
+            confirmed_tx_count: TransactionCount::zero(),
+            complete_height: ChainTipHeight::try_new(10).expect("height should parse"),
+        });
+        address.mempool_expected_tx_count = Some(TransactionCount::from_u32(1));
+
+        assert_eq!(
+            ordered_active_mempool_history_address_ids([&address], &HashSet::new(), None),
+            vec![address.address_id]
+        );
     }
 
     #[test]

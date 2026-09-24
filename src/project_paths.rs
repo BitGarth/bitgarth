@@ -3,7 +3,7 @@
 //! Pure path builders live alongside small side-effecting helpers that
 //! ensure directories exist when needed.
 
-use crate::db::DbError;
+use crate::db::{AppDbStage, DbError};
 use crate::models::UserId;
 use directories::ProjectDirs;
 use once_cell::sync::Lazy;
@@ -43,11 +43,7 @@ fn parse_project_dir_override(value: &OsStr) -> Result<PathBuf, DbError> {
         )));
     }
 
-    std::fs::create_dir_all(&path).map_err(|e| {
-        DbError::new(format!(
-            "Environment variable {PROJECT_DIR_OVERRIDE_ENV} could not create directory {path:?}: {e}"
-        ))
-    })?;
+    std::fs::create_dir_all(&path).map_err(|e| DbError::from_app_io_error(AppDbStage::Path, e))?;
 
     if !path.is_dir() {
         return Err(DbError::new(format!(
@@ -63,6 +59,15 @@ fn parse_project_dir_override(value: &OsStr) -> Result<PathBuf, DbError> {
 /// If `BITGARTH_PROJECT_DIR` is set, it must point to an existing absolute
 /// directory and that path is used as the project root.
 pub(crate) fn get_project_dir() -> Result<PathBuf, DbError> {
+    get_project_dir_with_context().map_err(|failure| failure.error)
+}
+
+pub(crate) struct ProjectDirFailure {
+    pub(crate) project_root: Option<PathBuf>,
+    pub(crate) error: DbError,
+}
+
+pub(crate) fn get_project_dir_with_context() -> Result<PathBuf, ProjectDirFailure> {
     if let Some(runtime_context) = crate::runtime_context::current_runtime_context() {
         return Ok(runtime_context.project_dir().to_path_buf());
     }
@@ -79,10 +84,19 @@ pub(crate) fn get_project_dir() -> Result<PathBuf, DbError> {
     }
 
     if let Some(override_value) = std::env::var_os(PROJECT_DIR_OVERRIDE_ENV) {
-        return parse_project_dir_override(&override_value);
+        return parse_project_dir_override(&override_value).map_err(|error| {
+            let path = PathBuf::from(override_value);
+            ProjectDirFailure {
+                project_root: path.is_absolute().then_some(path),
+                error,
+            }
+        });
     }
 
-    default_project_dir()
+    default_project_dir().map_err(|error| ProjectDirFailure {
+        project_root: None,
+        error,
+    })
 }
 
 fn default_project_dir() -> Result<PathBuf, DbError> {
@@ -138,14 +152,6 @@ pub(crate) fn app_database_path_from_project_dir(project_dir: &Path) -> PathBuf 
     let app_dir = app_dir_from_project_dir(project_dir);
     let app_data_dir = app_data_dir_from_app_dir(&app_dir);
     app_database_path_from_app_data_dir(&app_data_dir)
-}
-
-/// Side-effecting function: get `{project_dir}/app/data/app.db`.
-pub(crate) fn get_app_database_path() -> Result<PathBuf, DbError> {
-    let project_dir = get_project_dir()?;
-    let app_data_dir = app_data_dir_from_app_dir(&app_dir_from_project_dir(&project_dir));
-    ensure_dir_exists(&app_data_dir)?;
-    Ok(app_database_path_from_project_dir(&project_dir))
 }
 
 /// Pure function: build `{app_data_dir}/prices`.
@@ -709,8 +715,15 @@ mod tests {
         let file_path = base.join("project-root-file");
         std::fs::write(&file_path, "not a directory").expect("temp file should be created");
 
-        let result = parse_project_dir_override(file_path.as_os_str());
-        assert!(result.is_err());
+        let error =
+            parse_project_dir_override(file_path.as_os_str()).expect_err("file is not a root");
+        let expected = std::fs::create_dir_all(&file_path).expect_err("same filesystem failure");
+        let metadata = error.app_initialization().expect("retain filesystem cause");
+        assert_eq!(metadata.stage, crate::db::AppDbStage::Path);
+        assert!(matches!(&metadata.kind,
+            crate::db::AppDbFailureKind::Io { kind, raw_os_error }
+                if *kind == expected.kind() && *raw_os_error == expected.raw_os_error()
+        ));
 
         let _ = std::fs::remove_file(&file_path);
         let _ = std::fs::remove_dir_all(&base);

@@ -38,7 +38,8 @@ use super::error::UserTransactionMonitorError;
 use super::executor::{AddressSyncExecutor, recover_interrupted_mempool_account};
 use super::gate::{
     SyncSingleAddressControlRequest, TransactionFetchPolicy, default_api_provider_for_asset,
-    integration_for_asset, load_account_transaction_count_for_fetch_policy, requires_provider,
+    integration_for_asset, load_account_transaction_count_for_fetch_policy,
+    mempool_history_requires_first_page_restart, requires_provider,
     sync_single_address_with_controls,
 };
 use super::hd_scan::{AddressDerivationProvider, HdBundleScanRequest, run_hd_bundle_scan};
@@ -727,6 +728,8 @@ fn address_has_unfinished_work(
 
 fn has_unfinished_transaction_work(address: &SyncAddress) -> bool {
     unfinished_backfill_state(address).is_some()
+        || (default_api_provider_for_asset(address.asset_id) == SyncProviderId::MempoolSpace
+            && mempool_history_requires_first_page_restart(address))
         || (default_api_provider_for_asset(address.asset_id) == SyncProviderId::Etherscan
             && address.last_tip_height.is_some()
             && address.etherscan_transaction_tip_height != address.last_tip_height)
@@ -823,8 +826,11 @@ fn filter_hd_bundles_for_active_native_accounts(
         .collect()
 }
 
-fn reload_has_unfinished_sync_work(user_id: UserId) -> Result<bool, UserTransactionMonitorError> {
-    Ok(!reload_unfinished_sync_integrations(user_id)?.is_empty())
+fn reload_has_unfinished_sync_work(
+    user_id: UserId,
+    now: DateTime<Utc>,
+) -> Result<bool, UserTransactionMonitorError> {
+    Ok(!reload_unfinished_sync_integrations(user_id, now)?.is_empty())
 }
 
 fn load_transaction_page_permission(
@@ -859,10 +865,10 @@ fn load_transaction_page_permission(
     Ok(normal_policy.permits_transaction_page(stored_count))
 }
 
-fn reload_unfinished_sync_integrations(
+pub(crate) fn reload_unfinished_sync_integrations(
     user_id: UserId,
+    now: DateTime<Utc>,
 ) -> Result<HashSet<SyncIntegrationId>, UserTransactionMonitorError> {
-    let now = Utc::now();
     let entitlements = crate::payments::entitlements::load_feature_entitlements(user_id, now)?;
     let native_modes =
         crate::db::account_limits::native_account_modes_for_user(user_id, &entitlements)?;
@@ -1073,7 +1079,7 @@ fn publish_and_log_sync_completed(
 }
 
 struct AutomaticRunFailure {
-    error: UserTransactionMonitorError,
+    error: Box<UserTransactionMonitorError>,
     message: SyncErrorMessage,
     addresses_failed: AddressCount,
 }
@@ -1089,7 +1095,7 @@ impl From<UserTransactionMonitorError> for AutomaticRunFailure {
     fn from(error: UserTransactionMonitorError) -> Self {
         let message = SyncErrorMessage::sanitize(error.to_string());
         Self {
-            error,
+            error: Box::new(error),
             message,
             addresses_failed: AddressCount::zero(),
         }
@@ -1134,7 +1140,7 @@ fn finish_automatic_run(
                     failure.addresses_failed,
                 ),
             );
-            Err(failure.error)
+            Err(*failure.error)
         }
     }
 }
@@ -1271,7 +1277,8 @@ fn run_automatic_inner_with_runner(
         let mut summary = empty_sync_summary(run.run_id, total_addresses);
         summary.pagination_cache_hits = http_counters.pagination_cache_hits();
         summary.total_api_calls = http_counters.total_api_calls();
-        let has_unfinished_work = reload_has_unfinished_sync_work(run.user_id)?;
+        let has_unfinished_work =
+            reload_has_unfinished_sync_work(run.user_id, run.clock.utc_now())?;
         summary.schedule_hint = compute_user_transaction_monitor_schedule_hint(
             UserTransactionMonitorSchedulePolicyInput {
                 source,
@@ -1393,7 +1400,8 @@ fn run_automatic_inner_with_runner(
         .count();
     summary.pagination_cache_hits = http_counters.pagination_cache_hits();
     summary.total_api_calls = http_counters.total_api_calls();
-    let unfinished_integrations = reload_unfinished_sync_integrations(run.user_id)?;
+    let unfinished_integrations =
+        reload_unfinished_sync_integrations(run.user_id, run.clock.utc_now())?;
     summary.schedule_hint = schedule_hint_for_parent_run(
         run,
         source,
@@ -1484,7 +1492,9 @@ fn run_automatic_inner_with_runner(
             ))
         });
         Err(AutomaticRunFailure {
-            error: UserTransactionMonitorError::Http(error_msg.as_str().to_string()),
+            error: Box::new(UserTransactionMonitorError::Http(
+                error_msg.as_str().to_string(),
+            )),
             message: error_msg,
             addresses_failed: summary.addresses_failed,
         })
@@ -2689,6 +2699,11 @@ mod tests {
     }
 
     #[test]
+    fn automatic_run_failure_stays_below_clippy_result_error_threshold() {
+        assert!(std::mem::size_of::<AutomaticRunFailure>() < 128);
+    }
+
+    #[test]
     fn pre_cycle_infrastructure_error_reports_one_terminal_failure() {
         assert_injected_automatic_error_reports_one_failure(|_, _, _| {
             Err(UserTransactionMonitorError::Db(crate::db::DbError::new(
@@ -2733,7 +2748,9 @@ mod tests {
                 .failure_error
                 .expect("failed cycle should retain its error");
             Err(AutomaticRunFailure {
-                error: UserTransactionMonitorError::Http(message.as_str().to_string()),
+                error: Box::new(UserTransactionMonitorError::Http(
+                    message.as_str().to_string(),
+                )),
                 message,
                 addresses_failed: summary.addresses_failed,
             })
@@ -3267,7 +3284,10 @@ mod tests {
                 capped_address.mempool_backfill_cursor_txid,
                 Some(stale_cursor)
             );
-            assert_eq!(capped_address.mempool_expected_tx_count, None);
+            assert_eq!(
+                capped_address.mempool_expected_tx_count,
+                Some(TransactionCount::from_u32(2))
+            );
 
             clock.sleep(Duration::from_secs(91));
             let raised_run = next_run_for_user(&clock, capped_run.user_id);
@@ -3427,6 +3447,129 @@ mod tests {
             assert_eq!(
                 crate::db::load_canonical_confirmed_account_transaction_count(
                     run.user_id,
+                    account_id,
+                )
+                .expect("canonical transaction count should load"),
+                TransactionCount::from_u32(1)
+            );
+        });
+    }
+
+    #[test]
+    fn hd_discovery_stats_visit_hands_unproven_history_to_next_breadth_round() {
+        with_rate_limiter_isolated(|| {
+            let clock = FakeClock::new(test_utc_now());
+            let discovery_run = make_run_context(&clock);
+            let account_id = DigitalAssetAccountId::new();
+            let address = make_sync_address(
+                "bc1qdiscoveredfreshhdhistory",
+                SyncedAssetId::Bitcoin,
+                Network::Mainnet,
+                Some(account_id),
+                Some(crate::wallets::AddressScheme::NativeSegwit),
+                Some(0),
+                Some(0),
+            );
+            persist_sync_addresses_for_test(discovery_run, std::slice::from_ref(&address));
+            seed_account_history_frontier(discovery_run, account_id, address.address_id, 0);
+            let pending = HashSet::new();
+
+            // HD discovery visits a fresh address stats-only (CurrentOnly).
+            let discovery_server =
+                start_historical_sync_mempool_server(vec![mempool_stats_json(1)]);
+            let discovery_http_counters = SyncHttpCounters::new();
+            let discovery_client = live_mempool_client(
+                discovery_run.user_id,
+                &discovery_server.base_url,
+                &discovery_http_counters,
+            );
+            let mut discovery_bundle = load_test_hd_bundle(discovery_run, account_id);
+            let mut discovery_chain_tip_cache = cached_bitcoin_chain_tip(&clock);
+            let mut discovery_accumulator = CycleAccumulator::new(1);
+            let mut discovery_executor = LiveAddressSyncExecutor::new();
+            let mut processed_for_account = 0_u32;
+            sync_single_address_with_controls(SyncSingleAddressControlRequest {
+                run: discovery_run,
+                address: &mut discovery_bundle.external_addresses[0],
+                chain_tip_cache: &mut discovery_chain_tip_cache,
+                pending_address_ids: &pending,
+                clients: SyncClients {
+                    mempool_client: Some(&discovery_client),
+                    etherscan_api_key: None,
+                    etherscan_base_url: None,
+                    http_counters: &discovery_http_counters,
+                },
+                executor: &mut discovery_executor,
+                accumulator: &mut discovery_accumulator,
+                processed_for_account: &mut processed_for_account,
+                single_address_progress: None,
+                transaction_fetch_policy: TransactionFetchPolicy::CurrentOnly,
+                mempool_history_page_frontier: None,
+            })
+            .expect("discovery stats visit should succeed");
+            assert_eq!(
+                discovery_server.join(),
+                vec![format!(
+                    "GET /api/address/{} HTTP/1.1",
+                    address.address.as_str()
+                )]
+            );
+
+            // The automatic follow-up runs 60s later, inside the 90s success
+            // cooldown, and has no stored transactions, so known activity is empty.
+            clock.sleep(Duration::from_secs(60));
+            let history_run = RunContext {
+                source: TriggerSource::AutoFreshness,
+                ..next_run_for_user(&clock, discovery_run.user_id)
+            };
+            let history_server = start_historical_sync_mempool_server(vec![
+                mempool_stats_json(1),
+                mempool_page_json(
+                    &address,
+                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                ),
+            ]);
+            let history_http_counters = SyncHttpCounters::new();
+            let history_client = live_mempool_client(
+                history_run.user_id,
+                &history_server.base_url,
+                &history_http_counters,
+            );
+            let mut history_bundle = load_test_hd_bundle(history_run, account_id);
+            let mut history_chain_tip_cache = cached_bitcoin_chain_tip(&clock);
+            let mut history_accumulator = CycleAccumulator::new(1);
+            let mut history_executor = LiveAddressSyncExecutor::new();
+
+            run_hd_mempool_history_breadth_round(HdMempoolHistoryBreadthRoundRequest {
+                run: history_run,
+                clients: SyncClients {
+                    mempool_client: Some(&history_client),
+                    etherscan_api_key: None,
+                    etherscan_base_url: None,
+                    http_counters: &history_http_counters,
+                },
+                pending_address_ids: &pending,
+                bundle: &mut history_bundle,
+                known_activity: &HashSet::new(),
+                chain_tip_cache: &mut history_chain_tip_cache,
+                accumulator: &mut history_accumulator,
+                sync_executor: &mut history_executor,
+                policy: TransactionFetchPolicy::Normal {
+                    cap: TransactionCount::from_u32(1000),
+                },
+            })
+            .expect("history breadth round should succeed");
+
+            assert_eq!(
+                history_server.join(),
+                vec![
+                    format!("GET /api/address/{} HTTP/1.1", address.address.as_str()),
+                    format!("GET /api/address/{}/txs HTTP/1.1", address.address.as_str()),
+                ]
+            );
+            assert_eq!(
+                crate::db::load_canonical_confirmed_account_transaction_count(
+                    history_run.user_id,
                     account_id,
                 )
                 .expect("canonical transaction count should load"),
@@ -4632,6 +4775,30 @@ mod tests {
             .expect("cursor should parse"),
         );
 
+        assert!(!address_has_unfinished_work(
+            &address,
+            &HashSet::new(),
+            false
+        ));
+        assert!(address_has_unfinished_work(&address, &HashSet::new(), true));
+    }
+
+    #[test]
+    fn discovered_mempool_history_is_unfinished_only_when_a_page_is_permitted() {
+        let mut address = make_sync_address(
+            "bc1qdiscoveredhistoryunfinished",
+            SyncedAssetId::Bitcoin,
+            Network::Mainnet,
+            Some(DigitalAssetAccountId::new()),
+            None,
+            None,
+            None,
+        );
+        address.last_tip_height = Some(ChainTipHeight::try_new(100).expect("valid tip"));
+        address.last_result = Some(TransactionSyncResult::Success);
+        address.mempool_expected_tx_count = Some(TransactionCount::from_u32(1));
+
+        assert!(has_unfinished_transaction_work(&address));
         assert!(!address_has_unfinished_work(
             &address,
             &HashSet::new(),

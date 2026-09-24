@@ -106,7 +106,7 @@ async function assertRejectsProductOptionsBody(body, pattern) {
   );
 }
 
-test("fetchProductionProductOptions sends production URL and signing-key hash header", async () => {
+test("fetchProductionProductOptions sends production URL and compatibility headers", async () => {
   let observedUrl = null;
   let observedOptions = null;
   const body = minimalProductOptionsResponse();
@@ -128,6 +128,32 @@ test("fetchProductionProductOptions sends production URL and signing-key hash he
     observedOptions.headers[EXPECTED_SIGNING_KEY_HASH_HEADER],
     PRODUCTION_EXPECTED_SIGNING_KEY_HASH,
   );
+  assert.equal(
+    observedOptions.headers["X-BitGarth-Supported-Capability-Schema-Version"],
+    "4",
+  );
+  assert.equal(result, body);
+});
+
+test("fetchProductionProductOptions accepts v4 independent account allowances", async () => {
+  const body = minimalProductOptionsResponse();
+  for (const tier of body.tiers) {
+    tier.capability_schema_version = 4;
+    tier.capabilities.limits.accounts = {
+      balance_sync: 50,
+      transaction_history_sync: 3,
+      manual: 1000,
+    };
+  }
+
+  const result = await fetchProductionProductOptions(async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return body;
+    },
+  }));
+
   assert.equal(result, body);
 });
 

@@ -34,7 +34,9 @@ test("web update notice uses canonical release and valid v2 metadata", async ({ 
     expect(calls.every(({ path }) => path === "/api/v2/latest-app-version")).toBeTruthy();
     expect(calls.at(-1).channel).toBe("web");
     expect(calls.at(-1).version).toBeTruthy();
-    expect(calls.at(-1).platform).toBe(`${os.platform() === "darwin" ? "macos" : os.platform()}/${os.arch() === "x64" ? "x86_64" : os.arch() === "arm64" ? "aarch64" : os.arch()}`);
+    const platform = { darwin: "macos", win32: "windows" }[os.platform()] ?? os.platform();
+    const architecture = { x64: "x86_64", arm64: "aarch64" }[os.arch()] ?? os.arch();
+    expect(calls.at(-1).platform).toBe(`${platform}/${architecture}`);
 
     const original = await appStatus();
     await seed({ channels: { default: { latest: "v9.9.10", release_url: "https://attacker.example/release" } } });

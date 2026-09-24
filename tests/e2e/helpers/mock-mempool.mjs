@@ -20,7 +20,9 @@ export async function startMockMempoolServer(options = {}) {
   // screenshot harness to serve a realistic BTC balance without mutating the
   // shared fixture. `stats` populates `GET /api/address/{addr}` (the balance
   // read path: chain_stats.funded_txo_sum - spent_txo_sum); `txs` populates
-  // `GET /api/address/{addr}/txs`. Specs that omit it are unaffected.
+  // `GET /api/address/{addr}/txs`. Specs that omit it are unaffected. A `"*"`
+  // entry answers every address without its own entry or fixture data, like
+  // the real API does for unused addresses; without it those return 404.
   const addressData = options?.addressData ?? {};
 
   const server = createServer((req, res) => {
@@ -46,6 +48,9 @@ export async function startMockMempoolServer(options = {}) {
         if (address === fixture.knownAddress) {
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify(fixture.transactions));
+        } else if (Object.prototype.hasOwnProperty.call(addressData, "*")) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify(addressData["*"].txs ?? []));
         } else {
           res.writeHead(200, { "content-type": "application/json" });
           res.end("[]");
@@ -73,6 +78,17 @@ export async function startMockMempoolServer(options = {}) {
             JSON.stringify({
               address,
               chain_stats: fixture.knownAddressStats,
+              mempool_stats: { funded_txo_sum: 0, spent_txo_sum: 0, tx_count: 0 },
+            }),
+          );
+          return;
+        }
+        if (Object.prototype.hasOwnProperty.call(addressData, "*")) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(
+            JSON.stringify({
+              address,
+              chain_stats: addressData["*"].stats,
               mempool_stats: { funded_txo_sum: 0, spent_txo_sum: 0, tx_count: 0 },
             }),
           );

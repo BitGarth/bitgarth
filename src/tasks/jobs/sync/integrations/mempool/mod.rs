@@ -116,6 +116,17 @@ fn mempool_history_proof_transition(
     }
 }
 
+/// A stats-only visit cannot fetch history pages, so it records the provider's
+/// unproven confirmed count. A later page-permitted round then selects the
+/// address via `mempool_history_requires_first_page_restart`.
+fn stats_only_expected_tx_count(
+    stats: &AddressStats,
+    retained_proof: Option<MempoolHistoryProof>,
+) -> Option<TransactionCount> {
+    let proven = retained_proof.map_or(0, |proof| proof.confirmed_tx_count.value());
+    (stats.tx_count.value() > proven).then_some(stats.tx_count)
+}
+
 fn zero_stats_skip_transaction_page(stats: &AddressStats) -> bool {
     stats.tx_count.value() == 0 && stats.mempool_tx_count.value() == 0
 }
@@ -211,10 +222,10 @@ impl MempoolAddressSyncIntegration {
             persist_mempool_observation(context, stats, tip_height)?;
             let account_progress = load_mempool_account_progress_observation(context)?;
             let proof_transition = if !context.transaction_page_permitted
-                && !context
+                && context
                     .address
                     .mempool_history_proof
-                    .is_some_and(|proof| stats.tx_count.value() < proof.confirmed_tx_count.value())
+                    .is_none_or(|proof| stats.tx_count.value() >= proof.confirmed_tx_count.value())
             {
                 MempoolHistoryProofTransition::Preserve
             } else {
@@ -327,6 +338,27 @@ impl MempoolAddressSyncIntegration {
                     context.run.user_id,
                     context.address.address_id,
                     backfill_expected_tx_count,
+                )?;
+            } else if !context.transaction_page_permitted {
+                let retained_proof = context.address.mempool_history_proof.filter(|_| {
+                    !matches!(
+                        proof_transition,
+                        MempoolHistoryProofTransition::InvalidateAndRestart
+                    )
+                });
+                let expected = stats_only_expected_tx_count(&stats, retained_proof);
+                if expected != context.address.mempool_expected_tx_count {
+                    update_address_mempool_expected_tx_count(
+                        context.run.user_id,
+                        context.address.address_id,
+                        expected,
+                    )?;
+                }
+            } else if proof_published && context.address.mempool_expected_tx_count.is_some() {
+                update_address_mempool_expected_tx_count(
+                    context.run.user_id,
+                    context.address.address_id,
+                    None,
                 )?;
             }
 
@@ -1798,6 +1830,18 @@ pub(crate) mod tests {
         stats_json: &str,
         tip_height: ChainTipHeight,
     ) -> Result<SyncIterationResult, UserTransactionMonitorError> {
+        run_single_request_visit(user_id, address, stats_json, tip_height, false)
+    }
+
+    /// A visit that makes exactly one provider request: stats-only, or a
+    /// page-permitted visit whose stats need no transaction page.
+    fn run_single_request_visit(
+        user_id: crate::models::UserId,
+        address: &SyncAddress,
+        stats_json: &str,
+        tip_height: ChainTipHeight,
+        transaction_page_permitted: bool,
+    ) -> Result<SyncIterationResult, UserTransactionMonitorError> {
         let server = start_historical_sync_mempool_server(vec![stats_json.to_string()]);
         let http_counters = SyncHttpCounters::new();
         let traced_client =
@@ -1831,7 +1875,7 @@ pub(crate) mod tests {
                 raw_sync_run_id: SyncRunId::new(),
                 source_connection_id: &source_connection_id,
                 is_backfill_active: false,
-                transaction_page_permitted: false,
+                transaction_page_permitted,
                 legacy_mempool_history_repair: false,
                 mempool_history_page_frontier: None,
             });
@@ -1945,6 +1989,184 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn stats_only_visit_records_expected_count_for_unproven_history() {
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let address = test_sync_address();
+        persist_sync_address_fixture(user_id, &address, test_now())
+            .expect("sync address fixture should persist");
+        mark_address_sync_started(
+            user_id,
+            address.address_id,
+            TransactionSyncRunId::new(),
+            test_now(),
+        )
+        .expect("sync state should exist");
+
+        run_stats_only_visit(
+            user_id,
+            &address,
+            r#"{"chain_stats":{"tx_count":1,"funded_txo_sum":11111,"spent_txo_sum":0},"mempool_stats":{"tx_count":0}}"#,
+            ChainTipHeight::try_new(800_001).expect("tip should parse"),
+        )
+        .expect("stats-only visit should succeed");
+
+        let persisted = get_non_hd_sync_addresses(user_id)
+            .expect("address should load")
+            .into_iter()
+            .find(|candidate| candidate.address_id == address.address_id)
+            .expect("address should exist");
+        assert_eq!(
+            persisted.mempool_expected_tx_count,
+            Some(TransactionCount::from_u32(1)),
+            "unproven provider history must be handed to a later page-permitted round"
+        );
+        assert_eq!(persisted.mempool_history_proof, None);
+        assert_eq!(persisted.mempool_backfill_cursor_txid, None);
+    }
+
+    #[test]
+    fn stats_only_visit_leaves_expected_count_unset_without_confirmed_history() {
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let address = test_sync_address();
+        persist_sync_address_fixture(user_id, &address, test_now())
+            .expect("sync address fixture should persist");
+        mark_address_sync_started(
+            user_id,
+            address.address_id,
+            TransactionSyncRunId::new(),
+            test_now(),
+        )
+        .expect("sync state should exist");
+
+        run_stats_only_visit(
+            user_id,
+            &address,
+            r#"{"chain_stats":{"tx_count":0,"funded_txo_sum":0,"spent_txo_sum":0},"mempool_stats":{"tx_count":1}}"#,
+            ChainTipHeight::try_new(800_001).expect("tip should parse"),
+        )
+        .expect("stats-only visit should succeed");
+
+        let persisted = get_non_hd_sync_addresses(user_id)
+            .expect("address should load")
+            .into_iter()
+            .find(|candidate| candidate.address_id == address.address_id)
+            .expect("address should exist");
+        assert_eq!(persisted.mempool_expected_tx_count, None);
+    }
+
+    #[test]
+    fn stats_only_visit_clears_expected_count_after_confirmed_history_disappears() {
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let address = test_sync_address();
+        persist_sync_address_fixture(user_id, &address, test_now())
+            .expect("sync address fixture should persist");
+        mark_address_sync_started(
+            user_id,
+            address.address_id,
+            TransactionSyncRunId::new(),
+            test_now(),
+        )
+        .expect("sync state should exist");
+
+        run_stats_only_visit(
+            user_id,
+            &address,
+            r#"{"chain_stats":{"tx_count":1,"funded_txo_sum":11111,"spent_txo_sum":0},"mempool_stats":{"tx_count":0}}"#,
+            ChainTipHeight::try_new(800_001).expect("tip should parse"),
+        )
+        .expect("first stats-only visit should succeed");
+        let persisted = get_non_hd_sync_addresses(user_id)
+            .expect("address should load")
+            .into_iter()
+            .find(|candidate| candidate.address_id == address.address_id)
+            .expect("address should exist");
+        assert_eq!(
+            persisted.mempool_expected_tx_count,
+            Some(TransactionCount::from_u32(1))
+        );
+
+        run_stats_only_visit(
+            user_id,
+            &persisted,
+            r#"{"chain_stats":{"tx_count":0,"funded_txo_sum":0,"spent_txo_sum":0},"mempool_stats":{"tx_count":0}}"#,
+            ChainTipHeight::try_new(800_002).expect("tip should parse"),
+        )
+        .expect("second stats-only visit should succeed");
+        let reloaded = get_non_hd_sync_addresses(user_id)
+            .expect("address should load")
+            .into_iter()
+            .find(|candidate| candidate.address_id == address.address_id)
+            .expect("address should exist");
+        assert_eq!(reloaded.mempool_expected_tx_count, None);
+    }
+
+    #[test]
+    fn page_permitted_zero_proof_clears_expected_count_after_history_disappears() {
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let address = test_sync_address();
+        persist_sync_address_fixture(user_id, &address, test_now())
+            .expect("sync address fixture should persist");
+        mark_address_sync_started(
+            user_id,
+            address.address_id,
+            TransactionSyncRunId::new(),
+            test_now(),
+        )
+        .expect("sync state should exist");
+
+        run_stats_only_visit(
+            user_id,
+            &address,
+            r#"{"chain_stats":{"tx_count":1,"funded_txo_sum":11111,"spent_txo_sum":0},"mempool_stats":{"tx_count":0}}"#,
+            ChainTipHeight::try_new(800_001).expect("tip should parse"),
+        )
+        .expect("discovery stats-only visit should succeed");
+        let seeded = get_non_hd_sync_addresses(user_id)
+            .expect("address should load")
+            .into_iter()
+            .find(|candidate| candidate.address_id == address.address_id)
+            .expect("address should exist");
+        assert_eq!(
+            seeded.mempool_expected_tx_count,
+            Some(TransactionCount::from_u32(1))
+        );
+
+        let zero_tip = ChainTipHeight::try_new(800_002).expect("tip should parse");
+        run_single_request_visit(
+            user_id,
+            &seeded,
+            r#"{"chain_stats":{"tx_count":0,"funded_txo_sum":0,"spent_txo_sum":0},"mempool_stats":{"tx_count":0}}"#,
+            zero_tip,
+            true,
+        )
+        .expect("page-permitted zero-stat visit should succeed");
+        let reloaded = get_non_hd_sync_addresses(user_id)
+            .expect("address should load")
+            .into_iter()
+            .find(|candidate| candidate.address_id == address.address_id)
+            .expect("address should exist");
+        assert_eq!(
+            reloaded.mempool_history_proof,
+            Some(MempoolHistoryProof {
+                confirmed_tx_count: TransactionCount::zero(),
+                complete_height: zero_tip,
+            })
+        );
+        assert_eq!(
+            reloaded.mempool_expected_tx_count, None,
+            "a published proof must not leave a stale expected count that reselects the address"
+        );
+    }
+
+    #[test]
     fn already_known_page_still_requires_a_ledger_rebuild_despite_zero_counts() {
         let _runtime = acquire_test_runtime().expect("test runtime should initialize");
         let user_id = unique_user_id();
@@ -2031,7 +2253,10 @@ pub(crate) mod tests {
             .expect("higher-count address should exist");
         assert_eq!(durable_higher.mempool_history_proof, Some(old_proof));
         assert_eq!(durable_higher.mempool_backfill_cursor_txid, Some(cursor));
-        assert_eq!(durable_higher.mempool_expected_tx_count, None);
+        assert_eq!(
+            durable_higher.mempool_expected_tx_count,
+            Some(TransactionCount::from_u32(3))
+        );
 
         let lower_user_id = unique_user_id();
         setup_test_user(lower_user_id);
@@ -2063,7 +2288,10 @@ pub(crate) mod tests {
             .expect("lower-count address should exist");
         assert_eq!(durable_lower.mempool_history_proof, None);
         assert_eq!(durable_lower.mempool_backfill_cursor_txid, None);
-        assert_eq!(durable_lower.mempool_expected_tx_count, None);
+        assert_eq!(
+            durable_lower.mempool_expected_tx_count,
+            Some(TransactionCount::from_u32(1))
+        );
     }
 
     #[test]

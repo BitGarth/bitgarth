@@ -79,6 +79,9 @@ mod raw_replay;
 #[cfg(feature = "server")]
 mod runtime_context;
 
+#[cfg(all(feature = "server", not(bitgarth_db_unit_only)))]
+mod startup;
+
 #[cfg(feature = "server")]
 mod sync_control;
 
@@ -429,9 +432,9 @@ fn main() {
 
     #[cfg(feature = "desktop")]
     {
-        #[cfg(feature = "server")]
-        if let Err(err) = tasks::ensure_started() {
-            eprintln!("failed to start background tasks: {err}");
+        #[cfg(all(feature = "server", not(bitgarth_db_unit_only)))]
+        if let Err(failure) = startup::check_app_database() {
+            startup::report_app_database_failure(&failure);
             std::process::exit(1);
         }
 
@@ -450,6 +453,12 @@ fn main() {
         #[cfg(feature = "server")]
         if let Err(err) = crate::asset_capabilities::load_unsynced_catalog() {
             eprintln!("failed to load unsynced asset catalog: {err}");
+            std::process::exit(1);
+        }
+
+        #[cfg(feature = "server")]
+        if let Err(err) = tasks::ensure_started() {
+            eprintln!("failed to start background tasks: {err}");
             std::process::exit(1);
         }
 
@@ -480,8 +489,8 @@ fn main() {
         any(not(test), not(bitgarth_db_unit_only))
     ))]
     {
-        if let Err(err) = tasks::ensure_started() {
-            eprintln!("failed to start background tasks: {err}");
+        if let Err(failure) = startup::check_app_database() {
+            startup::report_app_database_failure(&failure);
             std::process::exit(1);
         }
 
@@ -499,6 +508,11 @@ fn main() {
 
         if let Err(err) = crate::asset_capabilities::load_unsynced_catalog() {
             eprintln!("failed to load unsynced asset catalog: {err}");
+            std::process::exit(1);
+        }
+
+        if let Err(err) = tasks::ensure_started() {
+            eprintln!("failed to start background tasks: {err}");
             std::process::exit(1);
         }
 

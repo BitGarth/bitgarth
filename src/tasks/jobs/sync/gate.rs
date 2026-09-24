@@ -70,7 +70,12 @@ pub(super) fn cooldown_for_last_result(
     }
 }
 
-fn is_on_cooldown(address: &SyncAddress, now: DateTime<Utc>, source: TriggerSource) -> bool {
+fn is_on_cooldown(
+    address: &SyncAddress,
+    now: DateTime<Utc>,
+    source: TriggerSource,
+    transaction_page_permitted: bool,
+) -> bool {
     let Some(last_completed_at) = address.last_completed_at else {
         return false;
     };
@@ -85,7 +90,11 @@ fn is_on_cooldown(address: &SyncAddress, now: DateTime<Utc>, source: TriggerSour
         return false;
     }
     if matches!(address.last_result, Some(TransactionSyncResult::Success))
-        && super::integrations::unfinished_backfill_state(address).is_some()
+        && (super::integrations::unfinished_backfill_state(address).is_some()
+            || (transaction_page_permitted
+                && default_api_provider_for_asset(address.asset_id)
+                    == SyncProviderId::MempoolSpace
+                && mempool_history_requires_first_page_restart(address)))
     {
         return false;
     }
@@ -291,7 +300,7 @@ pub(super) fn sync_single_address_with_controls(
         return Ok((false, false));
     }
 
-    if is_on_cooldown(address, now_utc, run.source)
+    if is_on_cooldown(address, now_utc, run.source, transaction_page_permitted)
         && (!matches!(
             transaction_fetch_policy,
             TransactionFetchPolicy::LegacyRepair
@@ -624,7 +633,62 @@ mod pure_tests {
             now - chrono::Duration::seconds(FAILED_ADDRESS_SYNC_COOLDOWN.as_secs() as i64 - 1),
         );
 
-        assert!(is_on_cooldown(&address, now, TriggerSource::Schedule));
+        assert!(is_on_cooldown(&address, now, TriggerSource::Schedule, true));
+    }
+
+    #[test]
+    fn discovered_bitcoin_history_skips_success_cooldown_only_while_a_page_is_permitted() {
+        let now = Utc::now();
+        let mut address = SyncAddress {
+            address_id: DigitalAssetAddressId::new(),
+            address: TrackedAddress::parse("bc1qdiscoveredcooldown").expect("valid"),
+            asset_id: SyncedAssetId::Bitcoin,
+            network: Network::Mainnet,
+            account_id: None,
+            derivation_change: Some(0),
+            derivation_index: Some(0),
+            address_scheme: None,
+            last_completed_at: Some(now - chrono::Duration::seconds(60)),
+            last_result: Some(TransactionSyncResult::Success),
+            last_tip_height: None,
+            etherscan_transaction_tip_height: None,
+            mempool_backfill_cursor_txid: None,
+            mempool_expected_tx_count: Some(TransactionCount::from_u32(2)),
+            mempool_history_proof: None,
+            mempool_history_scan_start_run_id: None,
+            etherscan_backfill_end_block: None,
+            etherscan_history_checkpoint_verified: false,
+            has_api_confirmed_balance: false,
+            consecutive_failure_count: crate::transactions::ConsecutiveFailureCount::zero(),
+        };
+        let proof = |count| crate::db::MempoolHistoryProof {
+            confirmed_tx_count: TransactionCount::from_u32(count),
+            complete_height: ChainTipHeight::try_new(100).expect("valid tip"),
+        };
+
+        assert!(!is_on_cooldown(
+            &address,
+            now,
+            TriggerSource::Schedule,
+            true
+        ));
+        assert!(is_on_cooldown(
+            &address,
+            now,
+            TriggerSource::Schedule,
+            false
+        ));
+
+        address.mempool_history_proof = Some(proof(1));
+        assert!(!is_on_cooldown(
+            &address,
+            now,
+            TriggerSource::Schedule,
+            true
+        ));
+
+        address.mempool_history_proof = Some(proof(2));
+        assert!(is_on_cooldown(&address, now, TriggerSource::Schedule, true));
     }
 
     #[test]
@@ -1138,7 +1202,12 @@ mod tests {
         address.last_completed_at = Some(now - chrono::Duration::seconds(10));
         address.last_result = Some(TransactionSyncResult::Success);
 
-        assert!(!is_on_cooldown(&address, now, TriggerSource::AutoUpgrade));
+        assert!(!is_on_cooldown(
+            &address,
+            now,
+            TriggerSource::AutoUpgrade,
+            true
+        ));
     }
 
     #[test]

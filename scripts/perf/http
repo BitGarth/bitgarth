@@ -63,6 +63,11 @@ done
 mkdir -p "${PERF_LOGS_DIR}"
 cd "${ROOT_DIR}"
 
+# Login starts a background entitlement refresh against BitGarth's servers. Against the real
+# host its TLS handshake runs on the server-function worker thread and stalls a measured request
+# by ~20 ms whenever the two overlap. Port 0 refuses instantly, so perf runs never leave the machine.
+export BITGARTH_CENTRAL_BASE_URL="http://127.0.0.1:0"
+
 cleanup() {
   if [[ -n "${SERVER_PID}" ]]; then
     kill "${SERVER_PID}" >/dev/null 2>&1 || true

@@ -21,6 +21,7 @@ mod rate_limit;
 #[cfg(all(test, feature = "db-tests"))]
 mod test_support;
 
+pub(crate) use self::automatic::reload_unfinished_sync_integrations as unfinished_sync_integrations_for_user;
 pub(crate) use self::automatic::run;
 #[cfg(feature = "server")]
 pub(crate) use self::manual_control::run_manual_sync_control;

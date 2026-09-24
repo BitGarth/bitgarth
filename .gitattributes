@@ -1,0 +1,4 @@
+# Shell scripts must remain executable by Bash regardless of core.autocrlf.
+*.sh text eol=lf
+/scripts/** text eol=lf
+/.githooks/* text eol=lf

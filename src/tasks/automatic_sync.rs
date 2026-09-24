@@ -65,6 +65,7 @@ pub(crate) struct AutomaticSyncFreshnessSummary {
     pub(crate) next_due_in: Option<Duration>,
     stale_integrations: HashSet<SyncIntegrationId>,
     has_unknown_stale_integration: bool,
+    has_unfinished_work: bool,
 }
 
 impl AutomaticSyncFreshnessSummary {
@@ -72,8 +73,21 @@ impl AutomaticSyncFreshnessSummary {
         Self::default()
     }
 
+    /// Adds integrations with runnable unfinished history (e.g. discovered but
+    /// unfetched Bitcoin history), which account freshness alone cannot see.
+    pub(crate) fn add_unfinished_work(&mut self, integrations: &HashSet<SyncIntegrationId>) {
+        if integrations.is_empty() {
+            return;
+        }
+        self.has_unfinished_work = true;
+        self.stale_integrations.extend(integrations.iter().copied());
+    }
+
     pub(crate) fn has_stale_work(&self) -> bool {
-        self.urgent_accounts > 0 || self.stale_warm_accounts > 0 || self.stale_cold_accounts > 0
+        self.urgent_accounts > 0
+            || self.stale_warm_accounts > 0
+            || self.stale_cold_accounts > 0
+            || self.has_unfinished_work
     }
 
     pub(crate) fn highest_stale_class(&self) -> Option<SyncFreshnessClass> {
@@ -138,6 +152,7 @@ pub(crate) fn automatic_sync_block_state(
 pub(crate) enum AutomaticSyncEnqueueReason {
     UrgentWork,
     StaleWork,
+    UnfinishedHistory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,7 +215,7 @@ pub(crate) fn automatic_sync_decision(
                         Some(SyncFreshnessClass::Warm | SyncFreshnessClass::Cold) => {
                             AutomaticSyncEnqueueReason::StaleWork
                         }
-                        None => AutomaticSyncEnqueueReason::StaleWork,
+                        None => AutomaticSyncEnqueueReason::UnfinishedHistory,
                     },
                 }
             }
@@ -264,6 +279,7 @@ pub(crate) fn summarize_automatic_sync_freshness(
         next_due_in: None,
         stale_integrations: HashSet::new(),
         has_unknown_stale_integration: false,
+        has_unfinished_work: false,
     };
 
     for snapshot in snapshots {
@@ -490,6 +506,7 @@ mod tests {
             next_due_in: None,
             stale_integrations: HashSet::from([SyncIntegrationId::Etherscan]),
             has_unknown_stale_integration: false,
+            has_unfinished_work: false,
         };
 
         assert_eq!(
@@ -523,6 +540,7 @@ mod tests {
             next_due_in: None,
             stale_integrations: HashSet::from([SyncIntegrationId::Etherscan]),
             has_unknown_stale_integration: false,
+            has_unfinished_work: false,
         };
 
         assert_eq!(
@@ -557,6 +575,7 @@ mod tests {
             next_due_in: Some(Duration::from_secs(45)),
             stale_integrations: HashSet::new(),
             has_unknown_stale_integration: false,
+            has_unfinished_work: false,
         };
 
         assert_eq!(
@@ -573,6 +592,71 @@ mod tests {
     }
 
     #[test]
+    fn unfinished_work_overrides_freshness_but_respects_provider_blocking() {
+        let fresh_summary = AutomaticSyncFreshnessSummary {
+            urgent_accounts: 0,
+            stale_warm_accounts: 0,
+            stale_cold_accounts: 0,
+            fresh_accounts: 1,
+            next_due_in: Some(Duration::from_secs(840)),
+            stale_integrations: HashSet::new(),
+            has_unknown_stale_integration: false,
+            has_unfinished_work: false,
+        };
+        let decide = |summary: &AutomaticSyncFreshnessSummary,
+                      blocked: HashSet<SyncIntegrationId>| {
+            automatic_sync_decision(
+                AutomaticSyncEligibility::Eligible,
+                summary,
+                automatic_sync_block_state(summary, &blocked, Some(Duration::from_secs(90))),
+            )
+        };
+
+        let mut unfinished = fresh_summary.clone();
+        unfinished.add_unfinished_work(&HashSet::new());
+        assert_eq!(unfinished, fresh_summary);
+
+        unfinished.add_unfinished_work(&HashSet::from([SyncIntegrationId::Mempool]));
+        assert_eq!(
+            decide(&unfinished, HashSet::new()),
+            AutomaticSyncDecision::EnqueueNow {
+                reason: AutomaticSyncEnqueueReason::UnfinishedHistory,
+            }
+        );
+        assert_eq!(
+            decide(&unfinished, HashSet::from([SyncIntegrationId::Etherscan])),
+            AutomaticSyncDecision::EnqueueNow {
+                reason: AutomaticSyncEnqueueReason::UnfinishedHistory,
+            }
+        );
+        assert_eq!(
+            decide(&unfinished, HashSet::from([SyncIntegrationId::Mempool])),
+            AutomaticSyncDecision::KeepScheduled {
+                reason: AutomaticSyncKeepScheduledReason::BlockedUntilRetry,
+                next_due_in: Duration::from_secs(90),
+            }
+        );
+
+        let mut mixed = unfinished.clone();
+        mixed.add_unfinished_work(&HashSet::from([SyncIntegrationId::Etherscan]));
+        assert_eq!(
+            decide(&mixed, HashSet::from([SyncIntegrationId::Mempool])),
+            AutomaticSyncDecision::EnqueueNow {
+                reason: AutomaticSyncEnqueueReason::UnfinishedHistory,
+            }
+        );
+
+        let mut urgent = unfinished;
+        urgent.urgent_accounts = 1;
+        assert_eq!(
+            decide(&urgent, HashSet::new()),
+            AutomaticSyncDecision::EnqueueNow {
+                reason: AutomaticSyncEnqueueReason::UrgentWork,
+            }
+        );
+    }
+
+    #[test]
     fn automatic_sync_decision_skips_when_ineligible() {
         let summary = AutomaticSyncFreshnessSummary {
             urgent_accounts: 1,
@@ -582,6 +666,7 @@ mod tests {
             next_due_in: None,
             stale_integrations: HashSet::from([SyncIntegrationId::Mempool]),
             has_unknown_stale_integration: false,
+            has_unfinished_work: false,
         };
 
         assert_eq!(

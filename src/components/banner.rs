@@ -17,7 +17,7 @@ pub fn Banner() -> Element {
         ),
         BannerMessage::DatabaseUnavailable => (
             BannerSeverity::Error,
-            "The server is unable to connect to the database. Please wait a minute and try again."
+            "BitGarth could not open its data. Check the application logs, or contact the person who runs this instance."
                 .to_string(),
         ),
         BannerMessage::Custom { severity, text } => (severity, text),

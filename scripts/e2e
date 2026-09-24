@@ -8,5 +8,5 @@ ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 "${SCRIPT_DIR}/e2e-build"
 
 cd "${ROOT_DIR}"
-node --test tests/e2e/helpers/playwright-config.test.mjs
+node --test tests/e2e/helpers/*.test.mjs tests/e2e/screenshots/*.test.mjs
 exec npx playwright test "$@"

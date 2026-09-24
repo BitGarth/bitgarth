@@ -148,6 +148,18 @@ function hasSupportedTierCapabilities(tier) {
     return isObject(limits.accounts) && isU16(limits.accounts.total) && limits.accounts.total > 0;
   }
 
+  if (tier.capability_schema_version === 4) {
+    const accounts = limits.accounts;
+    return (
+      isObject(accounts) &&
+      isU16(accounts.balance_sync) &&
+      isU16(accounts.transaction_history_sync) &&
+      isU16(accounts.manual) &&
+      accounts.transaction_history_sync <= accounts.balance_sync &&
+      accounts.balance_sync + accounts.manual <= 5000
+    );
+  }
+
   return false;
 }
 
@@ -271,6 +283,7 @@ export async function fetchProductionProductOptions(fetchImpl = fetch) {
     response = await fetchImpl(PRODUCTION_PRODUCT_OPTIONS_URL, {
       headers: {
         [EXPECTED_SIGNING_KEY_HASH_HEADER]: PRODUCTION_EXPECTED_SIGNING_KEY_HASH,
+        "X-BitGarth-Supported-Capability-Schema-Version": "4",
       },
     });
   } catch (error) {

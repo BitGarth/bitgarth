@@ -155,3 +155,18 @@ See [SECURITY.md](../../SECURITY.md) for the repository's reporting policy.
 BitGarth is built on a narrow promise: your self-custody accounting should not require surrendering custody of your data.
 
 Encrypted user storage, public-key-only wallet access, plain-text exports, and honest limits all serve that promise.
+
+## Local Startup Reports
+
+If BitGarth cannot initialize its app database, it prints a diagnostic and,
+when possible, saves `startup-error.txt` in the project directory. The report
+contains the failure timestamp, build identifier, startup stage and category,
+filesystem paths, migration identifiers and checksums when relevant, and
+filesystem or SQLite error codes. It does not include wallet records,
+passwords, session tokens, keys, or envelopes, and is not uploaded to
+BitGarth's servers.
+
+The report is limited to 16 KiB. A later failed start replaces it; a successful
+start leaves it as historical evidence. Paths may include your OS username, so
+review and redact the report before sharing it. See
+[Startup troubleshooting](startup-troubleshooting.md) for safe recovery.

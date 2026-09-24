@@ -55,6 +55,10 @@ snapshot of this entire resolved directory, including SQLite WAL files and
 `app/data/session-wrap-secret`. A database-only copy is not a complete rollback
 point.
 
+See [Startup troubleshooting](startup-troubleshooting.md) if the server cannot
+initialize its app database, including where to find the local diagnostic and
+how to preserve your data during recovery.
+
 ## Instance Notice
 
 ### `BITGARTH_INSTANCE_NOTICE_INFO`

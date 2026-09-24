@@ -7,6 +7,7 @@
 //! the database is unlocked.
 
 pub(crate) mod automatic_sync;
+mod eligibility_refresh;
 mod jobs;
 
 pub(crate) use jobs::sync::TransactionFetchPolicy;
@@ -328,6 +329,7 @@ struct TaskManager {
     command_tx: mpsc::Sender<ManagerCommand>,
     command_rx: mpsc::Receiver<ManagerCommand>,
     jobs: HashMap<JobKey, JobState>,
+    eligibility_refresh: eligibility_refresh::EligibilityRefresh,
 }
 
 fn users_eligible_for_transaction_monitoring(
@@ -357,12 +359,14 @@ fn automatic_sync_freshness_summary(
         .map_err(|err| format!("load_account_sync_snapshots failed: {err}"))?;
     let pending_account_ids = load_account_ids_with_pending_txs(user_id)
         .map_err(|err| format!("load_account_ids_with_pending_txs failed: {err}"))?;
+    let unfinished_integrations =
+        self::jobs::sync::unfinished_sync_integrations_for_user(user_id, now_utc)
+            .map_err(|err| format!("unfinished_sync_integrations_for_user failed: {err}"))?;
 
-    Ok(summarize_automatic_sync_freshness(
-        now_utc,
-        &account_snapshots,
-        &pending_account_ids,
-    ))
+    let mut summary =
+        summarize_automatic_sync_freshness(now_utc, &account_snapshots, &pending_account_ids);
+    summary.add_unfinished_work(&unfinished_integrations);
+    Ok(summary)
 }
 
 fn automatic_sync_request(user_id: UserId, source: TriggerSource) -> TriggerRequest {
@@ -573,6 +577,7 @@ impl TaskManager {
             command_tx,
             command_rx,
             jobs,
+            eligibility_refresh: eligibility_refresh::EligibilityRefresh::default(),
         }
     }
 
@@ -664,28 +669,61 @@ impl TaskManager {
         now: Instant,
         now_utc: DateTime<Utc>,
     ) -> Vec<TriggerRequest> {
-        let open_user_ids: HashSet<UserId> = match list_open_user_db_users() {
+        self.sync_user_transaction_jobs_with(
+            now,
+            now_utc,
+            || list_open_user_db_users().map_err(|error| error.to_string()),
+            || {
+                session::list_users_with_unexpired_sessions_at(now_utc)
+                    .map_err(|error| error.to_string())
+            },
+        )
+    }
+
+    fn sync_user_transaction_jobs_with(
+        &mut self,
+        now: Instant,
+        now_utc: DateTime<Utc>,
+        load_open: impl FnOnce() -> Result<Vec<UserId>, String>,
+        load_sessions: impl FnOnce() -> Result<Vec<UserId>, String>,
+    ) -> Vec<TriggerRequest> {
+        if !self.eligibility_refresh.ready(now) {
+            return Vec::new();
+        }
+
+        let open_user_ids: HashSet<UserId> = match load_open() {
             Ok(users) => users.into_iter().collect(),
             Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "tasks: failed to list open user databases for transaction monitor scheduling"
-                );
-                HashSet::new()
+                if let Some(attempts) = self.eligibility_refresh.failed(now) {
+                    tracing::warn!(
+                        source = "open-user-databases",
+                        attempts,
+                        error = %err,
+                        "tasks: transaction monitor eligibility refresh failed"
+                    );
+                }
+                return Vec::new();
             }
         };
 
-        let logged_in_user_ids: HashSet<UserId> =
-            match session::list_users_with_unexpired_sessions_at(now_utc) {
-                Ok(users) => users.into_iter().collect(),
-                Err(err) => {
+        let logged_in_user_ids: HashSet<UserId> = match load_sessions() {
+            Ok(users) => users.into_iter().collect(),
+            Err(err) => {
+                if let Some(attempts) = self.eligibility_refresh.failed(now) {
                     tracing::warn!(
+                        source = "unexpired-sessions",
+                        attempts,
                         error = %err,
-                        "tasks: failed to list users with unexpired sessions for transaction monitor scheduling"
+                        "tasks: transaction monitor eligibility refresh failed"
                     );
-                    HashSet::new()
                 }
-            };
+                return Vec::new();
+            }
+        };
+
+        if self.eligibility_refresh.recovered() {
+            tracing::info!("tasks: transaction monitor eligibility refresh recovered");
+        }
 
         let eligible_users =
             users_eligible_for_transaction_monitoring(open_user_ids, logged_in_user_ids);
@@ -705,7 +743,9 @@ impl TaskManager {
             match decision {
                 AutomaticSyncDecision::EnqueueNow {
                     reason:
-                        AutomaticSyncEnqueueReason::UrgentWork | AutomaticSyncEnqueueReason::StaleWork,
+                        AutomaticSyncEnqueueReason::UrgentWork
+                        | AutomaticSyncEnqueueReason::StaleWork
+                        | AutomaticSyncEnqueueReason::UnfinishedHistory,
                 } => {
                     automatic_requests.push(automatic_sync_request(
                         *user_id,
@@ -803,7 +843,8 @@ impl TaskManager {
                         AutomaticSyncDecision::EnqueueNow {
                             reason:
                                 AutomaticSyncEnqueueReason::UrgentWork
-                                | AutomaticSyncEnqueueReason::StaleWork,
+                                | AutomaticSyncEnqueueReason::StaleWork
+                                | AutomaticSyncEnqueueReason::UnfinishedHistory,
                         } => {
                             due_requests.push(automatic_sync_request(
                                 user_id,
@@ -1749,6 +1790,177 @@ mod tests {
 
         let eligible = users_eligible_for_transaction_monitoring(open_users, logged_in_users);
         assert_eq!(eligible, HashSet::from([open_user_b]));
+    }
+
+    #[test]
+    fn eligibility_session_failure_preserves_job_membership() {
+        let (command_tx, command_rx) = mpsc::channel(MANAGER_CHANNEL_CAPACITY);
+        let mut manager = TaskManager::new(command_tx, command_rx);
+        let now = Instant::now();
+        let user_id = UserId::new();
+        let other_user_id = UserId::new();
+        manager
+            .jobs
+            .insert(user_sync_key(user_id), make_user_sync_job_state(now));
+        let original_keys: HashSet<_> = manager.jobs.keys().copied().collect();
+
+        let requests = manager.sync_user_transaction_jobs_with(
+            now,
+            DateTime::UNIX_EPOCH,
+            || Ok(vec![user_id, other_user_id]),
+            || Err("session lookup failed".to_owned()),
+        );
+
+        assert!(requests.is_empty());
+        assert!(manager.jobs.contains_key(&user_sync_key(user_id)));
+        assert_eq!(
+            manager.jobs.keys().copied().collect::<HashSet<_>>(),
+            original_keys
+        );
+    }
+
+    #[test]
+    fn eligibility_open_failure_skips_sessions_and_both_loaders_during_cooldown() {
+        use std::cell::Cell;
+
+        let (command_tx, command_rx) = mpsc::channel(MANAGER_CHANNEL_CAPACITY);
+        let mut manager = TaskManager::new(command_tx, command_rx);
+        let now = Instant::now();
+        let user_id = UserId::new();
+        manager
+            .jobs
+            .insert(user_sync_key(user_id), make_user_sync_job_state(now));
+        let open_calls = Cell::new(0);
+        let session_calls = Cell::new(0);
+
+        let requests = manager.sync_user_transaction_jobs_with(
+            now,
+            DateTime::UNIX_EPOCH,
+            || {
+                open_calls.set(open_calls.get() + 1);
+                Err("open lookup failed".to_owned())
+            },
+            || {
+                session_calls.set(session_calls.get() + 1);
+                Ok(vec![user_id])
+            },
+        );
+        assert!(requests.is_empty());
+        assert_eq!((open_calls.get(), session_calls.get()), (1, 0));
+        assert!(manager.jobs.contains_key(&user_sync_key(user_id)));
+
+        let requests = manager.sync_user_transaction_jobs_with(
+            now + Duration::from_secs(29),
+            DateTime::UNIX_EPOCH,
+            || {
+                open_calls.set(open_calls.get() + 1);
+                Ok(Vec::new())
+            },
+            || {
+                session_calls.set(session_calls.get() + 1);
+                Ok(Vec::new())
+            },
+        );
+        assert!(requests.is_empty());
+        assert_eq!((open_calls.get(), session_calls.get()), (1, 0));
+        assert!(manager.jobs.contains_key(&user_sync_key(user_id)));
+    }
+
+    #[test]
+    fn eligibility_source_change_keeps_the_warning_episode() {
+        let (command_tx, command_rx) = mpsc::channel(MANAGER_CHANNEL_CAPACITY);
+        let mut manager = TaskManager::new(command_tx, command_rx);
+        let now = Instant::now();
+        manager.sync_user_transaction_jobs_with(
+            now,
+            DateTime::UNIX_EPOCH,
+            || Err("open lookup failed".to_owned()),
+            || Ok(Vec::new()),
+        );
+        manager.sync_user_transaction_jobs_with(
+            now + Duration::from_secs(30),
+            DateTime::UNIX_EPOCH,
+            || Ok(Vec::new()),
+            || Err("session lookup failed".to_owned()),
+        );
+
+        assert!(
+            !manager
+                .eligibility_refresh
+                .ready(now + Duration::from_secs(59))
+        );
+        assert_eq!(
+            manager
+                .eligibility_refresh
+                .failed(now + Duration::from_secs(299)),
+            None
+        );
+        assert_eq!(
+            manager
+                .eligibility_refresh
+                .failed(now + Duration::from_secs(300)),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn eligibility_recovery_prunes_only_idle_ineligible_jobs() {
+        let (command_tx, command_rx) = mpsc::channel(MANAGER_CHANNEL_CAPACITY);
+        let mut manager = TaskManager::new(command_tx, command_rx);
+        let now = Instant::now();
+        let idle_user = UserId::new();
+        let running_user = UserId::new();
+        let pending_user = UserId::new();
+        for user_id in [idle_user, running_user, pending_user] {
+            let mut state = make_user_sync_job_state(now);
+            state.running = user_id == running_user;
+            state.pending = (user_id == pending_user).then(|| {
+                user_sync_request(
+                    user_id,
+                    TransactionSyncRunId::new(),
+                    TransactionSyncScope::User,
+                )
+            });
+            manager.jobs.insert(user_sync_key(user_id), state);
+        }
+        for (seconds, open_fails) in [(0, true), (30, false)] {
+            let requests = manager.sync_user_transaction_jobs_with(
+                now + Duration::from_secs(seconds),
+                DateTime::UNIX_EPOCH,
+                || {
+                    if open_fails {
+                        Err("open lookup failed".to_owned())
+                    } else {
+                        Ok(Vec::new())
+                    }
+                },
+                || Err("session lookup failed".to_owned()),
+            );
+            assert!(requests.is_empty());
+            assert!(manager.jobs.contains_key(&user_sync_key(idle_user)));
+        }
+
+        let requests = manager.sync_user_transaction_jobs_with(
+            now + Duration::from_secs(60),
+            DateTime::UNIX_EPOCH,
+            || Ok(Vec::new()),
+            || Ok(Vec::new()),
+        );
+        assert!(requests.is_empty());
+        assert!(!manager.jobs.contains_key(&user_sync_key(idle_user)));
+        assert!(manager.jobs.contains_key(&user_sync_key(running_user)));
+        assert!(manager.jobs.contains_key(&user_sync_key(pending_user)));
+        assert!(
+            manager
+                .jobs
+                .contains_key(&JobKey::app(JobId::SessionCleanup))
+        );
+        assert!(!manager.eligibility_refresh.recovered());
+        assert!(
+            manager
+                .eligibility_refresh
+                .ready(now + Duration::from_secs(60))
+        );
     }
 
     #[test]

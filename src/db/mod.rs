@@ -56,8 +56,13 @@ mod wallet_data_import;
 mod wallets;
 
 // Re-export error types
+#[cfg(not(bitgarth_db_unit_only))]
+pub(crate) use app_db::initialize_app_db;
+pub(crate) use error::AppDbStage;
 pub(crate) use error::DbError;
 pub(crate) use error::DbInitError;
+#[cfg(not(bitgarth_db_unit_only))]
+pub(crate) use error::{AppDbFailureKind, MigrationIdentity};
 
 // Entitlement snapshots
 pub(crate) use entitlement_snapshots::user_has_active_paid_entitlement;

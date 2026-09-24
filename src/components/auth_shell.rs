@@ -50,7 +50,10 @@ fn classify_auth_error(error: &AuthError) -> AuthErrorPresentation {
     }
 
     if error.is_internal() {
-        return AuthErrorPresentation::Banner(BannerMessage::DatabaseUnavailable);
+        return AuthErrorPresentation::Banner(BannerMessage::Custom {
+            severity: BannerSeverity::Error,
+            text: "BitGarth could not complete this request because of an internal error. Check the application logs, or contact the person who runs this instance.".to_owned(),
+        });
     }
 
     AuthErrorPresentation::Banner(BannerMessage::Custom {
@@ -705,12 +708,15 @@ mod tests {
     }
 
     #[test]
-    fn classify_auth_error_keeps_generic_internal_database_banner() {
+    fn classify_auth_error_keeps_generic_internal_banner() {
         let error = AuthError::internal();
 
         assert_eq!(
             classify_auth_error(&error),
-            AuthErrorPresentation::Banner(BannerMessage::DatabaseUnavailable)
+            AuthErrorPresentation::Banner(BannerMessage::Custom {
+                severity: BannerSeverity::Error,
+                text: "BitGarth could not complete this request because of an internal error. Check the application logs, or contact the person who runs this instance.".to_owned(),
+            })
         );
     }
 }
