@@ -285,7 +285,7 @@ impl ProfileStore {
         match self.profiles.as_slice() {
             [profile] => Ok(profile),
             [] => Err(ProfileSelectionError(
-                "no profiles configured; run `bitgarth pair` first".to_owned(),
+                "no profiles configured; run the `pair` command first".to_owned(),
             )),
             _ => Err(ProfileSelectionError(self.selection_guidance())),
         }

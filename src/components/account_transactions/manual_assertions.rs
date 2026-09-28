@@ -33,8 +33,18 @@ pub(super) fn ManualAssertionEditorModal(
     };
 
     rsx! {
-        div { class: "modal-overlay",
-            div { class: "modal",
+        dialog {
+            id: "manual-assertion-dialog",
+            class: "modal manual-assertion-dialog",
+            role: "dialog",
+            "aria-modal": "true",
+            "aria-label": "{mode_label}",
+            onmounted: move |_| {
+                let _ = dioxus::document::eval(
+                    "document.getElementById('manual-assertion-dialog')?.showModal();",
+                );
+            },
+            oncancel: move |_| on_cancel.call(()),
                 div { class: "modal-header",
                     h3 { "{mode_label}" }
                 }
@@ -65,9 +75,7 @@ pub(super) fn ManualAssertionEditorModal(
                         placeholder: "0.0",
                         value: "{current_form.balance}",
                         disabled: submitting(),
-                        onmounted: move |e| async move {
-                            let _ = e.set_focus(true).await;
-                        },
+                        autofocus: true,
                         oninput: move |event| {
                             if let Some(mut current) = form_state() {
                                 let value = event.value();
@@ -143,7 +151,6 @@ pub(super) fn ManualAssertionEditorModal(
                         }
                     }
                 }
-            }
         }
     }
 }
@@ -221,6 +228,7 @@ pub(super) fn ManualAssertionsSection(
     on_sort_toggle: EventHandler<TransactionSortDirection>,
 ) -> Element {
     let totals_text = custom_table_totals_text(&data.assertions);
+    let show_totals = custom_last_page(&data.assertions) > 1;
     let current_sort = data.sort;
     let assertions_read_only = data.account_state == crate::backend::AccountStateView::Inactive;
     let read_only_message = "Upgrade to modify assertions for this inactive account.";
@@ -239,7 +247,9 @@ pub(super) fn ManualAssertionsSection(
                         PlusIcon {}
                         "Add Balance Assertion"
                     }
-                    span { class: "muted", "{totals_text}" }
+                    if show_totals {
+                        span { class: "muted", "{totals_text}" }
+                    }
                     button {
                         class: "btn btn-secondary tx-sort-toggle",
                         r#type: "button",

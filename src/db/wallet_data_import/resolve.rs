@@ -44,6 +44,7 @@ pub(super) struct AddressLookupKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct ManualAccountLookupKey {
     pub(super) wallet_id: WalletId,
+    pub(super) label_key: LabelKey,
     pub(super) asset_id: String,
     pub(super) network_id: String,
 }
@@ -413,7 +414,7 @@ pub(super) fn load_import_state(
 
             let account_id = parse_wallet_account_id(&account_id_raw, "manual account id")?;
             let wallet_id = parse_wallet_id(&wallet_id_raw, "manual account wallet_id")?;
-            let _account_label = parse_db_label(
+            let account_label = parse_db_label(
                 &account_label_raw,
                 ACCOUNT_LABEL_MAX_LENGTH,
                 "manual account label",
@@ -427,6 +428,7 @@ pub(super) fn load_import_state(
             manual_account_lookup.insert(
                 ManualAccountLookupKey {
                     wallet_id,
+                    label_key: account_label.key(),
                     asset_id: asset_id_raw,
                     network_id: network_id_raw,
                 },
@@ -698,6 +700,7 @@ pub(super) fn matching_manual_only_wallet(
                     .manual_account_lookup
                     .contains_key(&ManualAccountLookupKey {
                         wallet_id,
+                        label_key: account.label.key(),
                         asset_id: account.snapshot.asset_id.clone(),
                         network_id: account.snapshot.network_id.clone(),
                     })
@@ -816,6 +819,7 @@ pub(super) fn resolve_or_create_manual_account(
 ) -> Result<WalletAccountId, WalletDataImportDbError> {
     let lookup_key = ManualAccountLookupKey {
         wallet_id,
+        label_key: account.label.key(),
         asset_id: account.snapshot.asset_id.clone(),
         network_id: account.snapshot.network_id.clone(),
     };

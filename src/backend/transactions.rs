@@ -104,6 +104,14 @@ use crate::wallets::{
         all(test, not(bitgarth_db_unit_only))
     )
 ))]
+use axum::Extension;
+#[cfg(all(
+    feature = "server",
+    any(
+        all(not(test), not(feature = "desktop")),
+        all(test, not(bitgarth_db_unit_only))
+    )
+))]
 use axum::http::StatusCode as AxumStatusCode;
 #[cfg(all(
     feature = "server",
@@ -138,7 +146,7 @@ use std::str::FromStr;
         all(test, not(bitgarth_db_unit_only))
     )
 ))]
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc, watch};
 #[cfg(feature = "server")]
 use tokio_stream as _;
 #[cfg(all(
@@ -1426,6 +1434,7 @@ fn transactions_error_to_status(error: TransactionsError) -> AxumStatusCode {
 ))]
 pub(crate) async fn transactions_sync_events_sse(
     cookies: CookieJar,
+    shutdown: Option<Extension<watch::Receiver<bool>>>,
 ) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, AxumStatusCode> {
     let initialized_session =
         initialized_session_from_cookie(&cookies).map_err(transactions_error_to_status)?;
@@ -1433,7 +1442,7 @@ pub(crate) async fn transactions_sync_events_sse(
     let snapshot = load_aggregate_sync_snapshot_db(user_id)
         .map_err(|_| AxumStatusCode::INTERNAL_SERVER_ERROR)?;
     let snapshot_event = TransactionSyncEvent::sync_snapshot(snapshot, chrono::Utc::now());
-    let mut broadcast_receiver = subscribe_transaction_sync_events(user_id)
+    let broadcast_receiver = subscribe_transaction_sync_events(user_id)
         .map_err(|_| AxumStatusCode::INTERNAL_SERVER_ERROR)?;
 
     let (stream_tx, stream_rx) =
@@ -1449,31 +1458,12 @@ pub(crate) async fn transactions_sync_events_sse(
         .await
         .map_err(|_| AxumStatusCode::INTERNAL_SERVER_ERROR)?;
 
-    tokio::spawn(async move {
-        while let Ok(sync_event) = broadcast_receiver.recv().await {
-            let serialized = match serde_json::to_string(&sync_event) {
-                Ok(payload) => payload,
-                Err(err) => {
-                    tracing::warn!(
-                        user_id = %user_id,
-                        error = %err,
-                        "transactions sse: failed to serialize sync event"
-                    );
-                    continue;
-                }
-            };
-            let sse_event = Event::default()
-                .event(sync_event.event_name())
-                .data(serialized);
-            if stream_tx.send(Ok(sse_event)).await.is_err() {
-                tracing::debug!(
-                    user_id = %user_id,
-                    "transactions sse: client stream closed"
-                );
-                break;
-            }
-        }
-    });
+    tokio::spawn(forward_sync_events(
+        user_id,
+        broadcast_receiver,
+        stream_tx,
+        shutdown.map(|Extension(receiver)| receiver),
+    ));
 
     tracing::debug!(
         user_id = %user_id,
@@ -1481,4 +1471,136 @@ pub(crate) async fn transactions_sync_events_sse(
     );
 
     Ok(Sse::new(ReceiverStream::new(stream_rx)))
+}
+
+#[cfg(all(
+    feature = "server",
+    any(
+        all(not(test), not(feature = "desktop")),
+        all(test, not(bitgarth_db_unit_only))
+    )
+))]
+async fn forward_sync_events(
+    user_id: crate::models::UserId,
+    mut broadcast_receiver: broadcast::Receiver<TransactionSyncEvent>,
+    stream_tx: mpsc::Sender<Result<Event, Infallible>>,
+    mut shutdown: Option<watch::Receiver<bool>>,
+) {
+    loop {
+        let sync_event = tokio::select! {
+            biased;
+            () = wait_for_sse_shutdown(&mut shutdown) => break,
+            event = broadcast_receiver.recv() => match event {
+                Ok(event) => event,
+                Err(_) => break,
+            },
+        };
+        let serialized = match serde_json::to_string(&sync_event) {
+            Ok(payload) => payload,
+            Err(err) => {
+                tracing::warn!(
+                    user_id = %user_id,
+                    error = %err,
+                    "transactions sse: failed to serialize sync event"
+                );
+                continue;
+            }
+        };
+        let sse_event = Event::default()
+            .event(sync_event.event_name())
+            .data(serialized);
+        if !send_event_or_shutdown(&stream_tx, sse_event, &mut shutdown).await {
+            tracing::debug!(
+                user_id = %user_id,
+                "transactions sse: client stream closed"
+            );
+            break;
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "server",
+    any(
+        all(not(test), not(feature = "desktop")),
+        all(test, not(bitgarth_db_unit_only))
+    )
+))]
+async fn wait_for_sse_shutdown(shutdown: &mut Option<watch::Receiver<bool>>) {
+    if let Some(receiver) = shutdown {
+        let stopping = *receiver.borrow();
+        if !stopping {
+            let _ = receiver.changed().await;
+        }
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+#[cfg(all(
+    feature = "server",
+    any(
+        all(not(test), not(feature = "desktop")),
+        all(test, not(bitgarth_db_unit_only))
+    )
+))]
+async fn send_event_or_shutdown(
+    stream_tx: &mpsc::Sender<Result<Event, Infallible>>,
+    event: Event,
+    shutdown: &mut Option<watch::Receiver<bool>>,
+) -> bool {
+    tokio::select! {
+        biased;
+        () = wait_for_sse_shutdown(shutdown) => false,
+        sent = stream_tx.send(Ok(event)) => sent.is_ok(),
+    }
+}
+
+#[cfg(all(test, feature = "server", not(bitgarth_db_unit_only)))]
+#[tokio::test]
+async fn sync_event_stream_closes_on_shutdown() {
+    let (_events_tx, events_rx) = tokio::sync::broadcast::channel(1);
+    let (stream_tx, mut stream_rx) = mpsc::channel(1);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let forwarder = tokio::spawn(forward_sync_events(
+        crate::models::UserId::new(),
+        events_rx,
+        stream_tx,
+        Some(shutdown_rx),
+    ));
+
+    shutdown_tx.send(true).expect("shutdown listener exists");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), stream_rx.recv())
+            .await
+            .expect("stream should close")
+            .is_none()
+    );
+    forwarder.await.expect("forwarder should exit");
+}
+
+#[cfg(all(test, feature = "server", not(bitgarth_db_unit_only)))]
+#[tokio::test]
+async fn full_sync_event_channel_does_not_block_shutdown() {
+    let (stream_tx, mut stream_rx) = mpsc::channel(1);
+    stream_tx
+        .try_send(Ok(Event::default()))
+        .expect("fill channel");
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let sender = tokio::spawn(async move {
+        let mut shutdown = Some(shutdown_rx);
+        send_event_or_shutdown(&stream_tx, Event::default(), &mut shutdown).await
+    });
+    tokio::task::yield_now().await;
+    assert!(!sender.is_finished());
+
+    shutdown_tx.send(true).expect("shutdown listener exists");
+    assert!(
+        !tokio::time::timeout(std::time::Duration::from_secs(1), sender)
+            .await
+            .expect("blocked send should stop")
+            .expect("sender should exit")
+    );
+    assert!(stream_rx.try_recv().is_ok());
+    assert!(stream_rx.try_recv().is_err());
 }

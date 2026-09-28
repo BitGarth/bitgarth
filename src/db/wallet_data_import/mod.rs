@@ -224,6 +224,7 @@ fn import_into_transaction(
             supported_account_sequence = supported_account_sequence.saturating_add(1);
             let key = resolve::ManualAccountLookupKey {
                 wallet_id,
+                label_key: manual_account.label.key(),
                 asset_id: manual_account.snapshot.asset_id.clone(),
                 network_id: manual_account.snapshot.network_id.clone(),
             };
@@ -246,6 +247,18 @@ fn import_into_transaction(
                 .or_default();
             for assertion in &manual_account.assertions {
                 if assertion_dates.contains(&assertion.asserted_on) {
+                    if !merge::matching_manual_asset_assertion_in_tx(
+                        tx,
+                        manual_account_id,
+                        assertion,
+                        target_scale,
+                    )? {
+                        return Err(WalletDataImportDbError::Validation(format!(
+                            "Conflicting balance assertion for '{}' on {}",
+                            manual_account.label.as_str(),
+                            assertion.asserted_on
+                        )));
+                    }
                     result.assertions_skipped =
                         result.assertions_skipped.checked_add(1).ok_or_else(|| {
                             WalletDataImportDbError::Internal(
@@ -811,8 +824,10 @@ mod legacy_promotion_tests {
         assert_eq!(manual_account_count(user_id), 4_999);
         let manual_duplicate = manual_import_payload(6, vec![manual_account_json(1, None)])
             .replace("\"label\":\"Manual Wallet\"", "\"label\":\"Seed Wallet\"");
-        import_wallet_data(user_id, &manual_duplicate, TEST_ACTIVE_LIMIT, now)
-            .expect("manual duplicate-only import at cap should succeed");
+        assert!(matches!(
+            import_wallet_data(user_id, &manual_duplicate, TEST_ACTIVE_LIMIT, now),
+            Err(WalletDataImportDbError::Validation(message)) if message.contains("Supported account hard cap exceeded")
+        ));
         assert_eq!(manual_account_count(user_id), 4_999);
 
         let mut augmented =
@@ -1015,6 +1030,64 @@ mod legacy_promotion_tests {
             admission_labels(user_id, "manual", "admitted_at"),
             ["Manual 001"]
         );
+    }
+
+    #[test]
+    fn import_keeps_distinct_same_asset_manual_accounts() {
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let mut payload: serde_json::Value = serde_json::from_str(&manual_import_payload(
+            6,
+            vec![manual_account_json(1, None), manual_account_json(1, None)],
+        ))
+        .expect("fixture should parse");
+        let accounts = payload["wallets"][0]["manual_asset_accounts"]
+            .as_array_mut()
+            .expect("manual accounts");
+        accounts[0]["balance_assertions"] = serde_json::json!([{
+            "asserted_on":"2026-04-01", "balance_amount":"10", "note":"first"
+        }]);
+        accounts[1]["label"] = "Second account".into();
+        accounts[1]["balance_assertions"] = serde_json::json!([{
+            "asserted_on":"2026-04-01", "balance_amount":"20", "note":"second"
+        }]);
+        let payload = payload.to_string();
+        let now = fixed_import_started_at();
+        let first =
+            import_wallet_data(user_id, &payload, TEST_ACTIVE_LIMIT, now).expect("first import");
+        assert_eq!(manual_account_count(user_id), 2);
+        assert_eq!(first.assertions_created, 2);
+        let second =
+            import_wallet_data(user_id, &payload, TEST_ACTIVE_LIMIT, now).expect("repeat import");
+        assert_eq!(manual_account_count(user_id), 2);
+        assert_eq!(second.assertions_created, 0);
+    }
+
+    #[test]
+    fn import_rejects_conflicting_same_date_assertion() {
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let mut payload: serde_json::Value = serde_json::from_str(&manual_import_payload(
+            6,
+            vec![manual_account_json(1, None)],
+        ))
+        .expect("fixture should parse");
+        let assertion =
+            &mut payload["wallets"][0]["manual_asset_accounts"][0]["balance_assertions"];
+        *assertion = serde_json::json!([{
+            "asserted_on":"2026-04-01", "balance_amount":"10", "note":"original"
+        }]);
+        let now = fixed_import_started_at();
+        import_wallet_data(user_id, &payload.to_string(), TEST_ACTIVE_LIMIT, now)
+            .expect("first import");
+        payload["wallets"][0]["manual_asset_accounts"][0]["balance_assertions"][0]["balance_amount"] =
+            "20".into();
+        let result = import_wallet_data(user_id, &payload.to_string(), TEST_ACTIVE_LIMIT, now);
+        assert!(matches!(
+            result,
+            Err(WalletDataImportDbError::Validation(_))
+        ));
+        assert_eq!(manual_account_count(user_id), 1);
     }
 
     fn account_created_at_values(user_id: crate::models::UserId) -> Vec<(String, DateTime<Utc>)> {

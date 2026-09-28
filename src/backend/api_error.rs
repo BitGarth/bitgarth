@@ -96,18 +96,6 @@ impl ApiErrorEnvelope {
         }
     }
 
-    #[cfg(feature = "server")]
-    pub(crate) fn unauthorized_with_errors(
-        message: impl Into<String>,
-        field_errors: FieldErrors,
-    ) -> Self {
-        Self {
-            code: ApiErrorCode::Unauthorized,
-            message: message.into(),
-            field_errors: Some(field_errors),
-        }
-    }
-
     pub(crate) fn validation(message: impl Into<String>, field_errors: FieldErrors) -> Self {
         Self {
             code: ApiErrorCode::Validation,

@@ -14,6 +14,7 @@ use super::integrations::unfinished_backfill_state;
 #[derive(Debug, Clone, Copy)]
 pub(super) struct SyncPlannerInput<'a> {
     pub(super) now_utc: DateTime<Utc>,
+    pub(super) source: crate::tasks::TriggerSource,
     pub(super) transaction_fetch_policy: TransactionFetchPolicy,
     pub(super) native_account_modes:
         Option<&'a HashMap<DigitalAssetAccountId, crate::account_limits::NativeAccountMode>>,
@@ -245,6 +246,7 @@ fn address_candidate(
     let priority = priority_tier_for_address(address, input);
     if priority == SyncPlannerPriorityTier::BalanceRefresh
         && is_successful_balance_refresh_fresh(
+            input.source,
             address.last_result,
             address.last_completed_at,
             input.now_utc,
@@ -479,6 +481,7 @@ mod tests {
     ) -> SyncPlannerInput<'a> {
         SyncPlannerInput {
             now_utc,
+            source: crate::tasks::TriggerSource::Schedule,
             transaction_fetch_policy: TransactionFetchPolicy::Normal {
                 cap: TransactionCount::from_u32(1_000),
             },
@@ -698,6 +701,28 @@ mod tests {
                 reason: SyncIterationStopReason::BalanceRefreshesFresh,
             }
         );
+    }
+
+    #[test]
+    fn manual_sync_refreshes_a_fresh_balance() {
+        let account_id = DigitalAssetAccountId::new();
+        let now = test_utc_now();
+        let mut address = btc_address(account_id, "manualfresh");
+        address.last_completed_at = Some(now - Duration::minutes(5));
+        address.last_result = Some(TransactionSyncResult::Success);
+        let counts = HashMap::new();
+        let pending = empty_set();
+        let activity = empty_set();
+        let excluded = empty_set();
+        let input = SyncPlannerInput {
+            source: crate::tasks::TriggerSource::ManualInternal,
+            transaction_fetch_policy: TransactionFetchPolicy::CurrentOnly,
+            ..planner_input(now, &pending, &activity, &counts, &excluded)
+        };
+
+        let planned = plan_next_iteration(&[address], &[], &input);
+
+        assert_eq!(planned, PlannedSyncIteration::Execute);
     }
 
     #[test]

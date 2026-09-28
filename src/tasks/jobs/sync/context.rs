@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 pub(crate) const LABEL_MEMPOOL: &str = "mempool";
 pub(crate) const LABEL_ETHERSCAN: &str = "etherscan";
-pub(crate) const BALANCE_REFRESH_TTL: Duration = Duration::from_secs(30 * 60);
+pub(crate) const BALANCE_REFRESH_TTL: Duration = crate::account_mode::ACCOUNT_REFRESH_INTERVAL;
 pub(crate) use crate::transactions::ADDRESS_FAILURE_THRESHOLD;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,12 +56,15 @@ pub(crate) fn is_balance_refresh_fresh(
     }
 }
 
+/// A manual sync always refreshes the balance; only automatic runs honour the TTL.
 pub(crate) fn is_successful_balance_refresh_fresh(
+    source: TriggerSource,
     last_result: Option<TransactionSyncResult>,
     last_completed_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> bool {
-    matches!(last_result, Some(TransactionSyncResult::Success))
+    !matches!(source, TriggerSource::ManualInternal)
+        && matches!(last_result, Some(TransactionSyncResult::Success))
         && is_balance_refresh_fresh(last_completed_at, now)
 }
 
@@ -350,7 +353,7 @@ pub(crate) struct UserTransactionMonitorSummary {
     pub(crate) addresses_synced: AddressCount,
     pub(crate) addresses_failed: AddressCount,
     pub(crate) addresses_skipped: AddressCount,
-    pub(crate) addresses_skipped_tip_unchanged: AddressCount,
+    pub(crate) skipped_by_reason: super::cycle::SyncSkipCounts,
     pub(crate) addresses_early_exited: AddressCount,
     pub(crate) pagination_cache_hits: u64,
     pub(crate) total_api_calls: u64,
@@ -525,6 +528,29 @@ mod tests {
             now
         ));
         assert!(!is_balance_refresh_fresh(None, now));
+    }
+
+    #[test]
+    fn manual_sync_never_treats_a_balance_as_fresh() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 5, 4, 12, 0, 0)
+            .single()
+            .expect("test time should be valid");
+        let just_now = Some(now - chrono::Duration::minutes(1));
+        let success = Some(TransactionSyncResult::Success);
+
+        assert!(is_successful_balance_refresh_fresh(
+            TriggerSource::Schedule,
+            success,
+            just_now,
+            now
+        ));
+        assert!(!is_successful_balance_refresh_fresh(
+            TriggerSource::ManualInternal,
+            success,
+            just_now,
+            now
+        ));
     }
 
     #[test]

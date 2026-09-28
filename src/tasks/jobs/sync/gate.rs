@@ -1,5 +1,6 @@
 use super::client_config::fetch_mempool_chain_tip;
 use super::context::{DEFAULT_INTER_ADDRESS_PACING_POLICY, is_successful_balance_refresh_fresh};
+use super::cycle::SyncSkipReason;
 use super::error::preserve_iteration_error;
 use super::{
     ADDRESS_SYNC_COOLDOWN, AddressSyncExecutionRequest, AddressSyncExecutor, ChainTipCache,
@@ -258,6 +259,22 @@ pub(super) struct SyncSingleAddressControlRequest<'a> {
     pub(super) mempool_history_page_frontier: Option<crate::db::HdMempoolHistoryFrontierUpdate>,
 }
 
+fn skip_before_fetch(
+    run: RunContext<'_>,
+    address: &SyncAddress,
+    accumulator: &mut super::CycleAccumulator,
+    reason: SyncSkipReason,
+) {
+    tracing::debug!(
+        user_id = %run.user_id,
+        run_id = %run.run_id,
+        address_id = %address.address_id,
+        reason = reason.as_str(),
+        "transactions sync: address skipped before fetch"
+    );
+    accumulator.add_skipped(reason);
+}
+
 pub(super) fn sync_single_address_with_controls(
     request: SyncSingleAddressControlRequest<'_>,
 ) -> Result<(bool, bool), UserTransactionMonitorError> {
@@ -291,12 +308,13 @@ pub(super) fn sync_single_address_with_controls(
 
     if !transaction_page_permitted
         && is_successful_balance_refresh_fresh(
+            run.source,
             address.last_result,
             address.last_completed_at,
             now_utc,
         )
     {
-        accumulator.add_skipped();
+        skip_before_fetch(run, address, accumulator, SyncSkipReason::BalanceFresh);
         return Ok((false, false));
     }
 
@@ -306,14 +324,14 @@ pub(super) fn sync_single_address_with_controls(
             TransactionFetchPolicy::LegacyRepair
         ) || matches!(address.last_result, Some(TransactionSyncResult::Failure)))
     {
-        accumulator.add_skipped();
+        skip_before_fetch(run, address, accumulator, SyncSkipReason::Cooldown);
         return Ok((false, false));
     }
 
     let integration = integration_for_address(address);
     if is_rate_limited(run.user_id, integration, now_instant) {
         accumulator.add_rate_limited(integration);
-        accumulator.add_skipped();
+        skip_before_fetch(run, address, accumulator, SyncSkipReason::RateLimited);
         return Ok((false, true));
     }
 
@@ -358,11 +376,10 @@ pub(super) fn sync_single_address_with_controls(
                     run_id = %run.run_id,
                     address_id = %address.address_id,
                     tip_height = current_tip.value(),
-                    reason = "tip_unchanged",
+                    reason = SyncSkipReason::TipUnchanged.as_str(),
                     "transactions sync: address skipped before fetch"
                 );
-                accumulator.add_skipped();
-                accumulator.add_skipped_tip_unchanged();
+                accumulator.add_skipped(SyncSkipReason::TipUnchanged);
                 return Ok((false, false));
             }
             TipUnchangedGateDecision::RefreshPending => {
@@ -432,6 +449,23 @@ pub(super) fn sync_single_address_with_controls(
             if summary.early_exited {
                 accumulator.add_early_exited();
             }
+            if transaction_page_permitted
+                && summary.new_tx_count.value() > 0
+                && let Some(account_id) = address.account_id
+                && load_account_transaction_count_for_fetch_policy(
+                    run.user_id,
+                    account_id,
+                    transaction_fetch_policy,
+                )
+                .is_ok_and(|count| !transaction_fetch_policy.permits_transaction_page(count))
+            {
+                tracing::info!(
+                    user_id = %run.user_id,
+                    run_id = %run.run_id,
+                    account_id = %account_id,
+                    "transactions sync: account reached its plan limit; history paused, balance refreshes continue"
+                );
+            }
             if summary.ledger_rebuild_required
                 && let Some(account_id) = address.account_id
             {
@@ -450,7 +484,7 @@ pub(super) fn sync_single_address_with_controls(
             let limited_at = run.clock.instant_now();
             record_rate_limit(run.user_id, &integration, limited_at, retry_after);
             accumulator.add_rate_limited(&integration);
-            accumulator.add_skipped();
+            accumulator.add_skipped(SyncSkipReason::RateLimited);
             let err = UserTransactionMonitorError::RateLimited {
                 integration,
                 message,
@@ -1579,7 +1613,7 @@ mod tests {
             "skip counter should be incremented"
         );
         assert_eq!(
-            accumulator.addresses_skipped_tip_unchanged, 1,
+            accumulator.skipped_by_reason.tip_unchanged, 1,
             "tip-unchanged counter should be incremented"
         );
         assert!(executor.calls.is_empty(), "executor should not be called");
@@ -1648,7 +1682,7 @@ mod tests {
 
         assert_eq!(result, (true, false));
         assert_eq!(accumulator.addresses_skipped, 0);
-        assert_eq!(accumulator.addresses_skipped_tip_unchanged, 0);
+        assert_eq!(accumulator.skipped_by_reason.tip_unchanged, 0);
         assert_eq!(processed_for_account, 1);
         assert_eq!(executor.calls, vec![address.address_id]);
     }
@@ -1728,7 +1762,7 @@ mod tests {
                 "address with active backfill cursor must not be skipped"
             );
             assert_eq!(
-                accumulator.addresses_skipped_tip_unchanged, 0,
+                accumulator.skipped_by_reason.tip_unchanged, 0,
                 "tip-unchanged counter must stay zero when gate is bypassed"
             );
             assert_eq!(

@@ -1052,13 +1052,13 @@ p + p { margin-top: var(--app-space-3); }
 
 .form-hint {
   font-size: var(--text-sm);
-  color: var(--color-text-muted);
+  color: var(--sage-text);
   margin-top: var(--app-space-1);
 }
 
 .form-help-text {
   font-size: var(--text-sm);
-  color: var(--color-text-muted);
+  color: var(--sage-text);
   margin-top: var(--app-space-1);
   line-height: var(--leading-normal);
 }
@@ -1790,6 +1790,17 @@ p + p { margin-top: var(--app-space-3); }
   border: 1px solid var(--color-border);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-lg);
+}
+
+.manual-assertion-dialog {
+  max-height: calc(100dvh - 2 * var(--app-space-4));
+  margin: auto;
+  padding: 0;
+  overflow-y: auto;
+}
+
+.manual-assertion-dialog::backdrop {
+  background: var(--color-bg-overlay);
 }
 
 .modal-header {

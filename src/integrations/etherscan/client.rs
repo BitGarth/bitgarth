@@ -5,12 +5,29 @@ use crate::traces::client::{TracedBlockingClient, TransportFailure, TransportFai
 use crate::transactions::{ApiConfirmedBalance, TransactionCount, TxCountEstimate};
 use serde::Deserialize;
 use serde_json::value::RawValue;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 use url::Url;
 
 const RESPONSE_SNIPPET_MAX_BYTES: usize = 512;
 const QUICK_ESTIMATE_OFFSET: u64 = 10_000;
+const REQUEST_INTERVAL: Duration = Duration::from_secs(1);
+// ponytail: process-local pacing; use a shared limiter if multiple servers share one API key.
+static NEXT_REQUEST_BY_KEY: LazyLock<Mutex<HashMap<u64, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn reserve_request_delay(slots: &mut HashMap<u64, Instant>, key: &str, now: Instant) -> Duration {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    let key_id = hasher.finish();
+    let scheduled = slots.get(&key_id).copied().unwrap_or(now).max(now);
+    slots.insert(key_id, scheduled + REQUEST_INTERVAL);
+    scheduled.saturating_duration_since(now)
+}
 
 /// Client for the Etherscan API v2.
 ///
@@ -449,6 +466,14 @@ impl EtherscanClient {
     }
 
     fn perform_get(&self, url: &str) -> Result<EtherscanHttpResponse, EtherscanError> {
+        let delay = reserve_request_delay(
+            &mut NEXT_REQUEST_BY_KEY
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            &self.api_key,
+            Instant::now(),
+        );
+        std::thread::sleep(delay);
         self.increment_total_api_calls();
         let response = self.client.get(url).send().map_err(|error| {
             let error = error.without_url();
@@ -701,6 +726,28 @@ fn is_no_transactions_message(value: &str) -> bool {
 #[cfg(all(test, not(bitgarth_db_unit_only)))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requests_sharing_a_key_reserve_spaced_slots() {
+        let now = std::time::Instant::now();
+        let mut slots = std::collections::HashMap::new();
+        assert_eq!(
+            reserve_request_delay(&mut slots, "key-a", now),
+            std::time::Duration::ZERO
+        );
+        assert_eq!(
+            reserve_request_delay(&mut slots, "key-a", now),
+            std::time::Duration::from_secs(1)
+        );
+        assert_eq!(
+            reserve_request_delay(&mut slots, "key-a", now),
+            std::time::Duration::from_secs(2)
+        );
+        assert_eq!(
+            reserve_request_delay(&mut slots, "key-b", now),
+            std::time::Duration::ZERO
+        );
+    }
 
     #[test]
     fn parse_normal_tx_response() {

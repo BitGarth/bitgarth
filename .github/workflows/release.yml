@@ -51,11 +51,7 @@ jobs:
           rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
           rustup default stable
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
-        with:
-          key: ${{ matrix.product }}-${{ matrix.target }}
-
+      # No caching: tag-scoped caches are unreadable by later tags.
       - name: Test CLI
         if: matrix.product == 'cli'
         run: cargo test --locked -p bitgarth-cli
@@ -83,36 +79,13 @@ jobs:
         if: matrix.product == 'web' && runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      - name: Configure Windows dependency cache
-        if: matrix.product == 'web' && runner.os == 'Windows'
-        id: vcpkg
-        shell: pwsh
-        run: |
-          $cache = Join-Path $env:RUNNER_TEMP "vcpkg-binary-cache"
-          New-Item -ItemType Directory -Force $cache | Out-Null
-          "VCPKG_DEFAULT_BINARY_CACHE=$cache" >> $env:GITHUB_ENV
-          "path=$cache" >> $env:GITHUB_OUTPUT
-          "image=$env:ImageVersion" >> $env:GITHUB_OUTPUT
-          $revision = git -C $env:VCPKG_INSTALLATION_ROOT rev-parse HEAD
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          "revision=$revision" >> $env:GITHUB_OUTPUT
-
-      - name: Cache Windows web dependencies
-        if: matrix.product == 'web' && runner.os == 'Windows'
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ steps.vcpkg.outputs.path }}
-          key: vcpkg-${{ matrix.target }}-openssl-${{ steps.vcpkg.outputs.revision }}-${{ steps.vcpkg.outputs.image }}
-          restore-keys: |
-            vcpkg-${{ matrix.target }}-openssl-${{ steps.vcpkg.outputs.revision }}-
-
       - name: Install Windows web dependencies
         if: matrix.product == 'web' && runner.os == 'Windows'
         shell: pwsh
         run: |
-          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install openssl:x64-windows
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install openssl:x64-windows-release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          "OPENSSL_DIR=$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> $env:GITHUB_ENV
+          "OPENSSL_DIR=$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows-release" >> $env:GITHUB_ENV
 
       - name: Build web
         if: matrix.product == 'web'

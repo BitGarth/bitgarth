@@ -136,6 +136,86 @@ fn assign_closing_balances_orders_confirmed_oldest_first() {
 }
 
 #[test]
+fn failed_transaction_fee_is_in_settled_balance() {
+    let old = "2026-01-01T00:00:00Z";
+    let mined = "2026-01-02T00:00:00Z";
+    let seen = "2026-09-24T00:00:00Z";
+    let mut rows = vec![
+        test_entry(
+            "fund",
+            ChainTransactionStatus::Confirmed,
+            old,
+            old,
+            Some(1),
+            Some(0),
+            None,
+            2_000,
+        ),
+        test_entry(
+            "fail",
+            ChainTransactionStatus::Failed,
+            mined,
+            seen,
+            Some(2),
+            Some(1),
+            None,
+            -1,
+        ),
+        test_entry(
+            "pending",
+            ChainTransactionStatus::Pending,
+            seen,
+            seen,
+            None,
+            Some(2),
+            None,
+            -10,
+        ),
+    ];
+    ledger_rebuild::assign_closing_balances(&mut rows, None).unwrap();
+    assert_eq!(
+        rows[1].closing_balance,
+        Some(UnsignedAmount::from_u128(1_999))
+    );
+    assert_eq!(
+        rows[2].closing_balance,
+        Some(UnsignedAmount::from_u128(1_989))
+    );
+}
+
+#[test]
+fn failed_and_confirmed_same_time_use_existing_tie_breakers() {
+    let time = "2026-01-02T00:00:00Z";
+    let mut rows = vec![
+        test_entry(
+            "fail",
+            ChainTransactionStatus::Failed,
+            time,
+            time,
+            Some(2),
+            Some(2),
+            None,
+            -1,
+        ),
+        test_entry(
+            "fund",
+            ChainTransactionStatus::Confirmed,
+            time,
+            time,
+            Some(2),
+            Some(1),
+            None,
+            2_000,
+        ),
+    ];
+    ledger_rebuild::assign_closing_balances(&mut rows, None).unwrap();
+    assert_eq!(
+        rows[0].closing_balance,
+        Some(UnsignedAmount::from_u128(1_999))
+    );
+}
+
+#[test]
 fn assign_closing_balances_uses_confirmed_tiebreakers_for_stable_order() {
     let mut entries = vec![
         test_entry(
@@ -544,7 +624,7 @@ fn assign_bitcoin_closing_balances_clears_unknown_and_unsafe_conversion() {
 }
 
 #[test]
-fn assign_bitcoin_closing_balances_leaves_non_confirmed_rows_null() {
+fn assign_bitcoin_closing_balances_leaves_pending_and_dropped_null() {
     let mut entries = vec![
         test_entry(
             "confirmed",
@@ -584,7 +664,7 @@ fn assign_bitcoin_closing_balances_leaves_non_confirmed_rows_null() {
             None,
             None,
             None,
-            -2,
+            0,
         ),
     ];
 
@@ -598,15 +678,19 @@ fn assign_bitcoin_closing_balances_leaves_non_confirmed_rows_null() {
         entries[0].closing_balance,
         Some(UnsignedAmount::from_u128(10))
     );
-    assert!(
-        entries[1..]
-            .iter()
-            .all(|entry| entry.closing_balance.is_none())
+    assert!(entries[1].closing_balance.is_none());
+    assert!(entries[2].closing_balance.is_none());
+    assert_eq!(
+        entries[3].closing_balance,
+        Some(UnsignedAmount::from_u128(10))
     );
+    ledger_rebuild::assign_bitcoin_closing_balances(&mut entries, NativeBalanceState::Unknown)
+        .expect("unknown basis should remain unknown");
+    assert!(entries.iter().all(|entry| entry.closing_balance.is_none()));
 }
 
 #[test]
-fn assign_closing_balances_sets_dropped_and_failed_to_none() {
+fn assign_closing_balances_settles_failed_and_leaves_dropped_null() {
     let mut entries = vec![
         test_entry(
             "confirmed",
@@ -658,7 +742,7 @@ fn assign_closing_balances_sets_dropped_and_failed_to_none() {
         .expect("pending entry");
     assert_eq!(
         pending.closing_balance.expect("pending balance").value(),
-        15_u128
+        13_u128
     );
     let dropped = entries
         .iter()
@@ -669,7 +753,7 @@ fn assign_closing_balances_sets_dropped_and_failed_to_none() {
         .find(|entry| entry.tx_hash == "failed")
         .expect("failed entry");
     assert!(dropped.closing_balance.is_none());
-    assert!(failed.closing_balance.is_none());
+    assert_eq!(failed.closing_balance, Some(UnsignedAmount::from_u128(8)));
 }
 
 #[test]

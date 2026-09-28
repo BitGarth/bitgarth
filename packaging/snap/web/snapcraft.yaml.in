@@ -1,0 +1,48 @@
+name: bitgarth-web
+title: BitGarth
+version: '@VERSION@'
+summary: Private, self-hosted crypto portfolio tracker that runs in your browser
+description: |
+  BitGarth tracks your Bitcoin and Ethereum holdings without handing your
+  financial data to a cloud service. It is watch-only: it syncs from public
+  addresses and xpubs and never asks for seed phrases or private keys.
+
+  This snap runs BitGarth as a background service on this machine. After
+  installing, open http://127.0.0.1:8080 in a browser on the same computer.
+  It listens only on this computer (loopback), not on your network.
+  If port 8080 is taken, choose another: sudo snap set bitgarth-web port=8081
+  Wallet data is stored encrypted under /var/snap/bitgarth-web/common.
+
+  A command-line client is available separately as the bitgarth-cli snap.
+
+  Website and documentation: https://bitgarth.app
+
+  BitGarth is distributed under the FSL-1.1-ALv2 license.
+license: Proprietary
+website: https://bitgarth.app
+source-code: https://github.com/BitGarth/bitgarth
+base: core24
+grade: stable
+confinement: strict
+platforms:
+  amd64:
+    build-on: [amd64]
+    build-for: [amd64]
+apps:
+  bitgarth-web:
+    command: bin/launch-web
+    daemon: simple
+    plugs: [network, network-bind]
+    environment:
+      LD_LIBRARY_PATH: "$SNAP/usr/lib/x86_64-linux-gnu:$SNAP/lib/x86_64-linux-gnu"
+      BITGARTH_CHANNEL: snap
+parts:
+  application:
+    plugin: dump
+    source: payload/
+    stage-packages: [ca-certificates, libssl3t64]
+  launcher:
+    plugin: dump
+    source: launcher/
+    organize:
+      launch-web: bin/launch-web

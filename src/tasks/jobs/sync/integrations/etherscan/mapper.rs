@@ -152,15 +152,15 @@ fn map_etherscan_internal_status(
     }
 }
 
-fn merge_chain_status(
+fn merge_internal_status(
     current: ChainTransactionStatus,
     incoming: ChainTransactionStatus,
 ) -> ChainTransactionStatus {
     use ChainTransactionStatus::{Confirmed, Dropped, Failed, Pending};
     match (current, incoming) {
-        (Failed, _) | (_, Failed) => Failed,
-        (Pending, _) | (_, Pending) => Pending,
         (Confirmed, _) | (_, Confirmed) => Confirmed,
+        (Pending, _) | (_, Pending) => Pending,
+        (Failed, _) | (_, Failed) => Failed,
         _ => Dropped,
     }
 }
@@ -199,25 +199,27 @@ fn map_internal_transfer_kind(raw_call_type: &str) -> TransferKind {
 struct EtherscanAggregatedTx {
     tx_hash: TxHash,
     status: ChainTransactionStatus,
+    has_normal: bool,
     block_height: Option<i64>,
     block_time: Option<DateTime<Utc>>,
     fee_amount: Option<UnsignedAmount>,
     nonce: Option<i64>,
-    transfers: Vec<SyncAccountTransferRecord>,
+    transfers: Vec<(SyncAccountTransferRecord, ChainTransactionStatus)>,
 }
 
 fn upsert_aggregated_transfer(
     aggregated: &mut EtherscanAggregatedTx,
     transfer: SyncAccountTransferRecord,
+    status: ChainTransactionStatus,
 ) {
     if let Some(existing) = aggregated
         .transfers
         .iter_mut()
-        .find(|value| value.provider_transfer_key == transfer.provider_transfer_key)
+        .find(|(value, _)| value.provider_transfer_key == transfer.provider_transfer_key)
     {
-        *existing = transfer;
+        *existing = (transfer, status);
     } else {
-        aggregated.transfers.push(transfer);
+        aggregated.transfers.push((transfer, status));
     }
 }
 
@@ -270,6 +272,7 @@ pub(crate) fn map_etherscan_transactions(
             .or_insert_with(|| EtherscanAggregatedTx {
                 tx_hash: tx_hash.clone(),
                 status,
+                has_normal: true,
                 block_height,
                 block_time,
                 fee_amount: Some(fee_amount),
@@ -277,7 +280,8 @@ pub(crate) fn map_etherscan_transactions(
                 transfers: Vec::new(),
             });
 
-        aggregated.status = merge_chain_status(aggregated.status, status);
+        aggregated.status = status;
+        aggregated.has_normal = true;
         aggregated.block_height = max_optional_i64(aggregated.block_height, block_height);
         aggregated.block_time = latest_optional_time(aggregated.block_time, block_time);
         if aggregated.fee_amount.is_none() {
@@ -297,6 +301,7 @@ pub(crate) fn map_etherscan_transactions(
                 to_address,
                 value_amount,
             },
+            status,
         );
     }
 
@@ -322,6 +327,7 @@ pub(crate) fn map_etherscan_transactions(
             .or_insert_with(|| EtherscanAggregatedTx {
                 tx_hash: tx_hash.clone(),
                 status,
+                has_normal: false,
                 block_height,
                 block_time,
                 fee_amount: None,
@@ -329,7 +335,9 @@ pub(crate) fn map_etherscan_transactions(
                 transfers: Vec::new(),
             });
 
-        aggregated.status = merge_chain_status(aggregated.status, status);
+        if !aggregated.has_normal {
+            aggregated.status = merge_internal_status(aggregated.status, status);
+        }
         aggregated.block_height = max_optional_i64(aggregated.block_height, block_height);
         aggregated.block_time = latest_optional_time(aggregated.block_time, block_time);
 
@@ -343,12 +351,23 @@ pub(crate) fn map_etherscan_transactions(
                 to_address,
                 value_amount,
             },
+            status,
         );
     }
 
     let mut mapped = Vec::with_capacity(by_hash.len());
     for aggregated in by_hash.into_values() {
-        let mut transfers = aggregated.transfers;
+        let mut transfers = Vec::new();
+        let mut excluded_transfer_keys = Vec::new();
+        for (transfer, transfer_status) in aggregated.transfers {
+            if aggregated.status == ChainTransactionStatus::Confirmed
+                && transfer_status == ChainTransactionStatus::Failed
+            {
+                excluded_transfer_keys.push(transfer.provider_transfer_key);
+            } else {
+                transfers.push(transfer);
+            }
+        }
         assign_transfer_display_indices(&mut transfers);
         mapped.push(SyncAccountTransactionRecord {
             tx_hash: aggregated.tx_hash,
@@ -359,6 +378,7 @@ pub(crate) fn map_etherscan_transactions(
             fee_amount: aggregated.fee_amount,
             nonce: aggregated.nonce,
             transfers,
+            excluded_transfer_keys,
         });
     }
     Ok(mapped)
@@ -458,6 +478,76 @@ mod tests {
             mapped[0].transfers[1].transfer_kind,
             TransferKind::SelfDestruct
         );
+    }
+
+    #[test]
+    fn failed_transaction_internal_call_keeps_successful_parent() {
+        let hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let normal = make_normal_tx(hash);
+        let mut failed = make_internal_tx(hash);
+        failed.is_error = "1".to_string();
+        let mut successful = make_internal_tx(hash);
+        successful.trace_id = "3".to_string();
+        let rows = map_etherscan_transactions(vec![normal], vec![failed, successful])
+            .expect("valid provider records");
+        assert_eq!(rows[0].status, ChainTransactionStatus::Confirmed);
+        assert_eq!(rows[0].transfers.len(), 2);
+        assert!(
+            rows[0]
+                .transfers
+                .iter()
+                .all(|t| t.provider_transfer_key.internal_trace_id() != Some("2"))
+        );
+        assert_eq!(
+            rows[0].excluded_transfer_keys[0].internal_trace_id(),
+            Some("2")
+        );
+    }
+
+    #[test]
+    fn failed_normal_remains_failed_with_successful_internal() {
+        let hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut normal = make_normal_tx(hash);
+        normal.is_error = "1".to_string();
+        let row = map_etherscan_transactions(vec![normal], vec![make_internal_tx(hash)])
+            .expect("valid provider records")
+            .remove(0);
+        assert_eq!(row.status, ChainTransactionStatus::Failed);
+        assert_eq!(row.transfers.len(), 2);
+        assert!(row.excluded_transfer_keys.is_empty());
+    }
+
+    #[test]
+    fn internal_only_outcome_is_independent_of_input_order() {
+        let hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut failed = make_internal_tx(hash);
+        failed.is_error = "1".to_string();
+        let mut successful = make_internal_tx(hash);
+        successful.trace_id = "3".to_string();
+        for calls in [
+            vec![failed.clone(), successful.clone()],
+            vec![successful.clone(), failed.clone()],
+        ] {
+            let row = map_etherscan_transactions(Vec::new(), calls)
+                .expect("valid provider records")
+                .remove(0);
+            assert_eq!(row.status, ChainTransactionStatus::Confirmed);
+            assert_eq!(row.transfers.len(), 1);
+            assert_eq!(
+                row.transfers[0].provider_transfer_key.internal_trace_id(),
+                Some("3")
+            );
+            assert_eq!(row.excluded_transfer_keys[0].internal_trace_id(), Some("2"));
+            assert_eq!(row.fee_amount, None);
+        }
+        let mut second_failed = failed.clone();
+        second_failed.trace_id = "3".to_string();
+        let row = map_etherscan_transactions(Vec::new(), vec![failed, second_failed])
+            .expect("valid provider records")
+            .remove(0);
+        assert_eq!(row.status, ChainTransactionStatus::Failed);
+        assert_eq!(row.transfers.len(), 2);
+        assert!(row.excluded_transfer_keys.is_empty());
     }
 
     #[test]

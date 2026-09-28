@@ -219,6 +219,12 @@ thread_local! {
     static DB_CELL: RefCell<ThreadConnectionState> = RefCell::new(HashMap::new());
 }
 
+pub(crate) fn close_app_db_for_current_thread() {
+    DB_CELL.with(|cell| {
+        cell.borrow_mut().remove(&AppDbConnectionKey::Production);
+    });
+}
+
 /// Reset the database connection (for tests only)
 /// This allows each test to start with a fresh in-memory database
 #[cfg(test)]

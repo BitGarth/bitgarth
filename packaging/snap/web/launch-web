@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+umask 077
+export BITGARTH_PROJECT_DIR="$SNAP_COMMON/bitgarth"
+export IP=127.0.0.1
+PORT="$(snapctl get port)"
+export PORT="${PORT:-8080}"
+mkdir -p "$BITGARTH_PROJECT_DIR"
+cd "$SNAP"
+exec "$SNAP/bitgarth-web"

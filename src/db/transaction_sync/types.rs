@@ -258,6 +258,7 @@ pub(crate) struct SyncAccountTransactionRecord {
     pub(crate) fee_amount: Option<UnsignedAmount>,
     pub(crate) nonce: Option<i64>,
     pub(crate) transfers: Vec<SyncAccountTransferRecord>,
+    pub(crate) excluded_transfer_keys: Vec<ProviderTransferKey>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

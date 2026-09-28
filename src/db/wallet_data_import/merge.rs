@@ -33,7 +33,7 @@ use crate::wallets::{
     ValidatedManualAssetAssertionNote, WalletAccountId, WalletId,
 };
 use chrono::{DateTime, Utc};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use std::collections::HashSet;
 use std::str::FromStr;
 
@@ -210,6 +210,7 @@ fn plan_created_manual_account(
 ) -> Result<bool, WalletDataImportDbError> {
     let lookup_key = ManualAccountLookupKey {
         wallet_id,
+        label_key: account.label.key(),
         asset_id: account.snapshot.asset_id.clone(),
         network_id: account.snapshot.network_id.clone(),
     };
@@ -490,6 +491,45 @@ pub(super) fn insert_manual_asset_assertion_in_tx(
     })?;
 
     Ok(())
+}
+
+pub(super) fn matching_manual_asset_assertion_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    account_id: WalletAccountId,
+    assertion: &ParsedImportedBalanceAssertion,
+    target_scale: ManualAssetDisplayScale,
+) -> Result<bool, WalletDataImportDbError> {
+    let existing: Option<(i64, i64, Option<String>)> = tx
+        .query_row(
+            "SELECT balance_amount_hi, balance_amount_lo, note
+             FROM manual_asset_balance_assertions
+             WHERE account_id = ?1 AND asserted_on = ?2",
+            params![account_id.to_string(), assertion.asserted_on.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|err| {
+            WalletDataImportDbError::Internal(format!(
+                "Failed to load existing manual assertion during import: {err}"
+            ))
+        })?;
+    let (hi, lo, note) = existing.ok_or_else(|| {
+        WalletDataImportDbError::Internal("Existing manual assertion date has no row".to_string())
+    })?;
+    let amount = assertion
+        .balance
+        .parse_at_scale(target_scale)
+        .map_err(|err| {
+            WalletDataImportDbError::Validation(format!("Invalid manual assertion amount: {err}"))
+        })?;
+    let parts = split_unsigned_amount(amount.amount(), "manual assertion")?;
+    Ok(parts.hi == hi
+        && parts.lo == lo
+        && assertion
+            .note
+            .as_ref()
+            .map(ValidatedManualAssetAssertionNote::as_str)
+            == note.as_deref())
 }
 
 pub(super) fn push_duplicate_skip(

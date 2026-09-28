@@ -177,11 +177,15 @@ pub(crate) fn report_boundary_utc(
     boundary: BoundaryKind,
     timezone: UserTimezone,
 ) -> Result<DateTime<Utc>, PriceOverrideValidationError> {
-    let local_text = match boundary {
-        BoundaryKind::Opening => format!("{date}T00:00:00"),
-        BoundaryKind::Closing => format!("{date}T23:59:59"),
+    let kind = match boundary {
+        BoundaryKind::Opening => crate::report_dates::DateBoundaryKind::StartOfDay,
+        BoundaryKind::Closing => crate::report_dates::DateBoundaryKind::EndOfDay,
     };
-    local_timestamp_to_utc(&local_text, timezone)
+    Ok(crate::report_dates::local_report_date_to_utc_boundary(
+        date.into_naive_date(),
+        timezone,
+        kind,
+    ))
 }
 
 pub(crate) fn price_subject_sort_key(subject: &PriceSubject) -> String {
@@ -281,6 +285,23 @@ mod tests {
             closing.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "2025-01-01T22:59:59Z"
         );
+    }
+
+    #[test]
+    fn report_boundaries_accept_santiago_midnight_transitions() {
+        let spring = ReportDateParam::from_naive_date(
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 6).expect("valid date"),
+        );
+        let fall = ReportDateParam::from_naive_date(
+            chrono::NaiveDate::from_ymd_opt(2026, 4, 4).expect("valid date"),
+        );
+        assert_eq!(
+            report_boundary_utc(spring, BoundaryKind::Opening, tz("America/Santiago"))
+                .expect("spring opening")
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "2026-09-06T04:00:00Z"
+        );
+        assert!(report_boundary_utc(fall, BoundaryKind::Closing, tz("America/Santiago")).is_ok());
     }
 
     #[test]

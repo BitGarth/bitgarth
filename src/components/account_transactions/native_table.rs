@@ -14,7 +14,7 @@ use crate::components::wallets::truncate_reference_with_lengths;
 use crate::models::NumberFormat;
 use crate::settings::SettingsState;
 use crate::timezone::format_timestamp;
-use crate::transactions::AccountTransactionDirection;
+use crate::transactions::{AccountTransactionDirection, ChainTransactionStatus, display_tx_hash};
 use crate::wallets::{
     AccountTransactionRowResponse, AccountTransactionTableResponse, Network, SyncedAssetId,
     TransactionSortDirection, TransactionsEmptyHint,
@@ -122,6 +122,7 @@ pub(super) fn TransactionsTableSection(
     on_sort_toggle: EventHandler<TransactionSortDirection>,
 ) -> Element {
     let totals_text = table_totals_text(&table);
+    let show_totals = last_page(&table) > 1;
     let bottom_table = table.clone();
     let mut use_table_view = use_signal(|| false);
 
@@ -147,7 +148,9 @@ pub(super) fn TransactionsTableSection(
                             TableIcon {}
                         }
                     }
-                    span { class: "muted", "{totals_text}" }
+                    if show_totals {
+                        span { class: "muted", "{totals_text}" }
+                    }
                     if let Some(current_sort) = sort_toggle {
                         button {
                             class: "btn btn-secondary tx-sort-toggle",
@@ -268,7 +271,11 @@ pub(super) fn TransactionsTableSection(
                                         let type_label = direction_label(direction);
                                         let amount_display =
                                             format_transaction_amount(&row.value, direction, &amount_context);
-                                        let amount_display_class = amount_class(direction);
+                                        let amount_display_class = if row.status == ChainTransactionStatus::Failed {
+                                            "tx-amount-neutral"
+                                        } else {
+                                            amount_class(direction)
+                                        };
                                         let fee_display =
                                             format_fee_amount(row.fee.as_ref(), &amount_context);
                                         let balance_display = format_closing_balance(
@@ -289,7 +296,7 @@ pub(super) fn TransactionsTableSection(
                                             })
                                         });
                                         let status = row.status;
-                                        let tx_hash = row.tx_hash.clone();
+                                        let tx_hash = display_tx_hash(asset, &row.tx_hash).into_owned();
                                         let tx_explorer = tx_explorer_url(
                                             &settings_state,
                                             crate::explorer_links::DigitalAssetTransactionRef::from_asset(
@@ -309,9 +316,21 @@ pub(super) fn TransactionsTableSection(
                                                 td { "{timestamp_display}" }
                                                 td { "{type_label}" }
                                                 td { class: "tx-table-amount {amount_display_class}",
-                                                    "{amount_display}"
+                                                    if status == ChainTransactionStatus::Failed {
+                                                        s { "{amount_display}" }
+                                                        span { class: "muted", " Not transferred" }
+                                                    } else {
+                                                        "{amount_display}"
+                                                    }
                                                     if let Some(converted) = &converted_amount {
-                                                        div { class: "tx-converted-secondary", "{converted}" }
+                                                        div { class: "tx-converted-secondary",
+                                                            if status == ChainTransactionStatus::Failed {
+                                                                s { "{converted}" }
+                                                                span { class: "muted", " Not transferred" }
+                                                            } else {
+                                                                "{converted}"
+                                                            }
+                                                        }
                                                     }
                                                 }
                                                 td { class: "tx-table-fee",
@@ -429,7 +448,7 @@ pub(super) fn TransactionCardRow(
 ) -> Element {
     let settings_state = use_context::<SettingsState>();
     let _user_currency = (settings_state.currency)();
-    let tx_hash = row.tx_hash.clone();
+    let tx_hash = display_tx_hash(asset, &row.tx_hash).into_owned();
     let tx_explorer = tx_explorer_url(
         &settings_state,
         crate::explorer_links::DigitalAssetTransactionRef::from_asset(asset, network, &tx_hash),
@@ -438,7 +457,11 @@ pub(super) fn TransactionCardRow(
     let direction = row.direction;
     let type_label = direction_label(direction);
     let amount_display = format_transaction_amount(&row.value, direction, &amount_context);
-    let amount_display_class = amount_class(direction);
+    let amount_display_class = if row.status == ChainTransactionStatus::Failed {
+        "tx-amount-neutral"
+    } else {
+        amount_class(direction)
+    };
     let fee_display = format_fee_amount(row.fee.as_ref(), &amount_context);
     let balance_display = format_closing_balance(row.closing_balance.as_ref(), &amount_context);
     let converted_amount = active_quote.as_ref().map(|q| {
@@ -495,9 +518,21 @@ pub(super) fn TransactionCardRow(
                 }
                 div { class: "tx-card-amount-group",
                     div { class: "tx-card-amount {amount_display_class}",
-                        "{amount_display}"
+                        if status == ChainTransactionStatus::Failed {
+                            s { "{amount_display}" }
+                            span { class: "muted", " Not transferred" }
+                        } else {
+                            "{amount_display}"
+                        }
                         if let Some(converted) = &converted_amount {
-                            div { class: "tx-converted-secondary", "{converted}" }
+                            div { class: "tx-converted-secondary",
+                                if status == ChainTransactionStatus::Failed {
+                                    s { "{converted}" }
+                                    span { class: "muted", " Not transferred" }
+                                } else {
+                                    "{converted}"
+                                }
+                            }
                         }
                     }
                     if heading_status.as_deref() != Some(status_label(status)) {

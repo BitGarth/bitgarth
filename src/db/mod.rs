@@ -214,7 +214,7 @@ pub(crate) use exports::{
 ))]
 pub(crate) use exports::{
     ExportAccountTransactionLedgerRow, ExportCommodity, ExportNativeApiBalanceAssertionRow,
-    load_all_confirmed_account_transaction_ledger_rows_for_export,
+    load_account_transaction_ledger_rows_for_export,
     load_all_native_api_balance_assertion_rows_for_export,
 };
 pub(crate) use manual_asset_assertions::{
@@ -255,11 +255,11 @@ pub(crate) use transaction_sync::{
     persist_mempool_address_observation_success, publish_mempool_history_proof,
     publish_strict_mempool_history_proof, reconcile_account_transactions,
     reconcile_address_transactions_preserving_invalidation, refresh_account_integration_sync_state,
-    restart_strict_mempool_history_scan, save_etherscan_pending_range,
-    update_address_etherscan_backfill_cursor, update_address_etherscan_history_status,
-    update_address_mempool_backfill_cursor, update_address_mempool_expected_tx_count,
-    upsert_account_sync_state, upsert_chain_tip_state, upsert_hd_account_chain_sync_state,
-    validate_strict_mempool_history_scan,
+    refresh_mempool_history_proof, restart_strict_mempool_history_scan,
+    save_etherscan_pending_range, update_address_etherscan_backfill_cursor,
+    update_address_etherscan_history_status, update_address_mempool_backfill_cursor,
+    update_address_mempool_expected_tx_count, upsert_account_sync_state, upsert_chain_tip_state,
+    upsert_hd_account_chain_sync_state, validate_strict_mempool_history_scan,
 };
 pub(crate) use transactions::{
     load_account_transaction_counts, load_account_transaction_history, load_all_account_balances,
@@ -313,5 +313,6 @@ pub(crate) use user_db::{
 
 // Backwards-compatible aliases for existing code
 // (with_app_db and with_app_db_mut are also available for explicit app db access)
+pub(crate) use app_db::close_app_db_for_current_thread;
 pub(crate) use app_db::with_app_db as with_db;
 pub(crate) use app_db::with_app_db_mut as with_db_mut;

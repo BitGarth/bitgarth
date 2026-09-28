@@ -38,6 +38,7 @@ pub(crate) use mempool_history::{
     BitcoinAccountHistoryCoverage, StrictMempoolScanValidation,
     restart_strict_mempool_history_scan, validate_strict_mempool_history_scan,
 };
+pub(in crate::db) use reconciliation::reconcile_account_transaction_tx;
 #[cfg(any(
     all(feature = "server", feature = "dev-config", not(test)),
     all(test, feature = "db-tests")
@@ -56,9 +57,9 @@ pub(crate) use sync_state::{
     mark_address_sync_completed_success, mark_address_sync_started,
     persist_mempool_address_observation_success, publish_mempool_history_proof,
     publish_strict_mempool_history_proof, refresh_account_integration_sync_state,
-    update_address_etherscan_backfill_cursor, update_address_etherscan_history_status,
-    update_address_mempool_backfill_cursor, update_address_mempool_expected_tx_count,
-    upsert_account_sync_state,
+    refresh_mempool_history_proof, update_address_etherscan_backfill_cursor,
+    update_address_etherscan_history_status, update_address_mempool_backfill_cursor,
+    update_address_mempool_expected_tx_count, upsert_account_sync_state,
 };
 pub(in crate::db) use sync_state::{
     publish_mempool_history_proof_conn, publish_strict_mempool_history_proof_conn,
@@ -173,6 +174,7 @@ mod tests {
                 block_time: Some(now),
                 fee_amount: Some(UnsignedAmount::zero()),
                 nonce: Some(1),
+                excluded_transfer_keys: Vec::new(),
                 transfers: vec![SyncAccountTransferRecord {
                     provider_transfer_key: key,
                     transfer_index: index,
@@ -237,6 +239,198 @@ mod tests {
     }
 
     #[test]
+    fn excluded_transfer_preserves_other_accounts_unrelated_history() {
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let user_id = UserId::new();
+        initialize_user_db_for_test(user_id).expect("user DB should initialize");
+        let now = test_now();
+        let address_a = parse_eth_address("0x52908400098527886E0F7030069857D2E4169EE7");
+        let address_b = parse_eth_address("0x8617E340B3D01FA5F11F306F4090FD50E238070D");
+        let account_a = create_eth_wallet_account_fixture(user_id, &address_a, "Recipient A", now);
+        let account_b = create_eth_wallet_account_fixture(user_id, &address_b, "Recipient B", now);
+        let tx_hash =
+            parse_tx_hash("abababababababababababababababababababababababababababababababab");
+        let transfer =
+            |key: ProviderTransferKey, to: &EthAddress, value| SyncAccountTransferRecord {
+                provider_transfer_key: key,
+                transfer_index: 1,
+                transfer_kind: TransferKind::Internal,
+                from_address: None,
+                to_address: Some(parse_tracked_address(&to.checksummed())),
+                value_amount: UnsignedAmount::from_u128(value),
+            };
+        let normal = SyncAccountTransferRecord {
+            provider_transfer_key: ProviderTransferKey::normal(),
+            transfer_index: 0,
+            transfer_kind: TransferKind::Normal,
+            from_address: None,
+            to_address: Some(parse_tracked_address(&address_a.checksummed())),
+            value_amount: UnsignedAmount::from_u128(100),
+        };
+        let successful = transfer(
+            ProviderTransferKey::from_internal_trace_id("3").unwrap(),
+            &address_a,
+            30,
+        );
+        let failed = transfer(
+            ProviderTransferKey::from_internal_trace_id("2").unwrap(),
+            &address_b,
+            20,
+        );
+        let record = SyncAccountTransactionRecord {
+            tx_hash: tx_hash.clone(),
+            status: ChainTransactionStatus::Confirmed,
+            block_height: Some(10),
+            block_hash: None,
+            block_time: Some(now),
+            fee_amount: None,
+            nonce: Some(1),
+            transfers: vec![normal.clone(), successful.clone(), failed],
+            excluded_transfer_keys: Vec::new(),
+        };
+        reconcile_account_transactions(
+            user_id,
+            SyncedAssetId::Ethereum,
+            Network::Mainnet,
+            std::slice::from_ref(&record),
+            now,
+        )
+        .expect("seed should reconcile");
+        let funding = SyncAccountTransactionRecord {
+            tx_hash: parse_tx_hash(&"cd".repeat(32)),
+            transfers: vec![SyncAccountTransferRecord {
+                to_address: Some(parse_tracked_address(&address_b.checksummed())),
+                ..normal.clone()
+            }],
+            ..record.clone()
+        };
+        reconcile_account_transactions(
+            user_id,
+            SyncedAssetId::Ethereum,
+            Network::Mainnet,
+            &[funding],
+            now,
+        )
+        .expect("unrelated funding should reconcile");
+        crate::db::rebuild_account_transaction_ledger(user_id, account_b.account_id, now)
+            .expect("initial ledger should build");
+        let load_keys = || {
+            with_user_db(user_id, |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT provider_transfer_key FROM account_transfers WHERE tx_hash = ?1 ORDER BY provider_transfer_key"
+            ).map_err(|err| DbError::new(format!("Failed to prepare keys: {err}")))?;
+            stmt.query_map([tx_hash.as_str()], |row| row.get::<_, String>(0))
+                .map_err(|err| DbError::new(format!("Failed to query keys: {err}")))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| DbError::new(format!("Failed to read keys: {err}")))
+        }).expect("keys should load")
+        };
+        let corrected = SyncAccountTransactionRecord {
+            transfers: vec![normal, successful],
+            excluded_transfer_keys: vec![ProviderTransferKey::from_internal_trace_id("2").unwrap()],
+            ..record
+        };
+        crate::db::user_db::with_user_db_mut(user_id, |conn| {
+            conn.execute_batch("CREATE TEMP TRIGGER reject_ledger_rebuild BEFORE INSERT ON account_transaction_ledger BEGIN SELECT RAISE(FAIL, 'synthetic ledger failure'); END;")
+                .map_err(|err| DbError::new(err.to_string()))
+        }).unwrap();
+        assert!(
+            reconcile_account_transactions(
+                user_id,
+                SyncedAssetId::Ethereum,
+                Network::Mainnet,
+                std::slice::from_ref(&corrected),
+                now
+            )
+            .is_err()
+        );
+        assert_eq!(load_keys(), vec!["internal:2", "internal:3", "normal"]);
+        crate::db::user_db::with_user_db_mut(user_id, |conn| {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM account_transaction_ledger WHERE account_id = ?1",
+                    [account_b.account_id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 2, "failed rebuild must preserve B's original ledger");
+            conn.execute_batch("DROP TRIGGER reject_ledger_rebuild")
+                .map_err(|err| DbError::new(err.to_string()))
+        })
+        .unwrap();
+        let first = reconcile_account_transactions(
+            user_id,
+            SyncedAssetId::Ethereum,
+            Network::Mainnet,
+            std::slice::from_ref(&corrected),
+            now,
+        )
+        .expect("exclusion should reconcile");
+        assert_eq!(first.updated_tx_count.value(), 1);
+        assert_eq!(
+            load_keys(),
+            vec!["internal:3".to_string(), "normal".to_string()]
+        );
+        let sibling_value: i64 = with_user_db(user_id, |conn| {
+            conn.query_row(
+                "SELECT value_amount_lo FROM account_transfers WHERE tx_hash = ?1 AND provider_transfer_key = 'internal:3'",
+                [tx_hash.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(|err| DbError::new(format!("Failed to load sibling value: {err}")))
+        })
+        .expect("sibling value should load");
+        assert_eq!(sibling_value, 30);
+        let second = reconcile_account_transactions(
+            user_id,
+            SyncedAssetId::Ethereum,
+            Network::Mainnet,
+            std::slice::from_ref(&corrected),
+            now,
+        )
+        .expect("repeat should reconcile");
+        assert_eq!(second.updated_tx_count.value(), 0);
+        let conflicting = SyncAccountTransactionRecord {
+            excluded_transfer_keys: vec![ProviderTransferKey::normal()],
+            ..corrected.clone()
+        };
+        assert!(
+            reconcile_account_transactions(
+                user_id,
+                SyncedAssetId::Ethereum,
+                Network::Mainnet,
+                &[conflicting],
+                now,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            load_keys(),
+            vec!["internal:3".to_string(), "normal".to_string()]
+        );
+        let b_rows: i64 = with_user_db(user_id, |conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM account_transaction_ledger WHERE account_id = ?1",
+                [account_b.account_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|err| DbError::new(format!("Failed to count ledger rows: {err}")))
+        })
+        .expect("ledger should load");
+        assert_eq!(b_rows, 1);
+        let remaining: (String, i64, i64) = with_user_db(user_id, |conn| {
+            conn.query_row(
+                "SELECT tx_hash, balance_delta_lo, closing_balance_lo FROM account_transaction_ledger WHERE account_id = ?1",
+                [account_b.account_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).map_err(|err| DbError::new(format!("Failed to load remaining history: {err}")))
+        }).expect("unrelated history and balance should remain readable without syncing B");
+        assert_eq!(remaining, ("cd".repeat(32), 100, 100));
+        crate::db::rebuild_account_transaction_ledger(user_id, account_a.account_id, now)
+            .expect("sibling owner should rebuild");
+    }
+
+    #[test]
     fn observed_transfer_retires_only_its_matching_legacy_identity() {
         let _runtime = acquire_test_runtime().expect("test runtime should initialize");
         let user_id = UserId::new();
@@ -293,6 +487,7 @@ mod tests {
             block_time: Some(now),
             fee_amount: Some(UnsignedAmount::zero()),
             nonce: Some(1),
+            excluded_transfer_keys: Vec::new(),
             transfers: vec![SyncAccountTransferRecord {
                 provider_transfer_key: ProviderTransferKey::from_internal_trace_id(trace_id)
                     .unwrap(),
@@ -1755,6 +1950,7 @@ mod tests {
             block_time: Some(now),
             fee_amount: Some(UnsignedAmount::zero()),
             nonce: Some(1),
+            excluded_transfer_keys: Vec::new(),
             transfers: vec![SyncAccountTransferRecord {
                 provider_transfer_key: ProviderTransferKey::normal(),
                 transfer_index: 0,
@@ -1823,6 +2019,7 @@ mod tests {
             block_time: Some(now),
             fee_amount: Some(UnsignedAmount::zero()),
             nonce: Some(1),
+            excluded_transfer_keys: Vec::new(),
             transfers: vec![SyncAccountTransferRecord {
                 provider_transfer_key: ProviderTransferKey::normal(),
                 transfer_index: 0,

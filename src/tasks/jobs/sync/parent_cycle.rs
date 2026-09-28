@@ -258,6 +258,11 @@ fn log_child_worker_terminal(run: RunContext<'_>, child_summary: &IntegrationChi
         addresses_synced = child_summary.summary.addresses_synced.value(),
         addresses_failed = child_summary.summary.addresses_failed.value(),
         addresses_skipped = child_summary.summary.addresses_skipped.value(),
+        addresses_skipped_balance_fresh = child_summary.summary.skipped_by_reason.balance_fresh,
+        addresses_skipped_cooldown = child_summary.summary.skipped_by_reason.cooldown,
+        addresses_skipped_rate_limited = child_summary.summary.skipped_by_reason.rate_limited,
+        addresses_skipped_tip_unchanged = child_summary.summary.skipped_by_reason.tip_unchanged,
+        addresses_skipped_blocked = child_summary.summary.skipped_by_reason.blocked,
         rate_limited_integrations = child_summary.summary.rate_limited.len(),
         "sync_child_completed"
     );
@@ -329,12 +334,9 @@ fn aggregate_child_summaries(
                 .value()
                 .saturating_add(child.summary.addresses_skipped.value()),
         );
-        summary.addresses_skipped_tip_unchanged = AddressCount::from_u32(
-            summary
-                .addresses_skipped_tip_unchanged
-                .value()
-                .saturating_add(child.summary.addresses_skipped_tip_unchanged.value()),
-        );
+        summary
+            .skipped_by_reason
+            .merge(child.summary.skipped_by_reason);
         summary.addresses_early_exited = AddressCount::from_u32(
             summary
                 .addresses_early_exited

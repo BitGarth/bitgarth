@@ -51,6 +51,7 @@ use crate::transactions::{
 use chrono::{DateTime, Utc};
 use dioxus::logger::tracing;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::Instant as StdInstant;
@@ -310,6 +311,9 @@ enum ManagerCommand {
         result_tx: oneshot::Sender<TriggerEnqueueResult>,
     },
     JobCompleted(JobCompletion),
+    Shutdown {
+        result_tx: oneshot::Sender<()>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -330,6 +334,8 @@ struct TaskManager {
     command_rx: mpsc::Receiver<ManagerCommand>,
     jobs: HashMap<JobKey, JobState>,
     eligibility_refresh: eligibility_refresh::EligibilityRefresh,
+    shutting_down: bool,
+    shutdown_result: Option<oneshot::Sender<()>>,
 }
 
 fn users_eligible_for_transaction_monitoring(
@@ -578,6 +584,8 @@ impl TaskManager {
             command_rx,
             jobs,
             eligibility_refresh: eligibility_refresh::EligibilityRefresh::default(),
+            shutting_down: false,
+            shutdown_result: None,
         }
     }
 
@@ -587,8 +595,14 @@ impl TaskManager {
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
+            if self.shutting_down && self.jobs.values().all(|state| !state.running) {
+                if let Some(result_tx) = self.shutdown_result.take() {
+                    let _ = result_tx.send(());
+                }
+                break;
+            }
             tokio::select! {
-                _ = ticker.tick() => {
+                _ = ticker.tick(), if !self.shutting_down && !TASK_MANAGER_SHUTTING_DOWN.load(Ordering::Acquire) => {
                     self.handle_schedule_tick();
                 }
                 maybe_command = self.command_rx.recv() => {
@@ -893,10 +907,20 @@ impl TaskManager {
             ManagerCommand::JobCompleted(completion) => {
                 self.handle_job_completion(completion);
             }
+            ManagerCommand::Shutdown { result_tx } => {
+                self.shutting_down = true;
+                for state in self.jobs.values_mut() {
+                    state.pending = None;
+                }
+                self.shutdown_result = Some(result_tx);
+            }
         }
     }
 
     fn apply_trigger(&mut self, request: TriggerRequest) -> TriggerEnqueueResult {
+        if self.shutting_down || TASK_MANAGER_SHUTTING_DOWN.load(Ordering::Acquire) {
+            return TriggerEnqueueResult::RejectedShuttingDown;
+        }
         if !self.ensure_dynamic_job_exists(request.key) {
             return TriggerEnqueueResult::RejectedInvalidKey;
         }
@@ -966,7 +990,10 @@ impl TaskManager {
             }
         }
 
-        if let Some(pending) = state.pending.take() {
+        if let Some(pending) = state.pending.take()
+            && !self.shutting_down
+            && !TASK_MANAGER_SHUTTING_DOWN.load(Ordering::Acquire)
+        {
             state.running = true;
             self.start_job_run(pending);
         }
@@ -1356,7 +1383,9 @@ pub(crate) fn subscribe_transaction_sync_events(
 
 static STARTUP_LOCK: Mutex<()> = Mutex::new(());
 static TASK_MANAGER_COMMAND_TX: OnceLock<mpsc::Sender<ManagerCommand>> = OnceLock::new();
-static TASK_MANAGER_THREAD_HANDLE: OnceLock<thread::JoinHandle<()>> = OnceLock::new();
+static TASK_MANAGER_THREAD_HANDLE: OnceLock<Mutex<Option<thread::JoinHandle<()>>>> =
+    OnceLock::new();
+static TASK_MANAGER_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 fn spawn_task_manager_thread(
     manager: TaskManager,
@@ -1407,7 +1436,7 @@ pub(crate) fn ensure_started() -> Result<(), TaskStartupError> {
         handle.spawn(manager.run());
     } else {
         let thread_handle = spawn_task_manager_thread(manager)?;
-        let _ = TASK_MANAGER_THREAD_HANDLE.set(thread_handle);
+        let _ = TASK_MANAGER_THREAD_HANDLE.set(Mutex::new(Some(thread_handle)));
     }
 
     #[cfg(test)]
@@ -1415,7 +1444,7 @@ pub(crate) fn ensure_started() -> Result<(), TaskStartupError> {
         // Current-thread test runtimes are dropped between tests. Keep the task manager on its
         // own runtime thread in tests so the global sender stays usable for the full suite.
         let thread_handle = spawn_task_manager_thread(manager)?;
-        let _ = TASK_MANAGER_THREAD_HANDLE.set(thread_handle);
+        let _ = TASK_MANAGER_THREAD_HANDLE.set(Mutex::new(Some(thread_handle)));
     }
 
     TASK_MANAGER_COMMAND_TX
@@ -1426,6 +1455,9 @@ pub(crate) fn ensure_started() -> Result<(), TaskStartupError> {
 }
 
 pub(crate) async fn enqueue_trigger(request: TriggerRequest) -> TriggerEnqueueResult {
+    if TASK_MANAGER_SHUTTING_DOWN.load(Ordering::Acquire) {
+        return TriggerEnqueueResult::RejectedShuttingDown;
+    }
     let Some(command_tx) = TASK_MANAGER_COMMAND_TX.get() else {
         return TriggerEnqueueResult::RejectedShuttingDown;
     };
@@ -1442,6 +1474,34 @@ pub(crate) async fn enqueue_trigger(request: TriggerRequest) -> TriggerEnqueueRe
         Ok(result) => result,
         Err(_) => TriggerEnqueueResult::RejectedShuttingDown,
     }
+}
+
+pub(crate) async fn shutdown() -> Result<(), &'static str> {
+    TASK_MANAGER_SHUTTING_DOWN.store(true, Ordering::Release);
+    let command_tx = TASK_MANAGER_COMMAND_TX
+        .get()
+        .ok_or("task manager was not started")?;
+    let (result_tx, result_rx) = oneshot::channel();
+    command_tx
+        .send(ManagerCommand::Shutdown { result_tx })
+        .await
+        .map_err(|_| "task manager stopped before shutdown")?;
+    result_rx
+        .await
+        .map_err(|_| "task manager stopped before jobs drained")
+}
+
+pub(crate) fn join_task_manager_thread() -> Result<(), &'static str> {
+    if let Some(handle) = TASK_MANAGER_THREAD_HANDLE
+        .get()
+        .ok_or("task manager thread missing")?
+        .lock()
+        .map_err(|_| "task manager thread lock poisoned")?
+        .take()
+    {
+        handle.join().map_err(|_| "task manager thread panicked")?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn enqueue_price_history_reconciliation(
@@ -1515,6 +1575,53 @@ mod tests {
             transition.enqueue_result,
             TriggerEnqueueResult::AcceptedStarted { run_id: None }
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_rejects_new_work_and_waits_for_running_job() {
+        let (command_tx, command_rx) = mpsc::channel(MANAGER_CHANNEL_CAPACITY);
+        let mut manager = TaskManager::new(command_tx.clone(), command_rx);
+        let request = session_request(TriggerSource::ManualInternal);
+        let key = request.key;
+        let state = manager.jobs.get_mut(&key).expect("session job exists");
+        state.running = true;
+        state.pending = Some(request);
+        let runner = tokio::spawn(manager.run());
+
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        command_tx
+            .send(ManagerCommand::Shutdown {
+                result_tx: shutdown_tx,
+            })
+            .await
+            .expect("shutdown command accepted");
+        let (enqueue_tx, enqueue_rx) = oneshot::channel();
+        command_tx
+            .send(ManagerCommand::Enqueue {
+                request,
+                result_tx: enqueue_tx,
+            })
+            .await
+            .expect("enqueue command accepted");
+        assert_eq!(
+            enqueue_rx.await.expect("enqueue answered"),
+            TriggerEnqueueResult::RejectedShuttingDown
+        );
+        assert!(shutdown_rx.try_recv().is_err());
+
+        command_tx
+            .send(ManagerCommand::JobCompleted(JobCompletion {
+                request,
+                result: Err("finished".to_owned()),
+                elapsed: Duration::ZERO,
+            }))
+            .await
+            .expect("completion accepted");
+        tokio::time::timeout(Duration::from_secs(1), shutdown_rx)
+            .await
+            .expect("shutdown should finish")
+            .expect("shutdown acknowledged");
+        runner.await.expect("manager should exit");
     }
 
     #[test]

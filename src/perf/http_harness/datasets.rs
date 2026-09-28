@@ -828,6 +828,7 @@ pub(super) fn build_large_account_transaction_records(
                 "fee",
             )?),
             nonce: Some(i64::from(index)),
+            excluded_transfer_keys: Vec::new(),
             transfers: vec![SyncAccountTransferRecord {
                 provider_transfer_key: ProviderTransferKey::normal(),
                 transfer_index: 0_i64,
@@ -858,6 +859,7 @@ pub(super) fn build_large_account_transaction_records(
                 "pending fee",
             )?),
             nonce: Some(i64::from(confirmed_count) + i64::from(index)),
+            excluded_transfer_keys: Vec::new(),
             transfers: vec![SyncAccountTransferRecord {
                 provider_transfer_key: ProviderTransferKey::normal(),
                 transfer_index: 0_i64,

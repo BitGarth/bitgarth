@@ -43,7 +43,7 @@ fn parser_and_selection_failures_exit_two() {
     let no_profiles = run_cli(&["balancesheet"], Some(&root));
     assert_eq!(no_profiles.status.code(), Some(2));
     assert!(stderr(&no_profiles).contains("no profiles configured"));
-    assert!(stderr(&no_profiles).contains("run `bitgarth pair` first"));
+    assert!(stderr(&no_profiles).contains("run the `pair` command first"));
     assert!(!stderr(&no_profiles).contains("ORIGIN"));
 
     let origin = "http://127.0.0.1:9/";

@@ -57,7 +57,7 @@ use self::rate_limit::{is_rate_limited, record_rate_limit};
 const MEMPOOL_REQUEST_TIMEOUT_SECONDS: u64 = 10;
 const ADDRESS_SYNC_COOLDOWN: Duration = Duration::from_secs(90);
 const FAILED_ADDRESS_SYNC_COOLDOWN: Duration = Duration::from_secs(30);
-const ETHERSCAN_ADDRESS_SYNC_COOLDOWN: Duration = Duration::from_secs(15 * 60);
+const ETHERSCAN_ADDRESS_SYNC_COOLDOWN: Duration = crate::account_mode::ACCOUNT_REFRESH_INTERVAL;
 const ETHERSCAN_FAILED_ADDRESS_SYNC_COOLDOWN: Duration = Duration::from_secs(15 * 60);
 pub(super) const ETHERSCAN_RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(15 * 60);
 pub(super) const MEMPOOL_RATE_LIMIT_BACKOFF_BASE: Duration = Duration::from_secs(60);

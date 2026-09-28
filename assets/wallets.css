@@ -1450,8 +1450,10 @@
 
 .transactions-table-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
+  gap: var(--app-space-2) var(--app-space-3);
   padding: var(--app-space-3) var(--app-space-5);
   border-bottom: 1px solid var(--color-border-light);
 }
@@ -1464,8 +1466,13 @@
 
 .transactions-table-header-right {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--app-space-3);
+}
+
+.transactions-table-header-right .muted {
+  white-space: nowrap;
 }
 
 .transactions-list {
@@ -2417,6 +2424,7 @@
   .tx-back-link,
   .date-range-year-dial,
   .date-range-this-year,
+  .date-range-all-time,
   .date-range-custom-toggle,
   .date-range-toolbar-currency-group {
     display: none !important;

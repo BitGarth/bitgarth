@@ -1,0 +1,51 @@
+name: bitgarth-cli
+title: BitGarth CLI
+version: '@VERSION@'
+summary: Command-line client for BitGarth, a private crypto portfolio tracker
+description: |
+  BitGarth tracks your Bitcoin and Ethereum holdings without handing your
+  financial data to a cloud service. It is watch-only and never asks for
+  seed phrases or private keys.
+
+  This snap is the command-line client. It does not sync wallets itself;
+  it connects to a BitGarth server you already use, for example:
+   - the bitgarth-web snap on this computer (sudo snap install bitgarth-web)
+   - your own self-hosted BitGarth (Docker, Homebrew or a release download)
+   - the hosted service at https://my.bitgarth.app
+
+  Link the client to your account once, then read your balances:
+
+    bitgarth-cli pair https://my.bitgarth.app/
+    bitgarth-cli balancesheet
+
+  For the local bitgarth-web snap, pair with http://127.0.0.1:8080/ and
+  add --allow-insecure-http. "login" works as another name for "pair".
+  Revoke access any time in the web app under Settings > Paired Clients.
+
+  Website and documentation: https://bitgarth.app
+
+  BitGarth is distributed under the FSL-1.1-ALv2 license.
+license: Proprietary
+website: https://bitgarth.app
+source-code: https://github.com/BitGarth/bitgarth
+base: core24
+grade: stable
+confinement: strict
+platforms:
+  amd64:
+    build-on: [amd64]
+    build-for: [amd64]
+apps:
+  bitgarth-cli:
+    command: bin/launch-cli
+    plugs: [network]
+parts:
+  application:
+    plugin: dump
+    source: payload/
+    stage-packages: [ca-certificates]
+  launcher:
+    plugin: dump
+    source: launcher/
+    organize:
+      launch-cli: bin/launch-cli

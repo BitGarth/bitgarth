@@ -218,14 +218,14 @@ fn load_account_model_balance(
 ) -> Result<AddressBalanceSummary, DbError> {
     let account_id_raw = account_id.to_string();
 
-    // Read the confirmed balance from the most recent confirmed ledger entry's closing_balance.
+    // Read the settled balance from the most recent settled ledger entry's closing_balance.
     // Uses idx_account_tx_ledger_confirmed_page partial index for O(1) lookup.
     let confirmed_row = conn
         .query_row(
             "SELECT closing_balance_hi, closing_balance_lo, occurred_at
              FROM account_transaction_ledger INDEXED BY idx_account_tx_ledger_confirmed_page
              WHERE account_id = ?1
-               AND status = 'confirmed'
+               AND status IN ('confirmed', 'failed')
              ORDER BY
                 occurred_at DESC,
                 COALESCE(block_height, 9223372036854775807) DESC,
@@ -372,7 +372,7 @@ pub(super) fn load_grouped_account_ledger_balances(
                                     tx_hash DESC
                             ) AS row_num
                      FROM account_transaction_ledger
-                     WHERE status = 'confirmed'
+                     WHERE status IN ('confirmed', 'failed')
                        AND closing_balance_hi IS NOT NULL
                        AND closing_balance_lo IS NOT NULL
                        AND account_id NOT IN (
@@ -851,7 +851,7 @@ fn load_ledger_transaction_history(
                     fee_amount_hi, fee_amount_lo
              FROM account_transaction_ledger INDEXED BY idx_account_tx_ledger_pending_page
              WHERE account_id = ?1
-               AND status IN ('pending', 'dropped', 'failed')
+               AND status IN ('pending', 'dropped')
              ORDER BY
                 first_seen_at DESC,
                 COALESCE(nonce, 9223372036854775807) DESC,
@@ -912,7 +912,7 @@ fn load_ledger_transaction_history(
                     fee_amount_hi, fee_amount_lo
              FROM account_transaction_ledger INDEXED BY idx_account_tx_ledger_confirmed_page
              WHERE account_id = ?1
-               AND status = 'confirmed'
+               AND status IN ('confirmed', 'failed')
              ORDER BY
                 occurred_at DESC,
                 COALESCE(block_height, 9223372036854775807) DESC,
@@ -1367,7 +1367,7 @@ fn insert_ethereum_account_balances_fixture_internal(
     tx.execute(
         "INSERT INTO account_transfers
          (id, chain_transaction_id, asset_id, network, tx_hash, transfer_index, provider_transfer_key, transfer_kind, from_address, from_address_id, to_address, to_address_id, value_amount_hi, value_amount_lo, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'legacy:' || ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'normal', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             Ulid::new().to_string(),
             incoming_tx_id,
@@ -1391,7 +1391,7 @@ fn insert_ethereum_account_balances_fixture_internal(
     tx.execute(
         "INSERT INTO account_transfers
          (id, chain_transaction_id, asset_id, network, tx_hash, transfer_index, provider_transfer_key, transfer_kind, from_address, from_address_id, to_address, to_address_id, value_amount_hi, value_amount_lo, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'legacy:' || ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'normal', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             Ulid::new().to_string(),
             outgoing_tx_id,
@@ -1468,6 +1468,76 @@ mod tests {
     use crate::ethereum::{EthAddress, RawEthAddress};
     use crate::transactions::TxHash;
     use crate::wallets::{BtcAddress, Label, RawBtcAddress, WALLET_LABEL_MAX_LENGTH};
+
+    #[test]
+    fn v55_replaces_old_preview_indexes_and_executes_indexed_queries() {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(include_str!("../../migrations/user/V0__user_schema.sql"))
+            .expect("old schema");
+        conn.execute_batch(include_str!(
+            "../../migrations/user/V1__account_transaction_ledger_paging_indexes.sql"
+        ))
+        .expect("old paging indexes");
+        conn.execute_batch(include_str!(
+            "../../migrations/user/V55__account_transaction_ledger_settled_paging_indexes.sql"
+        ))
+        .expect("new paging indexes");
+        conn.execute_batch("PRAGMA foreign_keys = OFF")
+            .expect("isolated query fixture");
+        for (hash, status) in [
+            ("a", "pending"),
+            ("b", "dropped"),
+            ("c", "confirmed"),
+            ("d", "failed"),
+        ] {
+            conn.execute(
+                "INSERT INTO account_transaction_ledger
+                 (id, account_id, chain_transaction_id, asset_id, network, tx_hash, status,
+                  occurred_at, first_seen_at, tx_type, from_addresses_json, to_addresses_json,
+                  value_amount_hi, value_amount_lo, created_at, updated_at)
+                 VALUES (?1, 'account', ?1, 'ethereum', 'mainnet', ?1, ?2,
+                         '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00',
+                         'send', '[]', '[]', 0, 1,
+                         '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                rusqlite::params![hash, status],
+            )
+            .expect("ledger fixture");
+        }
+        let queries = [
+            (
+                "idx_account_tx_ledger_pending_page",
+                "SELECT tx_hash, status, tx_type, occurred_at, from_addresses_json, to_addresses_json, value_amount_hi, value_amount_lo, fee_amount_hi, fee_amount_lo FROM account_transaction_ledger INDEXED BY idx_account_tx_ledger_pending_page WHERE account_id = ?1 AND status IN ('pending', 'dropped') ORDER BY first_seen_at DESC, COALESCE(nonce, 9223372036854775807) DESC, tx_hash DESC LIMIT ?2",
+                vec!["b", "a"],
+            ),
+            (
+                "idx_account_tx_ledger_confirmed_page",
+                "SELECT tx_hash, status, tx_type, occurred_at, from_addresses_json, to_addresses_json, value_amount_hi, value_amount_lo, fee_amount_hi, fee_amount_lo FROM account_transaction_ledger INDEXED BY idx_account_tx_ledger_confirmed_page WHERE account_id = ?1 AND status IN ('confirmed', 'failed') ORDER BY occurred_at DESC, COALESCE(block_height, 9223372036854775807) DESC, COALESCE(nonce, 9223372036854775807) DESC, COALESCE(min_transfer_index, 9223372036854775807) DESC, tx_hash DESC LIMIT ?2",
+                vec!["d", "c"],
+            ),
+        ];
+        for (index, query, expected) in queries {
+            let actual: Vec<String> = conn
+                .prepare(query)
+                .expect("preview should prepare")
+                .query_map(rusqlite::params!["account", 10], |row| row.get(0))
+                .expect("preview should execute")
+                .collect::<Result<_, _>>()
+                .expect("preview rows");
+            assert_eq!(actual, expected);
+            let plan: Vec<String> = conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
+                .expect("plan should prepare")
+                .query_map(rusqlite::params!["account", 10], |row| row.get(3))
+                .expect("plan should execute")
+                .collect::<Result<_, _>>()
+                .expect("plan rows");
+            assert!(plan.iter().any(|line| line.contains(index)), "{plan:?}");
+            assert!(
+                !plan.iter().any(|line| line.contains("USE TEMP B-TREE")),
+                "{plan:?}"
+            );
+        }
+    }
 
     fn seed_bitcoin_transaction_history_fixture(
         user_id: UserId,

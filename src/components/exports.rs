@@ -1077,7 +1077,7 @@ pub fn WalletDataExport() -> Element {
             div { class: "page-header",
                 h1 { class: "page-title page-title-display", "Backup & Restore" }
                 p { class: "page-subtitle",
-                    "Back up your wallet configuration — public keys, addresses, account labels. This is not your transaction history; transactions re-sync after a restore."
+                    "Back up your wallet configuration — public keys, addresses, account labels. This is not your transaction history; transactions re-sync after a restore. Saved manual prices are not included and must be entered again."
                 }
             }
 

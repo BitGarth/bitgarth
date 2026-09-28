@@ -17,10 +17,10 @@ pub(crate) fn load_all_accounts_for_export(
     db::load_all_accounts_for_export(user_id)
 }
 
-pub(crate) fn load_all_confirmed_account_transaction_ledger_rows_for_export(
+pub(crate) fn load_account_transaction_ledger_rows_for_export(
     user_id: UserId,
 ) -> Result<Vec<ExportAccountTransactionLedgerRow>, DbError> {
-    db::load_all_confirmed_account_transaction_ledger_rows_for_export(user_id)
+    db::load_account_transaction_ledger_rows_for_export(user_id)
 }
 
 pub(crate) fn load_all_manual_asset_balance_assertion_rows_for_export(

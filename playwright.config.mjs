@@ -75,6 +75,9 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
+    // The browser zone is saved as the user's timezone on first sign-in; pin
+    // it so expected timestamps don't depend on the machine running the tests.
+    timezoneId: "UTC",
   },
   webServer: [
     {

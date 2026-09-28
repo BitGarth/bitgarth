@@ -360,7 +360,12 @@ fn PricesRow(props: PricesRowProps) -> Element {
                         on_changed.call(());
                     }
                     Err(err) => {
-                        row_error_sig.set(Some(err.to_string()));
+                        row_error_sig.set(Some(
+                            crate::components::form_helpers::primary_field_or_message(
+                                &err,
+                                &["price", "source_note"],
+                            ),
+                        ));
                     }
                 }
             });

@@ -58,7 +58,7 @@ test("paid limited Bitcoin history masks closing balances on desktop and mobile"
   await expect(page.locator(".tx-header-closing-balance")).toHaveCount(1);
   const notice = page.getByTestId("transaction-sync-pause-notice");
   await expect(notice).toHaveText(
-    "Transaction syncing is paused because this account reached its plan limit. Older or newer transactions may be missing. Balances continue to update independently.",
+    "Transaction syncing is paused because this account reached its plan limit. Older or newer transactions may be missing. Balances still refresh about every 15 minutes.",
   );
   await expect(page.getByTestId("transaction-history-coverage-notice")).toHaveCount(0);
   await expect(page.locator(".tx-history-coverage")).toHaveCount(0);
@@ -119,7 +119,7 @@ test("free limited Bitcoin history shows the current provider balance", async ({
   await page.goto(`/wallets/account/${accountId}/transactions`);
   const notice = page.getByTestId("transaction-sync-pause-notice");
   await expect(notice).toHaveText(
-    "Transaction syncing is not included for this account under your current allowance. Balances continue to update independently.",
+    "Transaction syncing is not included for this account under your current allowance. Balances still refresh about every 15 minutes.",
   );
   await expect(page.getByTestId("transaction-history-coverage-notice")).toHaveCount(0);
   await expect(page.locator(".tx-history-coverage")).toHaveCount(0);
@@ -177,16 +177,11 @@ function txHash(ordinal) {
   return `0x${ordinal.toString(16).padStart(64, "0")}`;
 }
 
-function normalizeUiHash(value) {
-  return value.startsWith("0x") ? value.slice(2) : value;
-}
-
 function truncateUiHash(value) {
-  const normalized = normalizeUiHash(value);
-  if (normalized.length <= 15) {
-    return normalized;
+  if (value.length <= 15) {
+    return value;
   }
-  return `${normalized.slice(0, 8)}…${normalized.slice(-6)}`;
+  return `${value.slice(0, 8)}…${value.slice(-6)}`;
 }
 
 function sectionTotals(section) {
@@ -258,14 +253,13 @@ async function activatePremiumForTransactionHistory(request) {
   expect(pollResponse.ok()).toBeTruthy();
 }
 
-function buildDenseEtherscanTransactions(count, knownAddress) {
+function buildDenseEtherscanTransactions(count, knownAddress, baseDate = new Date()) {
   const baseBlockNumber = 21_500_100;
-  const today = new Date();
   const baseTimestamp = Math.floor(
     Date.UTC(
-      today.getUTCFullYear(),
-      today.getUTCMonth(),
-      today.getUTCDate(),
+      baseDate.getUTCFullYear(),
+      baseDate.getUTCMonth(),
+      baseDate.getUTCDate(),
       12,
       0,
       0,
@@ -464,6 +458,7 @@ test("wallet transactions page shows deterministic ordering and paging", async (
 }, testInfo) => {
   await markTestBoundary(testInfo, "START");
   const diagnostics = await attachBrowserDiagnostics(page, testInfo);
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
 
   const denseTransactions = buildDenseEtherscanTransactions(55, TEST_ETH_ADDRESS);
   const denseEtherscan = await startDenseEtherscanServer(
@@ -564,7 +559,7 @@ test("wallet transactions page shows deterministic ordering and paging", async (
     ).not.toBeVisible();
 
     const confirmedSection = page
-      .getByRole("heading", { name: "Confirmed", exact: true })
+      .getByRole("heading", { name: "History", exact: true })
       .locator("xpath=ancestor::section[1]");
 
     await expect(confirmedSection).toBeVisible();
@@ -582,14 +577,22 @@ test("wallet transactions page shows deterministic ordering and paging", async (
     );
     await expect(confirmedCards.nth(0).locator(".tx-external-link")).toHaveAttribute(
       "href",
-      new RegExp(`/tx/${normalizeUiHash(denseTransactions[54].hash)}$`),
+      new RegExp(`/tx/${denseTransactions[54].hash}$`),
+    );
+    await expect(confirmedCards.nth(0).locator(".tx-external-link")).toHaveAttribute(
+      "title",
+      denseTransactions[54].hash,
+    );
+    await confirmedCards.nth(0).getByRole("button", { name: "Copy transaction ID" }).click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(
+      denseTransactions[54].hash,
     );
     await expect(confirmedCards.nth(1).locator(".tx-external-link")).toHaveText(
       truncateUiHash(denseTransactions[53].hash),
     );
     await expect(confirmedCards.nth(1).locator(".tx-external-link")).toHaveAttribute(
       "href",
-      new RegExp(`/tx/${normalizeUiHash(denseTransactions[53].hash)}$`),
+      new RegExp(`/tx/${denseTransactions[53].hash}$`),
     );
 
     const confirmedNextButton = confirmedSection.getByRole("button", {
@@ -607,7 +610,7 @@ test("wallet transactions page shows deterministic ordering and paging", async (
     );
     await expect(secondPageCards.nth(0).locator(".tx-external-link")).toHaveAttribute(
       "href",
-      new RegExp(`/tx/${normalizeUiHash(denseTransactions[4].hash)}$`),
+      new RegExp(`/tx/${denseTransactions[4].hash}$`),
     );
 
     const confirmedPreviousButton = confirmedSection.getByRole("button", {
@@ -631,6 +634,121 @@ test("wallet transactions page shows deterministic ordering and paging", async (
   }
 });
 
+test("failed Ethereum attempts stay in History with fee-only balances", async ({
+  page,
+  mockServers,
+}, testInfo) => {
+  await markTestBoundary(testInfo, "START failed-ethereum-history");
+  const diagnostics = await attachBrowserDiagnostics(page, testInfo);
+  const year = new Date().getUTCFullYear();
+  const timestamp = (day) => String(Date.UTC(year, 0, day, 12) / 1000);
+  const transactions = [
+    {
+      blockNumber: "21500100", timeStamp: timestamp(1), hash: txHash(1001),
+      from: "0x1111111111111111111111111111111111111111", to: TEST_ETH_ADDRESS,
+      value: "2000000000000000000", gasPrice: "1000000000", gasUsed: "21000",
+      isError: "0", txreceipt_status: "1", nonce: "1",
+    },
+    {
+      blockNumber: "21500101", timeStamp: timestamp(2), hash: txHash(1002),
+      from: TEST_ETH_ADDRESS, to: "0x2222222222222222222222222222222222222222",
+      value: "400000000000000000", gasPrice: "1000000000", gasUsed: "1000000",
+      isError: "1", txreceipt_status: "0", nonce: "2",
+    },
+    {
+      blockNumber: "21500102", timeStamp: timestamp(3), hash: txHash(1003),
+      from: "0x3333333333333333333333333333333333333333", to: TEST_ETH_ADDRESS,
+      value: "300000000000000000", gasPrice: "1000000000", gasUsed: "21000",
+      isError: "1", txreceipt_status: "0", nonce: "3",
+    },
+  ];
+  const etherscan = await startDenseEtherscanServer(TEST_ETH_ADDRESS, transactions);
+
+  try {
+    await registerViaUiAndExpectAuthenticated(page);
+    await configureMockServers(page.request, mockServers);
+    await activatePremiumForTransactionHistory(page.request);
+    await saveEtherscanBaseUrl(page.request, etherscan.baseUrl);
+    await saveEtherscanApiKey(page.request, TEST_ETHERSCAN_API_KEY);
+    const addResponse = await page.request.post("/_app/user/wallets/ethereum/add", {
+      data: { request: {
+        address: TEST_ETH_ADDRESS, network: "mainnet",
+        wallet_label: "E2E Failed Ethereum History",
+      } },
+    });
+    expect(addResponse.ok()).toBeTruthy();
+    const { account_id: accountId } = await addResponse.json();
+    const syncResponse = await page.request.post("/_app/user/transactions/sync", {
+      data: { request: { source: "manual" } },
+    });
+    expect(syncResponse.ok()).toBeTruthy();
+    await expect.poll(async () => {
+      const response = await page.request.get(
+        `/_app/user/account/${accountId}/transactions?pending_page=1&confirmed_page=1`,
+      );
+      return response.ok() ? (await response.json()).confirmed?.total : -1;
+    }, { intervals: [250, 500, 1000, 2000], timeout: 30_000 }).toBe(3);
+
+    await page.goto(`/wallets/account/${accountId}/transactions`);
+    const history = page.getByRole("heading", { name: "History", exact: true })
+      .locator("xpath=ancestor::section[1]");
+    await expect(history).toBeVisible();
+    await expect(history.locator(".tx-card")).toHaveCount(3);
+    await page.getByRole("button", { name: /^failed$/i }).click();
+    await expect(history.locator(".tx-card")).toHaveCount(2);
+    await expect(history.getByText("Not transferred", { exact: true }).first()).toBeVisible();
+    await history.getByRole("button", { name: "Table view" }).click();
+    const rows = history.locator("tbody tr");
+    await expect(rows).toHaveCount(2);
+    await expect(rows.first().locator(".tx-table-hash a")).toHaveText(
+      truncateUiHash(transactions[2].hash),
+    );
+    await expect(rows.first().locator(".tx-table-hash a")).toHaveAttribute(
+      "href",
+      new RegExp(`/tx/${transactions[2].hash}$`),
+    );
+    await expect(rows.first().locator(".tx-table-amount s")).toHaveText("Ξ0.3");
+    await expect(rows.nth(1).locator(".tx-table-amount s")).toHaveText("-Ξ0.4");
+    await expect(rows.first().locator(".tx-table-amount")).toContainText("Not transferred");
+    await expect(rows.nth(1).locator(".tx-table-amount")).toContainText("Not transferred");
+    await expect(rows.first()).toContainText(formatDefaultUtcTimestamp(new Date(Number(transactions[2].timeStamp) * 1000).toISOString()));
+    await expect(rows.nth(1).locator(".tx-table-fee")).toHaveText("-Ξ0.001");
+    await expect(rows.first().locator(".tx-table-balance")).toContainText("1.999");
+    await expect(rows.nth(1).locator(".tx-table-balance")).toContainText("1.999");
+    await expect(rows.first().locator(".tx-table-fee")).toHaveText("-");
+    await testInfo.attach("failed-history-wide", {
+      body: await history.screenshot(), contentType: "image/png",
+    });
+
+    await expect(sectionTotals(history)).toHaveCount(0);
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await history.getByRole("button", { name: "Card view" }).click();
+    const cards = history.locator(".tx-card");
+    await expect(cards.first().locator(".tx-card-amount s")).toHaveText("Ξ0.3");
+    await expect(cards.nth(1).locator(".tx-card-amount s")).toHaveText("-Ξ0.4");
+    await expect(cards.first().getByText("Not transferred")).toBeVisible();
+    await expect(cards.nth(1).getByText("Not transferred")).toBeVisible();
+    await expect(cards.nth(1).locator(".tx-card-timestamp")).toHaveText(
+      formatDefaultUtcTimestamp(new Date(Number(transactions[1].timeStamp) * 1000).toISOString()),
+    );
+    await expect(cards.nth(1).locator(".tx-fee-value")).toHaveText("-Ξ0.001");
+    await expect(cards.nth(1).locator(".tx-balance-cell")).toHaveText("Ξ1.999");
+    await expect(cards.first().locator(".tx-fee-value")).toHaveText("-");
+    await expect(cards.first().locator(".tx-balance-cell")).toHaveText("Ξ1.999");
+    await expect(cards.first().locator(".tx-status-indicator")).toHaveText("failed");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+    await testInfo.attach("failed-history-390px", {
+      body: await history.screenshot(), contentType: "image/png",
+    });
+
+    assertNoBrowserDiagnostics(diagnostics);
+    await markTestBoundary(testInfo, "END failed-ethereum-history");
+  } finally {
+    await etherscan.close();
+  }
+});
+
 test("wallet transactions date toolbar keeps route-backed presets and status filters working", async ({
   page,
   mockServers,
@@ -638,7 +756,13 @@ test("wallet transactions date toolbar keeps route-backed presets and status fil
   await markTestBoundary(testInfo, "START");
   const diagnostics = await attachBrowserDiagnostics(page, testInfo);
 
-  const denseTransactions = buildDenseEtherscanTransactions(55, TEST_ETH_ADDRESS);
+  // All activity is in the previous year, so the current year is empty (EX-05).
+  const previousYear = new Date().getUTCFullYear() - 1;
+  const denseTransactions = buildDenseEtherscanTransactions(
+    55,
+    TEST_ETH_ADDRESS,
+    new Date(Date.UTC(previousYear, 5, 15)),
+  );
   const denseEtherscan = await startDenseEtherscanServer(
     TEST_ETH_ADDRESS,
     denseTransactions,
@@ -699,17 +823,40 @@ test("wallet transactions date toolbar keeps route-backed presets and status fil
       .poll(() => new URL(page.url()).searchParams.toString())
       .toBe("");
 
-    // Defaults to the current calendar year: the dial shows the year and the
+    // Defaults to all time: last year's transactions show, paginated, and the
     // custom date inputs stay collapsed.
-    const currentYear = expectedThisYear.start.slice(0, 4);
-    await expect(page.locator(".date-range-year-value")).toHaveText(currentYear);
+    const yearValue = page.locator(".date-range-year-value");
+    const allTimeButton = page.getByRole("button", { name: "All time", exact: true });
+    await expect(yearValue).toHaveText("All time");
+    await expect(allTimeButton).toHaveCount(0);
     await expect(page.locator("#account-transactions-start")).toHaveCount(0);
 
     const confirmedSection = page
-      .getByRole("heading", { name: "Confirmed", exact: true })
+      .getByRole("heading", { name: "History", exact: true })
       .locator("xpath=ancestor::section[1]");
 
     await expect(confirmedSection).toBeVisible();
+    await expect(sectionTotals(confirmedSection)).toHaveText("1 - 50 of 55");
+
+    // This Year narrows to the (empty) current year; stepping back finds them.
+    await page.getByRole("button", { name: "This Year", exact: true }).click();
+    await expect(yearValue).toHaveText(expectedThisYear.start.slice(0, 4));
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("start"))
+      .toBe(expectedThisYear.start);
+    await expect(confirmedSection.getByText("No transactions found")).toBeVisible();
+
+    await page.getByRole("button", { name: "Previous year" }).click();
+    await expect(yearValue).toHaveText(String(previousYear));
+    await expect(sectionTotals(confirmedSection)).toHaveText("1 - 50 of 55");
+
+    // All time returns to the bare route.
+    await allTimeButton.click();
+    await expect(yearValue).toHaveText("All time");
+    await expect
+      .poll(() => new URL(page.url()).searchParams.toString())
+      .toBe("");
+    await expect(allTimeButton).toHaveCount(0);
     await expect(sectionTotals(confirmedSection)).toHaveText("1 - 50 of 55");
 
     const confirmedNextButton = confirmedSection.getByRole("button", {
@@ -916,4 +1063,94 @@ test("manual asset identity section shows unit and precision", async ({
 
   assertNoBrowserDiagnostics(diagnostics);
   await markTestBoundary(testInfo, "END manual-identity");
+});
+
+test("balance assertion dialog keeps keyboard focus and draft", async ({ page, mockServers }) => {
+  await registerViaUiAndExpectAuthenticated(page);
+  await configureMockServers(page.request, mockServers);
+  const accountResponse = await page.request.post("/_app/user/wallets/manual-assets/add", {
+    data: {
+      request: {
+        wallet_label: "Modal focus wallet",
+        asset_instance_id: { asset_id: "monero", network_id: "monero-mainnet" },
+      },
+    },
+  });
+  expect(accountResponse.ok()).toBeTruthy();
+  const { account_id: accountId } = await accountResponse.json();
+  const assertionResponse = await page.request.post("/_app/user/manual-asset-assertions/add", {
+    data: {
+      request: { account_id: accountId, asserted_on: "2025-01-01", balance: "1", note: null },
+    },
+  });
+  expect(assertionResponse.ok()).toBeTruthy();
+  await page.goto(`/wallets/account/${accountId}/transactions`);
+
+  const edit = page.getByRole("button", { name: "Edit", exact: true });
+  await edit.click();
+  const dialog = page.getByRole("dialog", { name: "Edit Balance Assertion" });
+  await expect(dialog).toBeVisible();
+  const balance = dialog.locator("#custom-assertion-balance");
+  await balance.fill("123");
+  for (let index = 0; index < 8; index += 1) {
+    await page.keyboard.press("Tab");
+    const outsideActionFocused = await dialog.evaluate((element) =>
+      document.activeElement !== document.body && !element.contains(document.activeElement),
+    );
+    expect(outsideActionFocused).toBe(false);
+  }
+  await expect(balance).toHaveValue("123");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+});
+
+test("balance assertions header fits phone width", async ({ page, mockServers }, testInfo) => {
+  await markTestBoundary(testInfo, "START assertions-header-phone");
+  const diagnostics = await attachBrowserDiagnostics(page, testInfo);
+
+  await registerViaUiAndExpectAuthenticated(page);
+  await configureMockServers(page.request, mockServers);
+
+  const addManualAssetResponse = await page.request.post("/_app/user/wallets/manual-assets/add", {
+    data: {
+      request: {
+        wallet_label: "E2E Assertions Header",
+        asset_instance_id: { asset_id: "monero", network_id: "monero-mainnet" },
+      },
+    },
+  });
+  expect(addManualAssetResponse.ok()).toBeTruthy();
+  const { account_id: accountId } = await addManualAssetResponse.json();
+
+  // One more than a page, so the header shows its "x - y of n" totals.
+  for (let day = 0; day < 51; day += 1) {
+    const assertedOn = new Date(Date.UTC(2025, 0, 1 + day)).toISOString().slice(0, 10);
+    const response = await page.request.post("/_app/user/manual-asset-assertions/add", {
+      data: {
+        request: { account_id: accountId, asserted_on: assertedOn, balance: "1", note: null },
+      },
+    });
+    expect(response.ok()).toBeTruthy();
+  }
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/wallets/account/${accountId}/transactions`);
+  const section = page
+    .getByRole("heading", { name: "Balance Assertions", exact: true })
+    .locator("xpath=ancestor::section[1]");
+  const totals = sectionTotals(section);
+  await expect(totals).toHaveText("1 - 50 of 51");
+
+  // Squeezed flex items wrap word by word; a wrapping header keeps each on one line.
+  for (const item of [totals, section.getByRole("button", { name: "Add Balance Assertion" })]) {
+    const fontSize = await item.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+    expect((await item.boundingBox()).height).toBeLessThan(fontSize * 3);
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await testInfo.attach("assertions-header-390px", {
+    body: await section.locator(".transactions-table-header").screenshot(), contentType: "image/png",
+  });
+
+  assertNoBrowserDiagnostics(diagnostics);
+  await markTestBoundary(testInfo, "END assertions-header-phone");
 });

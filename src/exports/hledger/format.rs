@@ -1,7 +1,7 @@
 use super::GENERATED_HEADER;
 use crate::amounts::{UnsignedAmount, format_unsigned_amount_fixed};
-use crate::transactions::AccountTransactionDirection;
-use crate::wallets::WalletAccountId;
+use crate::transactions::{AccountTransactionDirection, ChainTransactionStatus, display_tx_hash};
+use crate::wallets::{SyncedAssetId, WalletAccountId};
 use chrono::{DateTime, NaiveDate, Utc};
 use std::cmp::Ordering;
 
@@ -10,6 +10,7 @@ const UNKNOWN_INCOME_ACCOUNT: &str = "income:unknown";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NativeTransactionRenderContext {
+    pub(crate) asset: SyncedAssetId,
     pub(crate) asset_display_name: String,
     pub(crate) network_fee_account: String,
 }
@@ -25,6 +26,7 @@ pub(crate) struct AggregatedAccountTransaction {
     pub(crate) account_id: WalletAccountId,
     pub(crate) tx_hash: String,
     pub(crate) direction: AccountTransactionDirection,
+    pub(crate) status: ChainTransactionStatus,
     pub(crate) balance_delta: i128,
     pub(crate) fee: UnsignedAmount,
     pub(crate) occurred_at: DateTime<Utc>,
@@ -235,9 +237,19 @@ fn push_transaction_header(
     lines.push(format!(
         "{} * {}",
         transaction.occurred_at.format("%Y-%m-%d"),
-        transaction_description(transaction.direction, &render_context.asset_display_name)
+        if transaction.status == ChainTransactionStatus::Failed {
+            format!(
+                "Failed transaction fee — {}",
+                render_context.asset_display_name
+            )
+        } else {
+            transaction_description(transaction.direction, &render_context.asset_display_name)
+        }
     ));
-    lines.push(format!("    ; Transaction {}", transaction.tx_hash));
+    lines.push(format!(
+        "    ; Transaction {}",
+        display_tx_hash(render_context.asset, &transaction.tx_hash)
+    ));
 }
 
 pub(crate) fn build_custom_balance_assertion_transaction(
@@ -364,6 +376,7 @@ mod tests {
 
     fn bitcoin_render_context() -> NativeTransactionRenderContext {
         NativeTransactionRenderContext {
+            asset: SyncedAssetId::Bitcoin,
             asset_display_name: "Bitcoin".to_string(),
             network_fee_account: "expenses:Fees:Bitcoin:Network:Mainnet".to_string(),
         }
@@ -506,6 +519,7 @@ commodity 0.000000000000000000 ETH
             account_id: fixed_account_id(),
             tx_hash: "0xfeedface".to_string(),
             direction: AccountTransactionDirection::Incoming,
+            status: ChainTransactionStatus::Confirmed,
             balance_delta: 10_000_000,
             fee: UnsignedAmount::zero(),
             occurred_at: fixed_timestamp(16),
@@ -520,6 +534,7 @@ commodity 0.000000000000000000 ETH
             "SP500",
             8,
             &NativeTransactionRenderContext {
+                asset: SyncedAssetId::Bitcoin,
                 asset_display_name: "SP500".to_string(),
                 network_fee_account: "expenses:Fees:SP500:Network:Mainnet".to_string(),
             },
@@ -537,6 +552,7 @@ commodity 0.000000000000000000 ETH
             account_id: fixed_account_id(),
             tx_hash: "0xcospend".to_string(),
             direction: AccountTransactionDirection::Outgoing,
+            status: ChainTransactionStatus::Confirmed,
             balance_delta: -888,
             fee: UnsignedAmount::from_u128(10_000),
             occurred_at: fixed_timestamp(12),
@@ -569,6 +585,7 @@ commodity 0.000000000000000000 ETH
             account_id: fixed_account_id(),
             tx_hash: "0xsoleowner".to_string(),
             direction: AccountTransactionDirection::Outgoing,
+            status: ChainTransactionStatus::Confirmed,
             balance_delta: -5_001_000,
             fee: UnsignedAmount::from_u128(1_000),
             occurred_at: fixed_timestamp(12),
@@ -601,6 +618,7 @@ commodity 0.000000000000000000 ETH
             account_id: fixed_account_id(),
             tx_hash: "0xnofee".to_string(),
             direction: AccountTransactionDirection::Outgoing,
+            status: ChainTransactionStatus::Confirmed,
             balance_delta: -5_000_000,
             fee: UnsignedAmount::zero(),
             occurred_at: fixed_timestamp(12),
@@ -634,6 +652,7 @@ commodity 0.000000000000000000 ETH
             account_id: fixed_account_id(),
             tx_hash: "0xdef456".to_string(),
             direction: AccountTransactionDirection::Incoming,
+            status: ChainTransactionStatus::Confirmed,
             balance_delta: 600,
             fee: UnsignedAmount::zero(),
             occurred_at: fixed_timestamp(13),
@@ -665,6 +684,7 @@ commodity 0.000000000000000000 ETH
             account_id: fixed_account_id(),
             tx_hash: "zero".to_string(),
             direction: AccountTransactionDirection::SelfTransfer,
+            status: ChainTransactionStatus::Confirmed,
             balance_delta: 0,
             fee: UnsignedAmount::from_u128(1_000),
             occurred_at: fixed_timestamp(14),
@@ -691,5 +711,42 @@ commodity 0.000000000000000000 ETH
         assert!(!rendered.contains("assets:"));
         assert!(!rendered.contains("expenses:"));
         assert!(!rendered.contains("income:"));
+    }
+
+    #[test]
+    fn build_hledger_transaction_formats_failed_fee_only() {
+        let tx = AggregatedAccountTransaction {
+            account_id: fixed_account_id(),
+            tx_hash: "failed".to_string(),
+            direction: AccountTransactionDirection::Outgoing,
+            status: ChainTransactionStatus::Failed,
+            balance_delta: -1_000_000_000_000_000,
+            fee: UnsignedAmount::from_u128(1_000_000_000_000_000),
+            occurred_at: fixed_timestamp(14),
+            block_height: Some(123),
+            nonce: Some(0),
+            min_transfer_index: Some(0),
+            closing_balance: Some(UnsignedAmount::from_u128(1_999_000_000_000_000_000)),
+        };
+
+        let rendered = build_hledger_transaction(
+            "assets:MainWallet:EthereumAccount1",
+            "ETH",
+            18,
+            &NativeTransactionRenderContext {
+                asset: SyncedAssetId::Ethereum,
+                asset_display_name: "Ethereum".to_string(),
+                network_fee_account: "expenses:Fees:Ethereum:Network:Mainnet".to_string(),
+            },
+            &tx,
+        )
+        .expect("failed fee should render");
+
+        assert!(rendered.contains("Failed transaction fee — Ethereum"));
+        assert!(rendered.contains("    ; Transaction 0xfailed"));
+        assert!(rendered.contains("-0.001000000000000000 ETH"));
+        assert!(!rendered.contains("expenses:unknown"));
+        assert!(!rendered.contains("income:unknown"));
+        assert!(!rendered.contains("0.4 ETH"));
     }
 }

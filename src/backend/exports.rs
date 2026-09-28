@@ -1781,23 +1781,6 @@ fn hledger_zip_file_name(owner_directory_segment: &str, exported_at: DateTime<Ut
         all(test, not(bitgarth_db_unit_only))
     )
 ))]
-const HLEDGER_DOWNLOAD_CHANNEL_DEPTH: usize = 16;
-#[cfg(all(
-    feature = "server",
-    any(
-        all(not(test), not(feature = "desktop")),
-        all(test, not(bitgarth_db_unit_only))
-    )
-))]
-const HLEDGER_DOWNLOAD_CHUNK_SIZE: usize = 64 * 1024;
-
-#[cfg(all(
-    feature = "server",
-    any(
-        all(not(test), not(feature = "desktop")),
-        all(test, not(bitgarth_db_unit_only))
-    )
-))]
 fn export_error_to_response(err: ExportError) -> axum::response::Response {
     use axum::http::HeaderValue;
     use axum::http::header::CONTENT_TYPE;
@@ -1894,66 +1877,51 @@ pub(crate) async fn download_hledger(
     let exported_at = Utc::now();
     let file_name = hledger_zip_file_name(&owner_directory_segment, exported_at);
 
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(
-        HLEDGER_DOWNLOAD_CHANNEL_DEPTH,
-    );
-
     #[cfg(test)]
     let runtime_context = crate::runtime_context::current_runtime_context();
-    let password_for_task = password;
-    let owner_directory_for_task = owner_directory_segment.clone();
-    let owner_posting_for_task = owner_posting_segment.clone();
-    let account_prefix_for_task = hledger_account_prefix.clone();
-    let tx_for_task = tx.clone();
-
-    tokio::task::spawn_blocking(move || {
+    let export_result = tokio::task::spawn_blocking(move || {
         #[cfg(test)]
         let _runtime_context_guard =
             runtime_context.map(crate::runtime_context::push_default_runtime_context);
 
         let buffer = Cursor::new(Vec::<u8>::new());
-        let password_string = password_for_task
+        let password_string = password
             .as_ref()
             .map(|password| String::from(password.as_str()));
-        let result = crate::exports::hledger::export::export_all_accounts_to_zip(
+        crate::exports::hledger::export::export_all_accounts_to_zip(
             user_id,
-            &owner_directory_for_task,
-            &owner_posting_for_task,
-            account_prefix_for_task.as_ref(),
+            &owner_directory_segment,
+            &owner_posting_segment,
+            hledger_account_prefix.as_ref(),
             buffer,
             password_string,
-        );
-
-        match result {
-            Ok((cursor, counts)) => {
-                tracing::info!(
-                    user_id = %user_id,
-                    accounts_exported = counts.accounts_exported,
-                    transactions_exported = counts.transactions_exported,
-                    balance_assertions_exported = counts.balance_assertions_exported,
-                    encrypted,
-                    "exports: hledger download completed"
-                );
-                let bytes = cursor.into_inner();
-                for chunk in bytes.chunks(HLEDGER_DOWNLOAD_CHUNK_SIZE) {
-                    let chunk_bytes = axum::body::Bytes::copy_from_slice(chunk);
-                    if tx_for_task.blocking_send(Ok(chunk_bytes)).is_err() {
-                        tracing::debug!(user_id = %user_id, "exports: hledger download client disconnected");
-                        return;
-                    }
-                }
-            }
-            Err(err) => {
-                tracing::error!(user_id = %user_id, error = %err, "exports: hledger download failed");
-                let _ = tx_for_task.blocking_send(Err(std::io::Error::other(err.to_string())));
-            }
+        )
+    })
+    .await;
+    let (cursor, counts) = match export_result {
+        Ok(Ok(value)) => value,
+        Ok(Err(err)) => {
+            tracing::error!(user_id = %user_id, error = %err, "exports: hledger download failed");
+            return export_error_to_response(ExportError::Internal(
+                "Failed to create accounting archive.".to_string(),
+            ));
         }
-    });
-    drop(tx);
-
-    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-    let body = axum::body::Body::from_stream(stream);
-    let mut response = body.into_response();
+        Err(err) => {
+            tracing::error!(user_id = %user_id, error = %err, "exports: hledger download task failed");
+            return export_error_to_response(ExportError::Internal(
+                "Failed to create accounting archive.".to_string(),
+            ));
+        }
+    };
+    tracing::info!(
+        user_id = %user_id,
+        accounts_exported = counts.accounts_exported,
+        transactions_exported = counts.transactions_exported,
+        balance_assertions_exported = counts.balance_assertions_exported,
+        encrypted,
+        "exports: hledger download completed"
+    );
+    let mut response = cursor.into_inner().into_response();
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,

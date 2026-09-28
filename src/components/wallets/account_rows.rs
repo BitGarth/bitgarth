@@ -217,6 +217,10 @@ fn NativeAccountRowSection(
         scheme_view.has_derived_addresses || reference_kind == AccountReferenceKind::SingleAddress;
     let manual_sync = scheme_view.manual_sync.clone();
     let account_mode = scheme_view.account_mode;
+    // A transaction-mode account only drops to balance refreshes at its plan limit.
+    let history_paused_at_limit = account_mode
+        == crate::account_mode::NativeAccountMode::Transactions
+        && manual_sync.mode == crate::backend::ManualSyncMode::BalanceRefresh;
     let is_inactive = scheme_view.account_state == crate::backend::AccountStateView::Inactive;
     let sync_state = use_context::<super::sync_state::AccountSyncStateSignal>();
     let etherscan_history_status = sync_state
@@ -375,10 +379,23 @@ fn NativeAccountRowSection(
                                 "{subline}"
                             }
                         }
-                        span {
-                            class: "account-row-subline",
-                            "data-testid": "account-mode",
-                            "{account_mode.label()}"
+                        if history_paused_at_limit {
+                            Link {
+                                class: "account-row-subline",
+                                "data-testid": "account-mode",
+                                to: Route::AccountTransactions {
+                                    account_id,
+                                    start: None,
+                                    end: None,
+                                },
+                                "{account_mode.status_label(true)}"
+                            }
+                        } else {
+                            span {
+                                class: "account-row-subline",
+                                "data-testid": "account-mode",
+                                "{account_mode.label()}"
+                            }
                         }
                     }
                 }

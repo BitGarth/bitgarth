@@ -836,6 +836,38 @@ pub(in crate::db) fn publish_mempool_history_proof_conn(
     Ok(())
 }
 
+/// Advances an existing proof's height only while the stored proof still has
+/// the same confirmed count, so a proof invalidated since the address was
+/// loaded is not resurrected. Returns whether the proof was refreshed.
+pub(crate) fn refresh_mempool_history_proof(
+    user_id: UserId,
+    address_id: DigitalAssetAddressId,
+    proof: MempoolHistoryProof,
+) -> Result<bool, DbError> {
+    with_user_db_mut(user_id, |conn| {
+        let changed = conn
+            .execute(
+                "UPDATE transaction_sync_state
+                 SET mempool_history_complete_height = ?1,
+                     updated_at = ?2
+                 WHERE scope = ?3
+                   AND address_id = ?4
+                   AND mempool_history_complete_tx_count = ?5",
+                params![
+                    proof.complete_height.value(),
+                    Utc::now().to_rfc3339(),
+                    super::ADDRESS_SYNC_SCOPE,
+                    address_id.to_string(),
+                    i64::from(proof.confirmed_tx_count.value()),
+                ],
+            )
+            .map_err(|err| {
+                DbError::new(format!("Failed to refresh mempool history proof: {err}"))
+            })?;
+        Ok(changed > 0)
+    })
+}
+
 pub(crate) fn publish_strict_mempool_history_proof(
     user_id: UserId,
     address_id: DigitalAssetAddressId,

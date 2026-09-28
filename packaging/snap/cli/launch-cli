@@ -1,0 +1,6 @@
+#!/bin/bash
+set -eu
+umask 077
+export XDG_CONFIG_HOME="$SNAP_USER_COMMON/.config"
+mkdir -p "$XDG_CONFIG_HOME"
+exec -a bitgarth-cli "$SNAP/bitgarth" "$@"

@@ -115,6 +115,7 @@ fn run_manual_sync_control_with_executor(
         let run_excluded_address_ids = HashSet::new();
         let planner_input = SyncPlannerInput {
             now_utc: run.clock.utc_now(),
+            source: run.source,
             transaction_fetch_policy,
             native_account_modes: None,
             account_transaction_counts: &account_transaction_counts,

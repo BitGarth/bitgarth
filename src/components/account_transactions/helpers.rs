@@ -251,7 +251,9 @@ pub(super) fn format_balance_reliability_display(
 
 pub(super) fn manual_sync_outcome_message(
     completion: &crate::components::wallets::SyncRunCompletion,
+    history_paused: bool,
     timezone: chrono_tz::Tz,
+    date_format: DateTimeFormat,
 ) -> String {
     if completion.failed {
         return completion.error.as_ref().map_or_else(
@@ -259,15 +261,15 @@ pub(super) fn manual_sync_outcome_message(
             |error| format!("Sync failed: {}", error.as_str()),
         );
     }
+    let time = crate::timezone::format_timestamp(&completion.occurred_at, timezone, date_format);
     if completion.addresses_synced == 0
         && completion.new_tx_count == 0
         && completion.updated_tx_count == 0
     {
-        let time = completion
-            .occurred_at
-            .with_timezone(&timezone)
-            .format("%H:%M");
         return format!("Already up to date (checked {time})");
+    }
+    if history_paused {
+        return format!("Balance refreshed ({time})");
     }
     format!(
         "Synced {} addresses — {} new transactions",
@@ -933,8 +935,35 @@ mod tests {
             error: None,
         };
         assert_eq!(
-            manual_sync_outcome_message(&completion, chrono_tz::UTC),
-            "Already up to date (checked 17:51)"
+            manual_sync_outcome_message(
+                &completion,
+                false,
+                chrono_tz::UTC,
+                DateTimeFormat::MonthDayYear12
+            ),
+            "Already up to date (checked Jul 11, 2026 05:51 PM UTC)"
+        );
+    }
+
+    #[test]
+    fn manual_sync_outcome_message_reports_balance_refresh_when_history_paused() {
+        let completion = crate::components::wallets::SyncRunCompletion {
+            run_id: None,
+            occurred_at: "2026-07-11T17:51:19Z".parse().expect("test timestamp"),
+            failed: false,
+            new_tx_count: 0,
+            updated_tx_count: 0,
+            addresses_synced: 1,
+            error: None,
+        };
+        assert_eq!(
+            manual_sync_outcome_message(
+                &completion,
+                true,
+                chrono_tz::UTC,
+                DateTimeFormat::MonthDayYear12
+            ),
+            "Balance refreshed (Jul 11, 2026 05:51 PM UTC)"
         );
     }
 
@@ -950,7 +979,12 @@ mod tests {
             error: None,
         };
         assert_eq!(
-            manual_sync_outcome_message(&completion, chrono_tz::UTC),
+            manual_sync_outcome_message(
+                &completion,
+                false,
+                chrono_tz::UTC,
+                DateTimeFormat::MonthDayYear12
+            ),
             "Synced 44 addresses — 12 new transactions"
         );
     }

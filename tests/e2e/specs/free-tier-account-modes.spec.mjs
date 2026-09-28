@@ -108,7 +108,7 @@ test("threshold history notice survives a balance refresh", async ({ page, mockS
   await page.goto(accountUrl);
   const notice = page.getByTestId("transaction-sync-pause-notice");
   await expect(notice).toHaveText(
-    "Transaction syncing is paused because this account reached its plan limit. Older or newer transactions may be missing. Balances continue to update independently.",
+    "Transaction syncing is paused because this account reached its plan limit. Older or newer transactions may be missing. Balances still refresh about every 15 minutes.",
   );
   await expect(page.getByTestId("transaction-history-coverage-notice")).toHaveCount(0);
 
@@ -118,5 +118,14 @@ test("threshold history notice survives a balance refresh", async ({ page, mockS
   expect(refresh.ok(), await refresh.text()).toBeTruthy();
   await page.reload();
   await expect(notice).toBeVisible();
-  await expect(page.getByTestId("account-mode")).toHaveText("Transaction syncing");
+  await expect(page.getByTestId("account-mode")).toHaveText("History paused (plan limit)");
+
+  await page.goto("/wallets");
+  const rowMode = page.locator(".account-row")
+    .filter({ hasText: "Limited Bitcoin" })
+    .getByTestId("account-mode");
+  await expect(rowMode).toHaveText("History paused (plan limit)");
+  await rowMode.click();
+  await expect(page).toHaveURL(new RegExp(accountUrl));
+  await expect(notice).toBeVisible();
 });

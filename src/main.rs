@@ -116,7 +116,7 @@ use settings::{
     SettingsState, default_currency, default_date_time_format, default_number_format,
     defaults_for_locale,
 };
-use timezone::use_timezone;
+use timezone::{use_persist_detected_timezone, use_timezone};
 
 #[cfg(feature = "server")]
 use axum as _;
@@ -158,15 +158,13 @@ use url as _;
 ))]
 const MAX_SERVER_FN_BODY_BYTES: usize = 12 * 1024 * 1024;
 
-/// How long in-flight requests may finish after a shutdown signal. Sync-event SSE
-/// streams never end on their own, so an unbounded graceful drain would last until
-/// the orchestrator's SIGKILL.
+/// Shared deadline for HTTP requests and background jobs after a stop signal.
 #[cfg(all(
     feature = "server",
     not(feature = "desktop"),
     not(target_arch = "wasm32")
 ))]
-const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// Resolves on SIGINT or SIGTERM. The Docker image runs this binary as PID 1, where
 /// the kernel ignores SIGTERM unless a handler is installed.
@@ -584,6 +582,7 @@ fn main() {
         let pairing_store = std::sync::Arc::new(pairing::PairingStore::new());
         let pairing_cleanup_store = std::sync::Arc::clone(&pairing_store);
         let proxy_trust = backend::ProxyHeaderTrust::from_env();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let router = axum::Router::new()
             .merge(backend::public_api::router(
                 std::sync::Arc::clone(&pairing_store),
@@ -609,39 +608,101 @@ fn main() {
                 backend::public_api::browser_pairing_no_store,
             ))
             .layer(axum::Extension(pairing_store))
-            .layer(axum::Extension(proxy_trust));
+            .layer(axum::Extension(proxy_trust))
+            .layer(axum::Extension(shutdown_rx));
         let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|err| {
             eprintln!("failed to initialize server runtime: {err}");
             std::process::exit(1);
         });
-        runtime.spawn(pairing_cleanup_store.run_expiry_cleanup());
-        let result = runtime.block_on(async move {
-            let listener = tokio::net::TcpListener::bind(address).await?;
+        let pairing_cleanup = runtime.spawn(pairing_cleanup_store.run_expiry_cleanup());
+        let (result, drained) = runtime.block_on(async move {
+            let listener = match tokio::net::TcpListener::bind(address).await {
+                Ok(listener) => listener,
+                Err(err) => {
+                    pairing_cleanup.abort();
+                    let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, tasks::shutdown()).await;
+                    return (Err(err), false);
+                }
+            };
             let (signal_tx, signal_rx) = tokio::sync::oneshot::channel();
+            let signal_shutdown_tx = shutdown_tx.clone();
             let server = axum::serve(
                 listener,
                 router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )
             .with_graceful_shutdown(async move {
                 shutdown_signal().await;
+                let _ = signal_shutdown_tx.send(true);
                 let _ = signal_tx.send(());
             });
+            let server = std::future::IntoFuture::into_future(server);
+            tokio::pin!(server);
+            let mut finished_server = None;
             tokio::select! {
-                result = server => result,
-                // The sleep must live inside the branch future: select! drops `server`
-                // before running a handler, which would skip the drain.
-                () = async {
-                    let _ = signal_rx.await;
-                    tokio::time::sleep(SHUTDOWN_DRAIN_TIMEOUT).await;
-                } => {
-                    tracing::warn!("Shutdown drain timed out; closing open connections");
-                    Ok(())
-                }
+                result = &mut server => finished_server = Some(result),
+                _ = signal_rx => {},
             }
+            let _ = shutdown_tx.send(true);
+            let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
+            let (http, jobs) = tokio::join!(
+                async {
+                    match finished_server {
+                        Some(result) => Some(result),
+                        None => tokio::time::timeout_at(deadline, &mut server).await.ok(),
+                    }
+                },
+                tokio::time::timeout_at(deadline, tasks::shutdown()),
+            );
+            let background_drained = if http.as_ref().is_some_and(Result::is_ok)
+                && matches!(jobs, Ok(Ok(())))
+            {
+                tokio::time::timeout_at(deadline, runtime_context::wait_for_background_tasks())
+                    .await
+                    .is_ok()
+            } else {
+                false
+            };
+            pairing_cleanup.abort();
+            let _ = pairing_cleanup.await;
+            let drained = background_drained;
+            if !drained {
+                tracing::warn!(http_drained = http.as_ref().is_some_and(Result::is_ok), jobs = ?jobs, background_drained, "Shutdown deadline or error; work may be unfinished");
+            }
+            (http.unwrap_or(Ok(())), drained)
         });
-        // Don't wait on blocking tasks; in-flight requests already had the drain window.
-        runtime.shutdown_background();
-        tracing::info!("Shutdown complete");
+        let mut drained = drained;
+        if drained {
+            if let Err(err) = tasks::join_task_manager_thread() {
+                tracing::error!(error = err, "Failed to join task manager");
+                drained = false;
+            }
+            if drained {
+                match db::list_open_user_db_users() {
+                    Ok(users) => {
+                        for user_id in users {
+                            if let Err(err) = db::close_user_db(user_id) {
+                                tracing::error!(error = %err, "Failed to close user database");
+                                drained = false;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::error!(error = %err, "Failed to list open user databases");
+                        drained = false;
+                    }
+                }
+                db::close_app_db_for_current_thread();
+            }
+        }
+        if drained {
+            runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+            tracing::info!("Shutdown complete");
+        } else {
+            runtime.shutdown_background();
+            tracing::warn!(
+                "Shutdown forced; work or database handles may remain until process exit"
+            );
+        }
         if let Err(err) = result {
             eprintln!("server failed: {err}");
             std::process::exit(1);
@@ -686,8 +747,9 @@ fn App() -> Element {
     });
 
     use_effect(move || {
-        let detected = detected_timezone();
-        if !logged_in_once() {
+        if let Some(detected) = detected_timezone()
+            && !logged_in_once()
+        {
             timezone.set(UserTimezone::from(detected));
         }
     });
@@ -710,6 +772,7 @@ fn App() -> Element {
     // Auth state - Unknown until synced from the server future below
     let mut auth_state: AuthState = use_signal(|| AuthStatus::Unknown);
     use_context_provider(|| auth_state);
+    use_persist_detected_timezone(detected_timezone, auth_state, timezone);
 
     // Auth entry decision (default to register)
     let mut auth_entry: AuthEntryState = use_signal(AuthEntryDecision::default);
@@ -780,7 +843,10 @@ fn App() -> Element {
                 );
                 logged_in_once.set(true);
 
-                let defaults = defaults_for_locale(Locale::default(), *detected_timezone.peek());
+                let defaults = defaults_for_locale(
+                    Locale::default(),
+                    detected_timezone.peek().unwrap_or(chrono_tz::Tz::UTC),
+                );
                 settings_state.apply_user_settings_with_defaults(&auth.settings, &defaults);
 
                 auth_state.set(AuthStatus::Authenticated(auth.clone()));

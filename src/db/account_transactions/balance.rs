@@ -161,7 +161,7 @@ pub(super) fn load_account_overall_balance(
             "SELECT closing_balance_hi, closing_balance_lo
              FROM account_transaction_ledger
              WHERE account_id = ?1
-               AND status = 'confirmed'
+               AND status IN ('confirmed', 'failed')
                AND closing_balance_hi IS NOT NULL
                AND closing_balance_lo IS NOT NULL
              ORDER BY occurred_at DESC,
@@ -203,7 +203,7 @@ pub(super) fn load_balance_as_of_date(
             "SELECT closing_balance_hi, closing_balance_lo
              FROM account_transaction_ledger
              WHERE account_id = ?1
-               AND status = 'confirmed'
+               AND status IN ('confirmed', 'failed')
                AND occurred_at <= ?2
                AND closing_balance_hi IS NOT NULL
                AND closing_balance_lo IS NOT NULL
@@ -236,7 +236,7 @@ pub(super) fn load_balance_before_date(
             "SELECT closing_balance_hi, closing_balance_lo
              FROM account_transaction_ledger
              WHERE account_id = ?1
-               AND status = 'confirmed'
+               AND status IN ('confirmed', 'failed')
                AND occurred_at < ?2
                AND closing_balance_hi IS NOT NULL
                AND closing_balance_lo IS NOT NULL
@@ -267,7 +267,7 @@ pub(super) fn load_first_transaction_date(
             "SELECT MIN(occurred_at)
              FROM account_transaction_ledger
              WHERE account_id = ?1
-               AND status = 'confirmed'",
+               AND status IN ('confirmed', 'failed')",
             params![account_id_raw],
             |row| row.get(0),
         )

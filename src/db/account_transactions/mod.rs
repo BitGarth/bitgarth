@@ -9,6 +9,7 @@ mod unit_tests;
 mod wallet_report;
 
 pub(in crate::db) use ledger_rebuild::bitcoin_account_has_complete_history_proof_for_repair;
+pub(in crate::db) use ledger_rebuild::rebuild_account_transaction_ledger_tx;
 pub(crate) use ledger_rebuild::{
     BitcoinAccountCompletionPublication, BitcoinAddressProofPublication,
     BitcoinHdDiscoveryPublication, load_bitcoin_account_history_coverage,

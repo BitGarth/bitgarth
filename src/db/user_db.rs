@@ -2837,7 +2837,7 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_v48_database_opens_at_v54_without_losing_financial_data() {
+    fn encrypted_v48_database_opens_at_v55_without_losing_financial_data() {
         let runtime = crate::db::acquire_test_runtime().expect("test runtime should initialize");
         let user_id = UserId::new();
         let db_path =
@@ -3047,10 +3047,10 @@ mod tests {
         .expect("migrated financial data should load");
 
         eprintln!(
-            "representative encrypted V48→V54 database open: {} ms",
+            "representative encrypted V48→V55 database open: {} ms",
             open_duration.as_millis()
         );
-        assert_eq!(schema_version, 54);
+        assert_eq!(schema_version, 55);
         assert_eq!(repair_status, Some(UserDataRepairStatus::Pending));
         assert_eq!(canonical_before, canonical_after);
         assert_eq!(provider_balances_before, provider_balances_after);

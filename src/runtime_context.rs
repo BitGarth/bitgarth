@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "server")]
 use std::sync::Arc;
 #[cfg(feature = "server")]
+use std::sync::OnceLock;
+#[cfg(feature = "server")]
+use tokio::sync::watch;
+#[cfg(feature = "server")]
 use ulid::Ulid;
 #[cfg(feature = "server")]
 tokio::task_local! {
@@ -140,11 +144,59 @@ where
     F::Output: Send + 'static,
 {
     let runtime_context = current_runtime_context();
+    let count = background_task_count().clone();
+    count.send_modify(|active| *active += 1);
+    let guard = BackgroundTaskGuard(count);
     tokio::spawn(async move {
+        let _guard = guard;
         if let Some(runtime_context) = runtime_context {
             REQUEST_RUNTIME_CONTEXT.scope(runtime_context, future).await
         } else {
             future.await
         }
     })
+}
+
+#[cfg(feature = "server")]
+static BACKGROUND_TASK_COUNT: OnceLock<watch::Sender<usize>> = OnceLock::new();
+
+#[cfg(feature = "server")]
+fn background_task_count() -> &'static watch::Sender<usize> {
+    BACKGROUND_TASK_COUNT.get_or_init(|| watch::channel(0).0)
+}
+
+#[cfg(feature = "server")]
+struct BackgroundTaskGuard(watch::Sender<usize>);
+
+#[cfg(feature = "server")]
+impl Drop for BackgroundTaskGuard {
+    fn drop(&mut self) {
+        self.0.send_modify(|active| *active -= 1);
+    }
+}
+
+#[cfg(feature = "server")]
+async fn wait_for_count_zero(mut count: watch::Receiver<usize>) {
+    loop {
+        if *count.borrow_and_update() == 0 || count.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+pub(crate) async fn wait_for_background_tasks() {
+    wait_for_count_zero(background_task_count().subscribe()).await;
+}
+
+#[cfg(all(test, feature = "server", not(bitgarth_db_unit_only)))]
+#[tokio::test]
+async fn background_task_drain_waits_for_tracked_work() {
+    let (count_tx, count_rx) = tokio::sync::watch::channel(1);
+    let guard = BackgroundTaskGuard(count_tx);
+    let waiter = tokio::spawn(wait_for_count_zero(count_rx));
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished());
+    drop(guard);
+    waiter.await.expect("drain should finish");
 }

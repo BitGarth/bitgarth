@@ -1,8 +1,13 @@
-use clap::{CommandFactory, Parser, Subcommand, error::ErrorKind};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, error::ErrorKind};
 
+/// Command-line client for BitGarth, a private crypto portfolio tracker.
+///
+/// Connects to a BitGarth server you already use, such as the hosted service
+/// at https://my.bitgarth.app or your own self-hosted instance.
 #[derive(Parser)]
 #[command(name = "bitgarth", version)]
 pub(crate) struct Args {
+    /// Saved profile to use, or the name for a new one with pair
     #[arg(long, global = true, value_parser = parse_profile_name)]
     pub(crate) profile: Vec<String>,
 
@@ -12,14 +17,23 @@ pub(crate) struct Args {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Show the balances of your wallets
     #[command(name = "balancesheet", visible_alias = "bs")]
     BalanceSheet,
+    /// Link this client to your BitGarth account and save it as a profile
+    ///
+    /// Prints a link and a code to approve in the BitGarth web app. Revoke
+    /// access later under Settings > Paired Clients.
+    #[command(visible_alias = "login")]
     Pair {
+        /// BitGarth address as shown in your browser; asked for if omitted
         #[arg(value_name = "BITGARTH_URL")]
         bitgarth_url: Option<String>,
+        /// Allow a plain-HTTP address, such as a server on this computer
         #[arg(long)]
         allow_insecure_http: bool,
     },
+    /// List, rename or remove saved profiles
     Profile {
         #[command(subcommand)]
         command: ProfileCommand,
@@ -53,7 +67,17 @@ impl Args {
                 "--profile may be supplied only once",
             ));
         }
-        <Self as Parser>::try_parse_from(values)
+        // The Snap runs this binary as `bitgarth-cli`; show the name the user typed.
+        let bin = values
+            .first()
+            .and_then(|arg| std::path::Path::new(arg).file_name())
+            .map_or_else(|| "bitgarth".into(), |name| name.to_string_lossy());
+        let matches = Self::command()
+            .after_help(format!(
+                "Get started:\n  {bin} pair https://my.bitgarth.app/\n  {bin} balancesheet"
+            ))
+            .try_get_matches_from(&values)?;
+        Self::from_arg_matches(&matches)
     }
 
     pub(crate) fn validate(&self) -> Result<(), clap::Error> {
@@ -85,14 +109,23 @@ impl Args {
 
 #[derive(Subcommand)]
 pub(crate) enum ProfileCommand {
+    /// List saved profiles and their BitGarth addresses
     List,
+    /// Remove a saved profile from this computer
+    ///
+    /// The server keeps the pairing active until you revoke it in the web app
+    /// under Settings > Paired Clients.
     Remove {
+        /// Profile to remove
         #[arg(value_parser = parse_profile_name)]
         name: String,
     },
+    /// Rename a saved profile
     Rename {
+        /// Current profile name
         #[arg(value_parser = parse_profile_name)]
         old: String,
+        /// New profile name
         #[arg(value_parser = parse_profile_name)]
         new: String,
     },
@@ -183,6 +216,23 @@ mod tests {
             assert!(parsed.is_ok());
             let Ok(parsed) = parsed else { continue };
             assert!(matches!(parsed.command, Command::BalanceSheet));
+        }
+    }
+
+    #[test]
+    fn pair_and_login_are_the_same_command() {
+        for argv in [
+            vec!["bitgarth", "pair", "https://example.com"],
+            vec!["bitgarth", "login", "https://example.com"],
+        ] {
+            let parsed = Args::try_parse_from(argv);
+            assert!(parsed.is_ok_and(|args| matches!(
+                args.command,
+                Command::Pair {
+                    bitgarth_url: Some(url),
+                    allow_insecure_http: false
+                } if url == "https://example.com"
+            )));
         }
     }
 
@@ -348,6 +398,46 @@ mod tests {
                 Some(2)
             );
         }
+    }
+
+    #[test]
+    fn help_uses_the_invoked_program_name() {
+        for (argv0, expected) in [
+            (
+                "/snap/bin/bitgarth-cli",
+                "bitgarth-cli pair https://my.bitgarth.app/",
+            ),
+            ("bitgarth", "bitgarth pair https://my.bitgarth.app/"),
+        ] {
+            let help = Args::try_parse_from([argv0, "--help"]).err();
+            assert_eq!(
+                help.as_ref().map(clap::Error::kind),
+                Some(clap::error::ErrorKind::DisplayHelp)
+            );
+            let rendered = help.map(|help| help.to_string()).unwrap_or_default();
+            assert!(rendered.contains(expected), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn every_command_explains_itself_in_help() {
+        fn undocumented(command: &clap::Command, path: &str, missing: &mut Vec<String>) {
+            if command.get_about().is_none() {
+                missing.push(path.to_owned());
+            }
+            for argument in command.get_arguments() {
+                if argument.get_help().is_none() {
+                    missing.push(format!("{path} <{}>", argument.get_id()));
+                }
+            }
+            for subcommand in command.get_subcommands() {
+                let path = format!("{path} {}", subcommand.get_name());
+                undocumented(subcommand, &path, missing);
+            }
+        }
+        let mut missing = Vec::new();
+        undocumented(&Args::command(), "bitgarth", &mut missing);
+        assert_eq!(missing, Vec::<String>::new());
     }
 
     #[test]

@@ -6,7 +6,8 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 pub(crate) const AUTOMATIC_SYNC_FALLBACK_INTERVAL: Duration = Duration::from_secs(5 * 60);
-pub(crate) const AUTOMATIC_SYNC_WARM_STALE_AFTER: Duration = Duration::from_secs(15 * 60);
+pub(crate) const AUTOMATIC_SYNC_WARM_STALE_AFTER: Duration =
+    crate::account_mode::ACCOUNT_REFRESH_INTERVAL;
 pub(crate) const AUTOMATIC_SYNC_COLD_STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 pub(crate) const AUTOMATIC_SYNC_IDLE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 

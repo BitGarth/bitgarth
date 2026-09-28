@@ -1,0 +1,325 @@
+name: Snap Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published vMAJOR.MINOR.PATCH release
+        required: true
+        type: string
+      channel:
+        description: Store channel after tests
+        required: true
+        type: choice
+        options: [none, candidate, stable]
+        default: none
+      verify_candidate:
+        description: Test signed candidate packages instead of building
+        required: false
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+      channel:
+        required: false
+        type: string
+        default: none
+    secrets:
+      SNAPCRAFT_STORE_CREDENTIALS:
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bitgarth-snap-store
+  cancel-in-progress: false
+
+jobs:
+  build-test:
+    if: ${{ !inputs.verify_candidate }}
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      CHANNEL: ${{ inputs.channel }}
+    steps:
+      - name: Validate inputs
+        shell: bash
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          case "$CHANNEL" in none|candidate|stable) ;; *) exit 1 ;; esac
+
+      - name: Checkout packaging implementation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install build prerequisites and Snapcraft 8
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git gh python3 binutils squashfs-tools build-essential
+          sudo snap install snapcraft --classic --channel=8.x/stable
+
+      - name: Require strict snapd, systemd, and a free loopback port
+        run: |
+          test -d /run/systemd/system
+          systemctl is-active --quiet snapd.socket
+          test "$(snap debug confinement)" = strict
+          python3 - <<'PY'
+          import socket
+          with socket.socket() as sock:
+              sock.bind(('127.0.0.1', 8080))
+          PY
+          snap version
+          snapcraft --version
+
+      - name: Test packaging, build, and verify artifact
+        run: |
+          python3 -m unittest discover -s tests -p test_snap_packaging.py -q
+          python3 scripts/snap/build.py --tag "$RELEASE_TAG" --output-dir ".snap-out/$RELEASE_TAG"
+          python3 scripts/snap/verify_manifest.py --tag "$RELEASE_TAG" --directory ".snap-out/$RELEASE_TAG"
+
+      - name: Fresh install, seed, restart, and verify
+        run: |
+          version="${RELEASE_TAG#v}"
+          output=".snap-out/$RELEASE_TAG"
+          state="$RUNNER_TEMP/bitgarth-snap-state.json"
+          sudo snap install "$output/bitgarth-web_${version}_amd64.snap" --dangerous
+          sudo snap install "$output/bitgarth-cli_${version}_amd64.snap" --dangerous
+          python3 tests/test_snap_installed.py seed --expected-version "$version" --state-file "$state"
+          sudo snap restart bitgarth-web
+          python3 tests/test_snap_installed.py verify --expected-version "$version" --state-file "$state"
+          sudo snap remove --purge bitgarth-cli bitgarth-web
+          rm "$state"
+
+      - name: Check published stable pair
+        id: store
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from urllib.error import HTTPError
+          from urllib.request import Request, urlopen
+
+          def stable(name):
+              url = 'https://api.snapcraft.io/v2/snaps/info/' + name
+              request = Request(url, headers={'Snap-Device-Series': '16'})
+              try:
+                  with urlopen(request, timeout=30) as response:
+                      data = json.load(response)
+              except HTTPError as error:
+                  if error.code == 404:
+                      return None
+                  raise
+              entries = data['channel-map']
+              matches = [item for item in entries if
+                         item['channel']['track'] == 'latest' and
+                         item['channel']['risk'] == 'stable' and
+                         item['channel']['architecture'] == 'amd64']
+              if len(matches) > 1:
+                  raise ValueError(f'duplicate stable channel for {name}')
+              if not matches:
+                  return None
+              item = matches[0]
+              if not isinstance(item['revision'], int) or not isinstance(item['version'], str):
+                  raise ValueError(f'invalid stable metadata for {name}')
+              return item
+
+          cli, web = stable('bitgarth-cli'), stable('bitgarth-web')
+          if (cli is None) != (web is None):
+              raise ValueError('only one BitGarth snap has a stable revision')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              if cli is None:
+                  print('mode=initial', file=output)
+                  print('initial release: no previous stable')
+              else:
+                  for name, item in (('cli', cli), ('web', web)):
+                      version = item['version']
+                      if not version or '\n' in version:
+                          raise ValueError(f'invalid stable version for {name}')
+                      print(f'{name}_version={version}', file=output)
+                      print(f'{name} stable: version {version}, revision {item["revision"]}')
+                  print('mode=stable', file=output)
+          PY
+
+      - name: Test revision change from the installed baseline
+        env:
+          STORE_MODE: ${{ steps.store.outputs.mode }}
+          STORE_CLI_VERSION: ${{ steps.store.outputs.cli_version }}
+          STORE_WEB_VERSION: ${{ steps.store.outputs.web_version }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          output=".snap-out/$RELEASE_TAG"
+          state="$RUNNER_TEMP/bitgarth-snap-upgrade-state.json"
+          if [ "$STORE_MODE" = initial ]; then
+            sudo snap install "$output/bitgarth-web_${version}_amd64.snap" --dangerous
+            sudo snap install "$output/bitgarth-cli_${version}_amd64.snap" --dangerous
+            python3 tests/test_snap_installed.py seed --expected-version "$version" --state-file "$state"
+          else
+            test "$STORE_MODE" = stable
+            sudo snap install bitgarth-web --channel=latest/stable
+            sudo snap install bitgarth-cli --channel=latest/stable
+            python3 tests/test_snap_installed.py seed --expected-version "$STORE_WEB_VERSION" \
+              --expected-cli-version "$STORE_CLI_VERSION" --state-file "$state"
+          fi
+          echo 'Before local revision change:'
+          before="$(snap list bitgarth-web bitgarth-cli)"
+          echo "$before"
+          sudo snap install "$output/bitgarth-web_${version}_amd64.snap" --dangerous
+          sudo snap install "$output/bitgarth-cli_${version}_amd64.snap" --dangerous
+          echo 'After local revision change:'
+          after="$(snap list bitgarth-web bitgarth-cli)"
+          echo "$after"
+          python3 tests/test_snap_installed.py verify --expected-version "$version" --state-file "$state"
+          {
+            echo "### Snap test: $RELEASE_TAG"
+            echo 'Strict confinement, fresh installation, service restart, and revision change passed.'
+            echo "Baseline: $STORE_MODE"
+            echo 'Before:'
+            echo "$before"
+            echo 'After:'
+            echo "$after"
+            python3 scripts/snap/verify_manifest.py --tag "$RELEASE_TAG" --directory "$output"
+            sha256sum "$output"/*.snap
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload tested Snap artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bitgarth-snaps-${{ inputs.release_tag }}-amd64
+          path: |
+            .snap-out/${{ inputs.release_tag }}/bitgarth-cli_*.snap
+            .snap-out/${{ inputs.release_tag }}/bitgarth-web_*.snap
+            .snap-out/${{ inputs.release_tag }}/manifest.json
+          if-no-files-found: error
+
+  publish:
+    if: ${{ !inputs.verify_candidate && inputs.channel != 'none' }}
+    needs: build-test
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      CHANNEL: ${{ inputs.channel }}
+    steps:
+      - name: Checkout packaging implementation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download tested Snap artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bitgarth-snaps-${{ inputs.release_tag }}-amd64
+          path: .snap-out/${{ inputs.release_tag }}
+
+      - name: Recheck artifact and exact public release
+        run: |
+          case "$CHANNEL" in candidate|stable) ;; *) exit 1 ;; esac
+          sudo snap install snapcraft --classic --channel=8.x/stable
+          python3 scripts/snap/verify_manifest.py --tag "$RELEASE_TAG" --directory ".snap-out/$RELEASE_TAG"
+          python3 - <<'PY'
+          import json, os, re
+          from urllib.request import Request, urlopen
+
+          tag = os.environ['RELEASE_TAG']
+          if not re.fullmatch(r'v\d+\.\d+\.\d+', tag):
+              raise ValueError('invalid release tag')
+          headers = {'Accept': 'application/vnd.github+json', 'User-Agent': 'bitgarth-snap-release'}
+          base = 'https://api.github.com/repos/BitGarth/bitgarth/releases'
+          with urlopen(Request(base + '/tags/' + tag, headers=headers), timeout=30) as response:
+              release = json.load(response)
+          version = tag[1:]
+          assets = {item['name'] for item in release['assets']}
+          required = {'SHA256SUMS'} | {
+              f'bitgarth-{name}-{tag}-linux-x86_64-gnu.tar.gz' for name in ('cli', 'web')}
+          if (release['tag_name'] != tag or release['draft'] or release['prerelease'] or
+                  not required <= assets):
+              raise ValueError('release is not a complete published stable release')
+          if os.environ['CHANNEL'] == 'stable':
+              latest = None
+              page = 1
+              while True:
+                  with urlopen(Request(f'{base}?per_page=100&page={page}', headers=headers),
+                               timeout=30) as response:
+                      releases = json.load(response)
+                  if not isinstance(releases, list):
+                      raise ValueError('invalid GitHub releases response')
+                  for item in releases:
+                      match = re.fullmatch(r'v(\d+)\.(\d+)\.(\d+)', item['tag_name'])
+                      if match and not item['draft'] and not item['prerelease']:
+                          candidate = tuple(map(int, match.groups()))
+                          latest = max(latest, candidate) if latest else candidate
+                  if len(releases) < 100:
+                      break
+                  page += 1
+              if latest != tuple(map(int, tag[1:].split('.'))):
+                  raise ValueError('release tag is not the latest numeric stable release')
+          print('exact public release and publication channel passed')
+          PY
+
+      - name: Upload both packages to the requested Store channel
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        run: |
+          test -n "$SNAPCRAFT_STORE_CREDENTIALS" || { echo 'Store credential is absent' >&2; exit 1; }
+          version="${RELEASE_TAG#v}"
+          snapcraft upload ".snap-out/$RELEASE_TAG/bitgarth-cli_${version}_amd64.snap" --release="$CHANNEL"
+          snapcraft upload ".snap-out/$RELEASE_TAG/bitgarth-web_${version}_amd64.snap" --release="$CHANNEL"
+          echo "Both $RELEASE_TAG snaps uploaded to $CHANNEL" >> "$GITHUB_STEP_SUMMARY"
+
+  candidate-check:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_candidate }}
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      CHANNEL: ${{ inputs.channel }}
+    steps:
+      - name: Require candidate verification inputs
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$CHANNEL" = none
+
+      - name: Checkout installed-package test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Require strict snapd and a free loopback port
+        run: |
+          test -d /run/systemd/system
+          systemctl is-active --quiet snapd.socket
+          test "$(snap debug confinement)" = strict
+          python3 - <<'PY'
+          import socket
+          with socket.socket() as sock:
+              sock.bind(('127.0.0.1', 8080))
+          PY
+
+      - name: Install signed candidate snaps and test persistence
+        run: |
+          version="${RELEASE_TAG#v}"
+          state="$RUNNER_TEMP/bitgarth-snap-candidate-state.json"
+          sudo snap install bitgarth-web --channel=latest/candidate
+          sudo snap install bitgarth-cli --channel=latest/candidate
+          python3 - <<'PY'
+          import os, re, subprocess
+          version = os.environ['RELEASE_TAG'][1:]
+          for name in ('bitgarth-web', 'bitgarth-cli'):
+              lines = subprocess.check_output(['snap', 'list', name, '--unicode=never'],
+                                              text=True).splitlines()
+              fields = lines[1].split()
+              if (fields[0] != name or fields[1] != version or
+                      not re.fullmatch(r'ferntrail(?:\+|\*{1,2})?', fields[4])):
+                  raise ValueError(f'incorrect signed candidate installation: {name}')
+              print(f'{name}: version {fields[1]}, revision {fields[2]}, publisher {fields[4]}')
+          PY
+          python3 tests/test_snap_installed.py seed --expected-version "$version" --state-file "$state"
+          sudo snap restart bitgarth-web
+          python3 tests/test_snap_installed.py verify --expected-version "$version" --state-file "$state"
+          {
+            echo "### Signed candidate test: $RELEASE_TAG"
+            echo 'Strict confinement, signed candidate installation, and restart persistence passed.'
+            snap list bitgarth-web bitgarth-cli
+          } >> "$GITHUB_STEP_SUMMARY"

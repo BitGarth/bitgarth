@@ -115,6 +115,7 @@ pub(super) struct AggregatedAccountTx {
     updated_at: DateTime<Utc>,
     min_transfer_index: Option<i64>,
     has_from_owned: bool,
+    has_owned_normal_sender: bool,
     has_to_owned: bool,
     incoming_total: UnsignedAmount,
     outgoing_total: UnsignedAmount,
@@ -143,6 +144,8 @@ pub(super) fn account_model_entries(
                 ct.created_at,
                 ct.updated_at,
                 at.transfer_index,
+                (at.provider_transfer_key = 'normal'
+                 OR (at.provider_transfer_key = 'legacy:0' AND at.transfer_kind = 'normal')),
                 at.from_address,
                 at.to_address,
                 at.value_amount_hi,
@@ -197,14 +200,15 @@ pub(super) fn account_model_entries(
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
                     row.get::<_, i64>(8)?,
-                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, bool>(9)?,
                     row.get::<_, Option<String>>(10)?,
-                    row.get::<_, i64>(11)?,
+                    row.get::<_, Option<String>>(11)?,
                     row.get::<_, i64>(12)?,
-                    row.get::<_, Option<i64>>(13)?,
+                    row.get::<_, i64>(13)?,
                     row.get::<_, Option<i64>>(14)?,
-                    row.get::<_, i64>(15)?,
+                    row.get::<_, Option<i64>>(15)?,
                     row.get::<_, i64>(16)?,
+                    row.get::<_, i64>(17)?,
                 ))
             },
         )
@@ -227,6 +231,7 @@ pub(super) fn account_model_entries(
             first_seen_raw,
             updated_at_raw,
             transfer_index,
+            is_normal_sender_transfer,
             from_address_raw,
             to_address_raw,
             value_hi,
@@ -273,6 +278,7 @@ pub(super) fn account_model_entries(
                 updated_at,
                 min_transfer_index: Some(transfer_index),
                 has_from_owned: false,
+                has_owned_normal_sender: false,
                 has_to_owned: false,
                 incoming_total: UnsignedAmount::zero(),
                 outgoing_total: UnsignedAmount::zero(),
@@ -287,6 +293,7 @@ pub(super) fn account_model_entries(
             None => transfer_index,
         });
         aggregated.has_from_owned |= from_owned;
+        aggregated.has_owned_normal_sender |= from_owned && is_normal_sender_transfer;
         aggregated.has_to_owned |= to_owned;
 
         if to_owned {
@@ -331,7 +338,7 @@ pub(super) fn account_model_entries(
                 aggregated.self_transfer_total
             }
         };
-        let fee = if aggregated.has_from_owned {
+        let fee = if aggregated.has_owned_normal_sender {
             aggregated.fee
         } else {
             None
@@ -344,13 +351,27 @@ pub(super) fn account_model_entries(
             .transpose()?
             .unwrap_or(0_i128);
         let mut balance_delta = incoming_signed - outgoing_signed;
-        if aggregated.has_from_owned {
+        if aggregated.has_owned_normal_sender && aggregated.status != ChainTransactionStatus::Failed
+        {
             balance_delta = balance_delta
                 .checked_sub(fee_signed)
                 .ok_or_else(|| DbError::new("Signed underflow while applying account fee"))?;
         }
 
-        let occurred_at = if aggregated.status == ChainTransactionStatus::Confirmed {
+        let balance_delta = if aggregated.status == ChainTransactionStatus::Failed {
+            if aggregated.has_owned_normal_sender {
+                -fee_signed
+            } else {
+                0
+            }
+        } else {
+            balance_delta
+        };
+
+        let occurred_at = if matches!(
+            aggregated.status,
+            ChainTransactionStatus::Confirmed | ChainTransactionStatus::Failed
+        ) {
             aggregated.block_time.unwrap_or(aggregated.updated_at)
         } else {
             aggregated.first_seen_at
@@ -570,7 +591,15 @@ fn utxo_model_entries_with_row_visitor(
         let balance_delta = incoming_signed
             .checked_sub(outgoing_signed)
             .ok_or_else(|| DbError::new("Signed underflow while building UTXO balance delta"))?;
-        let occurred_at = if status == ChainTransactionStatus::Confirmed {
+        let balance_delta = if status == ChainTransactionStatus::Failed {
+            0
+        } else {
+            balance_delta
+        };
+        let occurred_at = if matches!(
+            status,
+            ChainTransactionStatus::Confirmed | ChainTransactionStatus::Failed
+        ) {
             block_time.unwrap_or(updated_at)
         } else {
             first_seen_at
@@ -809,7 +838,9 @@ pub(super) fn assign_bitcoin_closing_balances(
             }
             NativeBalanceState::Unknown => return Ok(()),
         };
-        for index in order_confirmed_bitcoin_entries(entries)? {
+        let confirmed_order = order_confirmed_bitcoin_entries(entries)?;
+        for index in &confirmed_order {
+            let index = *index;
             running = running
                 .checked_add(entries[index].balance_delta)
                 .ok_or_else(|| {
@@ -825,6 +856,24 @@ pub(super) fn assign_bitcoin_closing_balances(
                 .map_err(|_| DbError::new("Failed to convert Bitcoin closing balance"))?;
             entries[index].closing_balance = Some(UnsignedAmount::from_u128(amount));
         }
+        for index in 0..entries.len() {
+            if entries[index].status != ChainTransactionStatus::Failed {
+                continue;
+            }
+            let prior = confirmed_order
+                .iter()
+                .rev()
+                .find(|confirmed| entries[**confirmed].occurred_at <= entries[index].occurred_at);
+            let balance = match prior {
+                Some(confirmed) => entries[*confirmed].closing_balance,
+                None => Some(match basis {
+                    NativeBalanceState::CanonicalZero => UnsignedAmount::zero(),
+                    NativeBalanceState::KnownAmount(amount) => amount,
+                    NativeBalanceState::Unknown => unreachable!(),
+                }),
+            };
+            entries[index].closing_balance = balance;
+        }
         Ok(())
     })();
     if result.is_err() {
@@ -839,14 +888,18 @@ pub(super) fn assign_closing_balances(
     entries: &mut [LedgerBuildEntry],
     opening_balance: Option<OpeningBalance>,
 ) -> Result<(), DbError> {
-    let mut confirmed_indices: Vec<usize> = entries
+    let mut settled_indices: Vec<usize> = entries
         .iter()
         .enumerate()
         .filter_map(|(index, row)| {
-            (row.status == ChainTransactionStatus::Confirmed).then_some(index)
+            matches!(
+                row.status,
+                ChainTransactionStatus::Confirmed | ChainTransactionStatus::Failed
+            )
+            .then_some(index)
         })
         .collect();
-    confirmed_indices.sort_by(|left, right| {
+    settled_indices.sort_by(|left, right| {
         let left_row = &entries[*left];
         let right_row = &entries[*right];
         left_row
@@ -877,7 +930,7 @@ pub(super) fn assign_closing_balances(
         Some(ob) => i128::try_from(ob.amount().value()).unwrap_or(0_i128),
         None => 0_i128,
     };
-    for index in confirmed_indices {
+    for index in settled_indices {
         let row = &mut entries[index];
         apply_signed_delta(
             &mut running,
@@ -893,9 +946,7 @@ pub(super) fn assign_closing_balances(
         .filter_map(|(index, row)| {
             matches!(
                 row.status,
-                ChainTransactionStatus::Pending
-                    | ChainTransactionStatus::Dropped
-                    | ChainTransactionStatus::Failed
+                ChainTransactionStatus::Pending | ChainTransactionStatus::Dropped
             )
             .then_some(index)
         })
@@ -1438,6 +1489,15 @@ pub(crate) fn rebuild_account_transaction_ledger_conn(
     observed_at: DateTime<Utc>,
 ) -> Result<(), DbError> {
     rebuild_account_transaction_ledger_conn_with_basis(conn, account_id, observed_at, None)
+}
+
+pub(in crate::db) fn rebuild_account_transaction_ledger_tx(
+    tx: &rusqlite::Transaction<'_>,
+    account_id: DigitalAssetAccountId,
+    observed_at: DateTime<Utc>,
+) -> Result<(), DbError> {
+    let (meta, entries) = build_account_transaction_ledger(tx, account_id, None)?;
+    replace_account_transaction_ledger_entries_conn(tx, account_id, &meta, observed_at, entries)
 }
 
 fn rebuild_account_transaction_ledger_conn_with_basis(

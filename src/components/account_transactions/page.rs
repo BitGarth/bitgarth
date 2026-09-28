@@ -67,22 +67,9 @@ pub(crate) fn AccountTransactions(
         use_signal(std::collections::HashMap::new);
     use_context_provider(|| sync_state);
     let navigator = use_navigator();
-    // Default a bare route to the current calendar year (year-to-date) so the
-    // page opens on a year like the wallet report, not an empty custom range.
-    let raw_route = DateRangeRouteParams::new(start, end);
-    let current_route = if raw_route.is_empty() {
-        current_year_to_date_range(local_today_in_timezone(
-            Utc::now(),
-            (settings_state.timezone)(),
-        ))
-        .map(|range| {
-            let selection = DateRangeSelection::Range(range);
-            DateRangeRouteParams::new(selection.start_query_value(), selection.end_query_value())
-        })
-        .unwrap_or(raw_route)
-    } else {
-        raw_route
-    };
+    // A bare route shows all time (paginated), so an account whose activity is
+    // all in earlier years does not open on an empty current year.
+    let current_route = DateRangeRouteParams::new(start, end);
 
     // Provide sync-now context for the address modal sync status cells
     let mut account_sync_now: Signal<Option<DateTime<Utc>>> = use_signal(|| None);
@@ -293,9 +280,18 @@ pub(crate) fn AccountTransactions(
         if completion.run_id != Some(pending_run_id) {
             return;
         }
+        let history_paused = response.peek().as_ref().is_some_and(|data| {
+            matches!(
+                data,
+                WalletAccountHistoryResponse::Native(native)
+                    if native.transaction_sync_pause_reason.is_some()
+            )
+        });
         manual_sync_outcome.set(Some(manual_sync_outcome_message(
             &completion,
+            history_paused,
             timezone.into(),
+            date_format,
         )));
         manual_sync_pending_run.set(None);
     });
@@ -305,13 +301,15 @@ pub(crate) fn AccountTransactions(
     };
     let displayed_year =
         active_range.and_then(|range| displayed_calendar_year(range, this_year_preset));
-    let year_label = displayed_year
-        .map(|year| year.to_string())
-        .unwrap_or_else(|| "Custom range".to_string());
+    let year_label = match (active_range, displayed_year) {
+        (None, _) => "All time".to_string(),
+        (Some(_), Some(year)) => year.to_string(),
+        (Some(_), None) => "Custom range".to_string(),
+    };
     let disable_previous_year = displayed_year.is_none();
     let disable_next_year = displayed_year.is_none_or(|year| year >= current_year);
     let show_this_year = displayed_year != Some(current_year);
-    let custom_range_open = displayed_year.is_none();
+    let custom_range_open = active_range.is_some() && displayed_year.is_none();
     let start_input_value = filter_state_snapshot.start_input_value().to_string();
     let end_input_value = filter_state_snapshot.end_input_value().to_string();
     let validation_message = filter_state_snapshot
@@ -469,7 +467,12 @@ pub(crate) fn AccountTransactions(
                                             }
                                         }
                                         AccountSyncStatusPill { account_id: native_account_id }
-                                        span { "data-testid": "account-mode", "{data.account_mode.label()}" }
+                                        span { "data-testid": "account-mode",
+                                            {data.account_mode.status_label(
+                                                data.transaction_sync_pause_reason
+                                                    == Some(crate::account_mode::TransactionSyncPauseReason::TransactionThreshold),
+                                            )}
+                                        }
                                         if let Some(coverage @ crate::balance_reliability::BitcoinHistoryCoverageView::CompleteThrough { .. }) = data.bitcoin_history_coverage {
                                             span { class: "tx-history-coverage", "data-testid": "bitcoin-history-coverage", "{coverage.label()}" }
                                         }
@@ -1025,6 +1028,11 @@ pub(crate) fn AccountTransactions(
                                     );
                                 }
                             },
+                            on_all_time: active_range.map(|_| {
+                                EventHandler::new(move |_| {
+                                    pending_route_selection.set(Some(DateRangeSelection::Empty));
+                                })
+                            }),
                             on_previous_year: move |_| {
                                 if let Some(year) = displayed_year
                                     && let Some(range) = dial_year_range(year - 1, current_year, this_year_preset)
@@ -1259,8 +1267,8 @@ pub(crate) fn AccountTransactions(
                             }
 
                             TransactionsTableSection {
-                                title: "Confirmed".to_string(),
-                                heading_status: Some("confirmed".to_string()),
+                                title: "History".to_string(),
+                                heading_status: None,
                                 asset: data.asset,
                                 network: data.network,
                                 amount_context,

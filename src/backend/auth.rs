@@ -1,5 +1,5 @@
 use crate::legal::LegalAcknowledgement;
-#[cfg(all(feature = "server", feature = "desktop"))]
+#[cfg(feature = "server")]
 use crate::models::AuthEntryBannerKind;
 #[cfg(feature = "server")]
 use crate::models::FieldErrors;
@@ -969,16 +969,7 @@ pub(crate) async fn logout() -> Result<(), AuthError> {
     Ok(())
 }
 
-#[cfg(all(feature = "server", feature = "desktop"))]
-fn decide_entry(has_session_token: bool, has_users: bool) -> AuthEntryMode {
-    if has_session_token || has_users {
-        AuthEntryMode::Login
-    } else {
-        AuthEntryMode::Register
-    }
-}
-
-#[cfg(all(feature = "server", feature = "desktop"))]
+#[cfg(feature = "server")]
 fn has_any_user() -> Result<bool, session::AuthError> {
     with_db(|conn| {
         let exists: i64 = conn
@@ -992,51 +983,40 @@ fn has_any_user() -> Result<bool, session::AuthError> {
 
 #[get("/_app/auth/entry", cookies: CookieJar)]
 pub(crate) async fn auth_entry() -> Result<AuthEntryDecision, AuthError> {
-    let has_session_token = lookup_session_token("auth_entry", &cookies).is_some();
-
-    if has_session_token {
-        tracing::debug!(
-            has_session_token,
-            "auth: entry decision -> login (session token present)"
-        );
+    if crate::channel::channel() == crate::channel::Channel::Hosted {
+        let has_valid_session = match lookup_session_token("auth_entry", &cookies) {
+            Some(token) => session::get_session_by_token(&token)
+                .map_err(|err| internal_error("auth_entry_session", err))?
+                .is_some(),
+            None => false,
+        };
         return Ok(AuthEntryDecision {
-            mode: AuthEntryMode::Login,
+            mode: if has_valid_session {
+                AuthEntryMode::Login
+            } else {
+                AuthEntryMode::Register
+            },
             banner: None,
         });
     }
 
-    #[cfg(feature = "desktop")]
-    {
-        match has_any_user() {
-            Ok(has_users) => {
-                let mode = decide_entry(has_session_token, has_users);
-                tracing::debug!(
-                    has_users,
-                    mode = ?mode,
-                    "auth: entry decision (desktop user check)"
-                );
-                Ok(AuthEntryDecision { mode, banner: None })
-            }
-            Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    "auth: entry decision failed to query users"
-                );
-                Ok(AuthEntryDecision {
-                    mode: AuthEntryMode::Register,
-                    banner: Some(AuthEntryBannerKind::DatabaseUnavailable),
-                })
-            }
+    match has_any_user() {
+        Ok(has_users) => {
+            let mode = if has_users {
+                AuthEntryMode::Login
+            } else {
+                AuthEntryMode::Register
+            };
+            tracing::debug!(has_users, mode = ?mode, "auth: entry decision");
+            Ok(AuthEntryDecision { mode, banner: None })
         }
-    }
-
-    #[cfg(not(feature = "desktop"))]
-    {
-        tracing::debug!("auth: entry decision -> register (web default)");
-        Ok(AuthEntryDecision {
-            mode: AuthEntryMode::Register,
-            banner: None,
-        })
+        Err(err) => {
+            tracing::error!(error = %err, "auth: entry decision failed to query users");
+            Ok(AuthEntryDecision {
+                mode: AuthEntryMode::Register,
+                banner: Some(AuthEntryBannerKind::DatabaseUnavailable),
+            })
+        }
     }
 }
 
@@ -1121,10 +1101,7 @@ pub(crate) async fn change_password(
         );
         let mut errors = FieldErrors::new();
         errors.add("old_password", "Incorrect password".to_string());
-        return Err(AuthError::unauthorized_with_errors(
-            "Incorrect password",
-            errors,
-        ));
+        return Err(validation_error(errors));
     }
 
     let envelope = read_envelope(user_id).map_err(|e| internal_error("read_envelope", e))?;
@@ -1429,27 +1406,14 @@ mod tests {
 
     // ============ Entry Decision Tests ============
 
-    #[cfg(all(not(bitgarth_db_unit_only), feature = "desktop"))]
-    #[test]
-    fn test_decide_entry_prefers_login_with_session_token() {
-        assert_eq!(decide_entry(true, false), AuthEntryMode::Login);
-        assert_eq!(decide_entry(true, true), AuthEntryMode::Login);
-    }
-
-    #[cfg(all(not(bitgarth_db_unit_only), feature = "desktop"))]
-    #[test]
-    fn test_decide_entry_register_without_users_or_token() {
-        assert_eq!(decide_entry(false, false), AuthEntryMode::Register);
-    }
-
-    #[cfg(all(feature = "db-tests", feature = "desktop"))]
+    #[cfg(feature = "db-tests")]
     #[test]
     fn test_has_any_user_detects_empty_db() {
         let _guard = setup_test_db();
         assert!(matches!(has_any_user(), Ok(false)));
     }
 
-    #[cfg(all(feature = "db-tests", feature = "desktop"))]
+    #[cfg(feature = "db-tests")]
     #[test]
     fn test_has_any_user_detects_existing_user() {
         let _guard = setup_test_db();

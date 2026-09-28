@@ -945,13 +945,40 @@ fn apply_account_transaction_reconciliation(
         .transaction()
         .map_err(|err| DbError::new(format!("Failed to start SQL transaction: {err}")))?;
 
-    let existing =
-        load_existing_chain_transaction_row(&sql_tx, asset_id, network, &record.tx_hash)?;
-    upsert_account_chain_transaction(&sql_tx, asset_id, network, record, now_raw)?;
-    let chain_tx_id = resolve_chain_transaction_id(&sql_tx, asset_id, network, &record.tx_hash)?;
+    let result = reconcile_account_transaction_tx(&sql_tx, asset_id, network, record, now_raw)?;
+    sql_tx
+        .commit()
+        .map_err(|err| DbError::new(format!("Failed to commit SQL transaction: {err}")))?;
+    Ok(result)
+}
+
+pub(in crate::db) fn reconcile_account_transaction_tx(
+    sql_tx: &rusqlite::Transaction<'_>,
+    asset_id: SyncedAssetId,
+    network: Network,
+    record: &SyncAccountTransactionRecord,
+    now_raw: &str,
+) -> Result<(bool, bool), DbError> {
+    let existing = load_existing_chain_transaction_row(sql_tx, asset_id, network, &record.tx_hash)?;
+    upsert_account_chain_transaction(sql_tx, asset_id, network, record, now_raw)?;
+    let chain_tx_id = resolve_chain_transaction_id(sql_tx, asset_id, network, &record.tx_hash)?;
+    let transfer_keys = record
+        .transfers
+        .iter()
+        .map(|transfer| &transfer.provider_transfer_key)
+        .collect::<HashSet<_>>();
+    if record
+        .excluded_transfer_keys
+        .iter()
+        .any(|key| transfer_keys.contains(key))
+    {
+        return Err(DbError::new(
+            "Account transfer identity cannot be both retained and excluded",
+        ));
+    }
     let mut address_cache = HashMap::<String, Option<DigitalAssetAddressId>>::new();
     upsert_account_transfers(
-        &sql_tx,
+        sql_tx,
         asset_id,
         network,
         &chain_tx_id,
@@ -959,13 +986,74 @@ fn apply_account_transaction_reconciliation(
         &mut address_cache,
         now_raw,
     )?;
-    begin_chain_cleanup_scope(&sql_tx)?;
-    mark_chain_cleanup_candidate(&sql_tx, &chain_tx_id)?;
-    let cleanup_stats = execute_chain_cleanup_for_marked_candidates(&sql_tx)?;
+    let mut removed_transfers = 0;
+    let mut accounts_to_rebuild = HashSet::new();
+    for key in &record.excluded_transfer_keys {
+        for candidate in [
+            Some(key.as_str().to_string()),
+            legacy_provider_transfer_key(key),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let mut affected_accounts = sql_tx
+                .prepare(
+                    "SELECT DISTINCT da.account_id
+                     FROM account_transfers t
+                     JOIN digital_asset_addresses da
+                       ON da.id = t.from_address_id OR da.id = t.to_address_id
+                     WHERE t.chain_transaction_id = ?1 AND t.provider_transfer_key = ?2",
+                )
+                .map_err(|err| {
+                    DbError::new(format!("Failed to prepare excluded transfer owners: {err}"))
+                })?;
+            let account_ids = affected_accounts
+                .query_map(params![chain_tx_id, candidate], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|err| {
+                    DbError::new(format!("Failed to query excluded transfer owners: {err}"))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| {
+                    DbError::new(format!("Failed to read excluded transfer owners: {err}"))
+                })?;
+            drop(affected_accounts);
+            let deleted = sql_tx
+                .execute(
+                    "DELETE FROM account_transfers
+                     WHERE chain_transaction_id = ?1 AND provider_transfer_key = ?2",
+                    params![chain_tx_id, candidate],
+                )
+                .map_err(|err| {
+                    DbError::new(format!("Failed to retire excluded account transfer: {err}"))
+                })?;
+            removed_transfers += deleted;
+            if deleted > 0 {
+                for account_id in account_ids {
+                    accounts_to_rebuild.insert(parse_account_id(&account_id)?);
+                }
+            }
+        }
+    }
+    begin_chain_cleanup_scope(sql_tx)?;
+    mark_chain_cleanup_candidate(sql_tx, &chain_tx_id)?;
+    let cleanup_stats = execute_chain_cleanup_for_marked_candidates(sql_tx)?;
 
-    sql_tx
-        .commit()
-        .map_err(|err| DbError::new(format!("Failed to commit SQL transaction: {err}")))?;
+    // An exclusion can affect an account outside the current manual sync target.
+    // Publish its remaining history atomically with the transfer removal.
+    if !accounts_to_rebuild.is_empty() {
+        let observed_at = DateTime::parse_from_rfc3339(now_raw)
+            .map_err(|err| DbError::new(format!("Invalid reconciliation timestamp: {err}")))?
+            .with_timezone(&Utc);
+        for account_id in accounts_to_rebuild {
+            crate::db::account_transactions::rebuild_account_transaction_ledger_tx(
+                sql_tx,
+                account_id,
+                observed_at,
+            )?;
+        }
+    }
 
     let block_time = record.block_time.map(|value| value.to_rfc3339());
     let (fee_amount_hi, fee_amount_lo) = match record.fee_amount {
@@ -986,7 +1074,7 @@ fn apply_account_transaction_reconciliation(
     };
 
     let inserted = existing.is_none();
-    let updated = existing.is_some_and(|value| value != current);
+    let updated = existing.is_some_and(|value| value != current) || removed_transfers > 0;
     if cleanup_stats.deleted_orphan_chain_transactions > 0 {
         return Ok((false, false));
     }

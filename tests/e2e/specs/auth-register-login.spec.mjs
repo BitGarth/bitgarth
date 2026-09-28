@@ -41,3 +41,18 @@ test("registration requires terms and privacy acknowledgement", async ({ page })
   await page.getByTestId("legal-acknowledgement-checkbox").check();
   await expect(submit).toBeEnabled();
 });
+
+test.describe("browser timezone", () => {
+  test.use({ timezoneId: "Pacific/Auckland" });
+
+  test("is saved as the user's timezone on first sign-in", async ({ page }) => {
+    await registerViaUiAndExpectAuthenticated(page);
+
+    await expect
+      .poll(async () => {
+        const response = await page.request.get("/_app/user/settings");
+        return (await response.json()).timezone;
+      })
+      .toBe("Pacific/Auckland");
+  });
+});

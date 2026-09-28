@@ -17,7 +17,7 @@ use crate::models::{EtherscanBaseUrl, RawEtherscanApiKey, UserId};
 use crate::tasks::jobs::raw_ingestion_executor::{
     EtherscanPageIngestionRequest, EtherscanPageIngestionSummary, EtherscanRequestFailureRecord,
     IngestedEtherscanPage, ingest_etherscan_internal_page, ingest_etherscan_normal_page,
-    record_etherscan_request_failure,
+    map_retained_etherscan_touched_hashes, record_etherscan_request_failure,
 };
 use crate::tasks::jobs::sync::{
     IntegrationIterationContext, IntegrationSyncPlan, LABEL_ETHERSCAN, RunContext,
@@ -462,7 +462,12 @@ fn run_etherscan_iteration(
         &mut on_normal_page_fetched,
     )?;
 
-    let mapped_transactions = map_etherscan_transactions(normal_txs, internal_txs)?;
+    let touched_hashes = map_etherscan_transactions(normal_txs, internal_txs)?
+        .into_iter()
+        .map(|record| record.tx_hash.as_str().to_string())
+        .collect::<HashSet<_>>();
+    let mapped_transactions =
+        map_retained_etherscan_touched_hashes(run.user_id, address.network, &touched_hashes)?;
     let observed_at = run.clock.utc_now();
     let reconcile_summary = reconcile_account_transactions(
         run.user_id,

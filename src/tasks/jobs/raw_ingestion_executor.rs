@@ -13,11 +13,14 @@ use crate::db::raw_ingestion::{
     ResponseHeadersJson, SourceConnectionId, SyncRunId, TransportErrorMessage,
     insert_raw_etherscan_internal_transaction_version,
     insert_raw_etherscan_normal_transaction_version, insert_raw_mempool_tx_version,
+    load_all_current_raw_etherscan_internal_transaction_heads_conn,
+    load_all_current_raw_etherscan_normal_transaction_heads_conn,
     load_current_raw_etherscan_internal_transaction_heads,
     load_current_raw_etherscan_normal_transaction_heads,
     load_current_raw_mempool_transaction_heads, record_etherscan_request_attempt,
     record_raw_mempool_page_observation, record_raw_parse_attempt, record_request_attempt,
 };
+use crate::db::{SyncAccountTransactionRecord, with_user_db};
 use crate::integrations::etherscan::{
     EtherscanError, EtherscanFetchedPage, EtherscanInternalTx, EtherscanNormalTx,
     EtherscanRequestMetadata,
@@ -32,6 +35,90 @@ use crate::transactions::TxHash;
 use crate::wallets::DigitalAssetAddressId;
 use crate::wallets::Network;
 use chrono::{DateTime, Utc};
+use std::collections::{BTreeMap, HashSet};
+
+pub(crate) fn map_retained_etherscan_touched_hashes(
+    user_id: UserId,
+    network: Network,
+    touched_hashes: &HashSet<String>,
+) -> Result<Vec<SyncAccountTransactionRecord>, UserTransactionMonitorError> {
+    if touched_hashes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (normal_heads, internal_heads) = with_user_db(user_id, |conn| {
+        Ok::<_, crate::db::DbError>((
+            load_all_current_raw_etherscan_normal_transaction_heads_conn(conn)?,
+            load_all_current_raw_etherscan_internal_transaction_heads_conn(conn)?,
+        ))
+    })?;
+    let mut normals = BTreeMap::new();
+    for head in normal_heads
+        .into_iter()
+        .filter(|head| head.network == network && touched_hashes.contains(head.tx_hash.as_str()))
+    {
+        let key = head.tx_hash.as_str().to_string();
+        let newer = normals.get(&key).is_none_or(
+            |old: &crate::db::raw_ingestion::AllCurrentRawEtherscanNormalTransactionHeadRow| {
+                (head.created_at, head.raw_version_id.to_string())
+                    > (old.created_at, old.raw_version_id.to_string())
+            },
+        );
+        if newer {
+            normals.insert(key, head);
+        }
+    }
+    let mut internals = BTreeMap::new();
+    for head in internal_heads
+        .into_iter()
+        .filter(|head| head.network == network && touched_hashes.contains(head.tx_hash.as_str()))
+    {
+        let key = (
+            head.tx_hash.as_str().to_string(),
+            head.trace_id.as_str().to_string(),
+        );
+        let newer = internals.get(&key).is_none_or(
+            |old: &crate::db::raw_ingestion::AllCurrentRawEtherscanInternalTransactionHeadRow| {
+                (head.created_at, head.raw_version_id.to_string())
+                    > (old.created_at, old.raw_version_id.to_string())
+            },
+        );
+        if newer {
+            internals.insert(key, head);
+        }
+    }
+    let normals = normals
+        .into_values()
+        .map(|head| {
+            parse_persisted_raw_etherscan_normal_transaction(
+                head.raw_version_id,
+                &head.tx_hash,
+                &head.payload_bytes,
+            )
+            .map_err(|_| {
+                UserTransactionMonitorError::Parse(
+                    "Failed to parse retained Etherscan normal head".to_string(),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let internals = internals
+        .into_values()
+        .map(|head| {
+            parse_persisted_raw_etherscan_internal_transaction(
+                head.raw_version_id,
+                &head.tx_hash,
+                &head.trace_id,
+                &head.payload_bytes,
+            )
+            .map_err(|_| {
+                UserTransactionMonitorError::Parse(
+                    "Failed to parse retained Etherscan internal head".to_string(),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    map_etherscan_transactions(normals, internals)
+}
 
 pub(crate) const REQUEST_ATTEMPT_RESPONSE_BODY_LIMIT_BYTES: usize = 64 * 1024;
 
@@ -513,7 +600,20 @@ pub(crate) fn replay_etherscan_current_heads(
         }
     }
 
-    map_etherscan_transactions(normal_transactions, internal_transactions)?;
+    let touched_hashes = map_etherscan_transactions(normal_transactions, internal_transactions)?
+        .into_iter()
+        .map(|record| record.tx_hash.as_str().to_string())
+        .collect::<HashSet<_>>();
+    let network = with_user_db(request.user_id, |conn| {
+        let raw: String = conn.query_row(
+            "SELECT network FROM source_connections WHERE id = ?1 AND integration = 'etherscan'",
+            [request.source_connection_id.to_string()],
+            |row| row.get(0),
+        ).map_err(|err| crate::db::DbError::new(format!("Failed to resolve Etherscan source network: {err}")))?;
+        Network::from_str(&raw)
+            .ok_or_else(|| crate::db::DbError::new("Invalid Etherscan source network"))
+    })?;
+    map_retained_etherscan_touched_hashes(request.user_id, network, &touched_hashes)?;
 
     Ok(EtherscanCurrentHeadReplayReport {
         observed_item_count,

@@ -1,5 +1,5 @@
 use crate::wallets::WalletAccountId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub(crate) use crate::models::HLEDGER_ACCOUNT_SEGMENT_MAX_LENGTH as HLEDGER_SEGMENT_MAX_LENGTH;
 const HLEDGER_SEGMENT_EMPTY_FALLBACK: &str = "unnamed";
@@ -56,6 +56,11 @@ pub(crate) fn resolve_segment_collisions(
             .or_default() += 1;
     }
 
+    let original_keys: HashSet<_> = segments
+        .iter()
+        .map(HledgerAccountSegments::composite_key)
+        .collect();
+    let mut used_keys = HashSet::new();
     for segment in &mut segments {
         if original_key_counts
             .get(&segment.composite_key())
@@ -64,8 +69,23 @@ pub(crate) fn resolve_segment_collisions(
             > 1
         {
             let suffix = account_id_suffix(segment.account_id);
-            segment.account_segment = append_collision_suffix(&segment.account_segment, &suffix);
+            let base = segment.account_segment.clone();
+            let mut attempt = 1_u32;
+            loop {
+                let suffix = if attempt == 1 {
+                    suffix.clone()
+                } else {
+                    format!("{suffix}_{attempt}")
+                };
+                segment.account_segment = append_collision_suffix(&base, &suffix);
+                let key = segment.composite_key();
+                if !original_keys.contains(&key) && !used_keys.contains(&key) {
+                    break;
+                }
+                attempt += 1;
+            }
         }
+        used_keys.insert(segment.composite_key());
     }
 
     segments
@@ -201,5 +221,32 @@ mod tests {
             resolved[1].account_segment.len(),
             HLEDGER_SEGMENT_MAX_LENGTH
         );
+    }
+
+    #[test]
+    fn resolve_segment_collisions_avoids_existing_suffixed_label() {
+        let first_id = account_id("01KGQYDBAH5B0JD0BSF2VX95FR");
+        let second_id = account_id("01KGQYDBAH5B0JD0BSF2VX95FS");
+        let third_id = account_id("01KGQYDBAH5B0JD0BSF2VX95FT");
+        let segments = vec![first_id, second_id, third_id]
+            .into_iter()
+            .enumerate()
+            .map(|(index, account_id)| HledgerAccountSegments {
+                account_id,
+                wallet_segment: "Wallet".to_string(),
+                account_segment: if index == 2 {
+                    "Account__F2VX95FR".to_string()
+                } else {
+                    "Account".to_string()
+                },
+            })
+            .collect();
+
+        let resolved = resolve_segment_collisions(segments);
+        let keys: std::collections::HashSet<_> = resolved
+            .iter()
+            .map(HledgerAccountSegments::composite_key)
+            .collect();
+        assert_eq!(keys.len(), resolved.len());
     }
 }

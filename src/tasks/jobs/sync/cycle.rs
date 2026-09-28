@@ -16,6 +16,58 @@ use dioxus::logger::tracing;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
+/// Why the sync gate skipped an address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SyncSkipReason {
+    BalanceFresh,
+    Cooldown,
+    RateLimited,
+    TipUnchanged,
+    Blocked,
+}
+
+impl SyncSkipReason {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::BalanceFresh => "balance_fresh",
+            Self::Cooldown => "cooldown",
+            Self::RateLimited => "rate_limited",
+            Self::TipUnchanged => "tip_unchanged",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SyncSkipCounts {
+    pub(crate) balance_fresh: u32,
+    pub(crate) cooldown: u32,
+    pub(crate) rate_limited: u32,
+    pub(crate) tip_unchanged: u32,
+    pub(crate) blocked: u32,
+}
+
+impl SyncSkipCounts {
+    fn add(&mut self, reason: SyncSkipReason) {
+        let counter = match reason {
+            SyncSkipReason::BalanceFresh => &mut self.balance_fresh,
+            SyncSkipReason::Cooldown => &mut self.cooldown,
+            SyncSkipReason::RateLimited => &mut self.rate_limited,
+            SyncSkipReason::TipUnchanged => &mut self.tip_unchanged,
+            SyncSkipReason::Blocked => &mut self.blocked,
+        };
+        *counter = counter.saturating_add(1);
+    }
+
+    pub(super) fn merge(&mut self, other: Self) {
+        self.balance_fresh = self.balance_fresh.saturating_add(other.balance_fresh);
+        self.cooldown = self.cooldown.saturating_add(other.cooldown);
+        self.rate_limited = self.rate_limited.saturating_add(other.rate_limited);
+        self.tip_unchanged = self.tip_unchanged.saturating_add(other.tip_unchanged);
+        self.blocked = self.blocked.saturating_add(other.blocked);
+    }
+}
+
 pub(super) struct CycleAccumulator {
     pub(super) new_tx_count: TransactionCount,
     pub(super) updated_tx_count: TransactionCount,
@@ -23,7 +75,7 @@ pub(super) struct CycleAccumulator {
     pub(super) addresses_synced: u32,
     pub(super) addresses_failed: u32,
     pub(super) addresses_skipped: u32,
-    pub(super) addresses_skipped_tip_unchanged: u32,
+    pub(super) skipped_by_reason: SyncSkipCounts,
     pub(super) addresses_early_exited: u32,
     pub(super) rate_limited: HashSet<String>,
     pub(super) touched_accounts: HashSet<DigitalAssetAccountId>,
@@ -42,7 +94,7 @@ impl CycleAccumulator {
             addresses_synced: 0_u32,
             addresses_failed: 0_u32,
             addresses_skipped: 0_u32,
-            addresses_skipped_tip_unchanged: 0_u32,
+            skipped_by_reason: SyncSkipCounts::default(),
             addresses_early_exited: 0_u32,
             rate_limited: HashSet::new(),
             touched_accounts: HashSet::new(),
@@ -80,13 +132,9 @@ impl CycleAccumulator {
         }
     }
 
-    pub(super) fn add_skipped(&mut self) {
+    pub(super) fn add_skipped(&mut self, reason: SyncSkipReason) {
         self.addresses_skipped = self.addresses_skipped.saturating_add(1);
-    }
-
-    pub(super) fn add_skipped_tip_unchanged(&mut self) {
-        self.addresses_skipped_tip_unchanged =
-            self.addresses_skipped_tip_unchanged.saturating_add(1);
+        self.skipped_by_reason.add(reason);
     }
 
     pub(super) fn add_early_exited(&mut self) {
@@ -153,9 +201,7 @@ impl CycleAccumulator {
             addresses_synced: AddressCount::from_u32(self.addresses_synced),
             addresses_failed: AddressCount::from_u32(self.addresses_failed),
             addresses_skipped: AddressCount::from_u32(self.addresses_skipped),
-            addresses_skipped_tip_unchanged: AddressCount::from_u32(
-                self.addresses_skipped_tip_unchanged,
-            ),
+            skipped_by_reason: self.skipped_by_reason,
             addresses_early_exited: AddressCount::from_u32(self.addresses_early_exited),
             pagination_cache_hits: 0,
             total_api_calls: 0,
@@ -372,16 +418,21 @@ mod tests {
     fn sync_observability_counter_semantics_are_stable() {
         let mut accumulator = CycleAccumulator::new(2);
 
-        // Generic skip should not count as tip-unchanged skip.
-        accumulator.add_skipped();
+        // Every skip counts once in the total and once under its reason.
+        accumulator.add_skipped(SyncSkipReason::BalanceFresh);
         assert_eq!(accumulator.addresses_skipped, 1);
-        assert_eq!(accumulator.addresses_skipped_tip_unchanged, 0);
+        assert_eq!(accumulator.skipped_by_reason.tip_unchanged, 0);
 
-        // Tip-unchanged skip must increment both the generic and specialized counter.
-        accumulator.add_skipped();
-        accumulator.add_skipped_tip_unchanged();
+        accumulator.add_skipped(SyncSkipReason::TipUnchanged);
         assert_eq!(accumulator.addresses_skipped, 2);
-        assert_eq!(accumulator.addresses_skipped_tip_unchanged, 1);
+        assert_eq!(
+            accumulator.skipped_by_reason,
+            SyncSkipCounts {
+                balance_fresh: 1,
+                tip_unchanged: 1,
+                ..SyncSkipCounts::default()
+            }
+        );
 
         let early_exit_summary = SyncIterationResult {
             new_tx_count: TransactionCount::zero(),
@@ -411,7 +462,7 @@ mod tests {
 
         let summary = accumulator.into_summary(TransactionSyncRunId::new());
         assert_eq!(summary.addresses_skipped.value(), 2);
-        assert_eq!(summary.addresses_skipped_tip_unchanged.value(), 1);
+        assert_eq!(summary.skipped_by_reason.tip_unchanged, 1);
         assert_eq!(summary.addresses_early_exited.value(), 1);
     }
 }

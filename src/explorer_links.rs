@@ -285,6 +285,11 @@ mod tests {
             .transaction_url("0xdeadbeef")
             .expect("should derive and build URL");
         assert_eq!(url, "https://etherscan.io/tx/0xdeadbeef");
+
+        let url = api
+            .transaction_url("deadbeef")
+            .expect("should add the Ethereum hash prefix");
+        assert_eq!(url, "https://etherscan.io/tx/0xdeadbeef");
     }
 
     #[test]

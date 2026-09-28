@@ -92,7 +92,11 @@ fn holdings_change_percent(
     if opening == rust_decimal::Decimal::ZERO {
         None
     } else {
-        Some(((closing - opening) / opening * rust_decimal::Decimal::from(100)).to_string())
+        closing
+            .checked_sub(opening)?
+            .checked_div(opening)?
+            .checked_mul(rust_decimal::Decimal::from(100))
+            .map(|percent| percent.to_string())
     }
 }
 
@@ -1165,6 +1169,14 @@ mod tests {
     fn holdings_change_percent_is_absent_when_opening_zero() {
         assert_eq!(
             holdings_change_percent(rust_decimal::Decimal::ZERO, rust_decimal::Decimal::from(10)),
+            None
+        );
+    }
+
+    #[test]
+    fn holdings_change_percent_is_absent_when_percentage_overflows() {
+        assert_eq!(
+            holdings_change_percent(rust_decimal::Decimal::ONE, rust_decimal::Decimal::MAX,),
             None
         );
     }

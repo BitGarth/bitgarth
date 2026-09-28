@@ -37,7 +37,7 @@ use crate::models::parse_datetime;
         )
     )
 ))]
-use crate::transactions::AccountTransactionDirection;
+use crate::transactions::{AccountTransactionDirection, ChainTransactionStatus};
 use crate::wallets::{
     ACCOUNT_LABEL_MAX_LENGTH, Label, ManualAssetBalanceAssertionId, ManualAssetDisplayScale,
     Network, SyncedAssetId, ValidatedManualAssetUnitCode, ValidatedMasterFingerprint,
@@ -101,6 +101,7 @@ pub(crate) struct ExportAccountTransactionLedgerRow {
     pub(crate) account_id: WalletAccountId,
     pub(crate) tx_hash: String,
     pub(crate) direction: AccountTransactionDirection,
+    pub(crate) status: ChainTransactionStatus,
     pub(crate) fee: Option<UnsignedAmount>,
     pub(crate) balance_delta: i128,
     pub(crate) occurred_at: DateTime<Utc>,
@@ -720,7 +721,7 @@ pub(crate) fn load_all_accounts_for_export(
         )
     )
 ))]
-pub(crate) fn load_all_confirmed_account_transaction_ledger_rows_for_export(
+pub(crate) fn load_account_transaction_ledger_rows_for_export(
     user_id: UserId,
 ) -> Result<Vec<ExportAccountTransactionLedgerRow>, DbError> {
     with_user_db(user_id, |conn| {
@@ -729,6 +730,7 @@ pub(crate) fn load_all_confirmed_account_transaction_ledger_rows_for_export(
                 "SELECT
                     atl.account_id,
                     atl.tx_hash,
+                    atl.status,
                     atl.tx_type,
                     atl.fee_amount_hi,
                     atl.fee_amount_lo,
@@ -745,6 +747,11 @@ pub(crate) fn load_all_confirmed_account_transaction_ledger_rows_for_export(
                  JOIN digital_asset_accounts a
                    ON a.id = atl.account_id
                  WHERE atl.status = 'confirmed'
+                    OR (atl.status = 'failed'
+                        AND atl.balance_delta_negative = 1
+                        AND (atl.balance_delta_hi != 0 OR atl.balance_delta_lo != 0)
+                        AND atl.fee_amount_hi IS NOT NULL AND atl.fee_amount_lo IS NOT NULL
+                        AND (atl.fee_amount_hi != 0 OR atl.fee_amount_lo != 0))
                  ORDER BY
                     a.id ASC,
                     atl.occurred_at ASC,
@@ -765,17 +772,18 @@ pub(crate) fn load_all_confirmed_account_transaction_ledger_rows_for_export(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, String>(3)?,
                     row.get::<_, Option<i64>>(4)?,
-                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<i64>>(5)?,
                     row.get::<_, i64>(6)?,
                     row.get::<_, i64>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, String>(9)?,
                     row.get::<_, Option<i64>>(10)?,
                     row.get::<_, Option<i64>>(11)?,
                     row.get::<_, Option<i64>>(12)?,
                     row.get::<_, Option<i64>>(13)?,
+                    row.get::<_, Option<i64>>(14)?,
                 ))
             })
             .map_err(|err| {
@@ -789,6 +797,7 @@ pub(crate) fn load_all_confirmed_account_transaction_ledger_rows_for_export(
             let (
                 account_id_raw,
                 tx_hash,
+                status_raw,
                 tx_type_raw,
                 fee_hi,
                 fee_lo,
@@ -814,6 +823,8 @@ pub(crate) fn load_all_confirmed_account_transaction_ledger_rows_for_export(
             let account_id = WalletAccountId::from_str(&account_id_raw)
                 .map_err(|err| DbError::new(format!("Invalid wallet account id in DB: {err}")))?;
             let direction = parse_export_tx_type(&tx_type_raw)?;
+            let status = ChainTransactionStatus::from_db_value(&status_raw)
+                .ok_or_else(|| DbError::new("Invalid export account ledger row status"))?;
             let occurred_at = parse_datetime(&occurred_at_raw)
                 .map_err(|err| DbError::new(format!("Invalid occurred_at in DB: {err}")))?;
             let fee = parse_optional_split_amount_if_present(fee_hi, fee_lo, "fee_amount")?;
@@ -823,6 +834,14 @@ pub(crate) fn load_all_confirmed_account_transaction_ledger_rows_for_export(
                     balance_delta_lo,
                     balance_delta_negative != 0,
                 )?;
+            if status == ChainTransactionStatus::Failed
+                && fee.map(UnsignedAmount::value)
+                    != balance_delta
+                        .checked_neg()
+                        .and_then(|value| u128::try_from(value).ok())
+            {
+                return Err(DbError::new("Invalid export failed transaction fee/delta"));
+            }
             let closing_balance = parse_optional_split_amount_if_present(
                 closing_balance_hi,
                 closing_balance_lo,
@@ -833,6 +852,7 @@ pub(crate) fn load_all_confirmed_account_transaction_ledger_rows_for_export(
                 account_id,
                 tx_hash,
                 direction,
+                status,
                 fee,
                 balance_delta,
                 occurred_at,

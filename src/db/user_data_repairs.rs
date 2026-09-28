@@ -26,6 +26,7 @@ pub(crate) const BTC_LEDGER_SELF_TRANSFER_DIRECTION_REPAIR: &str =
 pub(crate) const NATIVE_LEDGER_BALANCE_DELTA_REPAIR: &str = "native_ledger_balance_delta_v1";
 pub(crate) const ETHERSCAN_PROVIDER_TRANSFER_KEY_REPAIR: &str =
     "etherscan_provider_transfer_key_v1";
+pub(crate) const FAILED_TRANSACTION_ACCOUNTING_REPAIR: &str = "failed_transaction_accounting_v1";
 pub(crate) const BITCOIN_HISTORY_FULL_RESYNC_REPAIR: &str = "bitcoin_history_full_resync_v1";
 pub(crate) const ACCOUNT_ADMISSION_ORDER_REPAIR: &str = "account_admission_order_v1";
 
@@ -364,6 +365,13 @@ pub(crate) fn run_pending_user_data_repairs_conn(
     run_registered_user_data_repair_conn(
         conn,
         user_id,
+        FAILED_TRANSACTION_ACCOUNTING_REPAIR,
+        now,
+        repair_failed_transaction_accounting_conn,
+    )?;
+    run_registered_user_data_repair_conn(
+        conn,
+        user_id,
         ACCOUNT_ADMISSION_ORDER_REPAIR,
         now,
         backfill_account_admission_conn,
@@ -434,6 +442,187 @@ fn repair_native_ledger_balance_delta_conn(
         rebuild_account_transaction_ledger_conn(conn, account_id, now)?;
     }
     Ok(())
+}
+
+fn repair_failed_transaction_accounting_conn(
+    conn: &mut rusqlite::Connection,
+    now: DateTime<Utc>,
+) -> Result<(), DbError> {
+    // Do not expose parser, amount, address, or SQLite trigger details through repair logs.
+    let repair_error = |_| DbError::new("Failed to repair stored transaction accounting");
+    let mut normal_heads =
+        load_all_current_raw_etherscan_normal_transaction_heads_conn(conn).map_err(repair_error)?;
+    let mut internal_heads = load_all_current_raw_etherscan_internal_transaction_heads_conn(conn)
+        .map_err(repair_error)?;
+    // Same newest-head ordering as live retained-evidence replay and transfer-key repair.
+    normal_heads.sort_by_key(|head| (head.created_at, head.raw_version_id.to_string()));
+    internal_heads.sort_by_key(|head| (head.created_at, head.raw_version_id.to_string()));
+    let mut replay = Vec::new();
+    for network in [Network::Mainnet, Network::Testnet] {
+        let normals = normal_heads
+            .iter()
+            .filter(|head| head.network == network)
+            .map(|head| (head.tx_hash.as_str(), head))
+            .collect::<BTreeMap<_, _>>();
+        let internals = internal_heads
+            .iter()
+            .filter(|head| head.network == network)
+            .map(|head| ((head.tx_hash.as_str(), head.trace_id.as_str()), head))
+            .collect::<BTreeMap<_, _>>();
+        let normal_transactions = normals.values().map(|head| {
+            crate::tasks::raw_ingestion_executor::parse_persisted_raw_etherscan_normal_transaction(
+                head.raw_version_id, &head.tx_hash, &head.payload_bytes,
+            ).map_err(|_| DbError::new("Failed to parse stored transaction accounting evidence"))
+        }).collect::<Result<Vec<_>, _>>()?;
+        let internal_transactions = internals.values().map(|head| {
+            crate::tasks::raw_ingestion_executor::parse_persisted_raw_etherscan_internal_transaction(
+                head.raw_version_id, &head.tx_hash, &head.trace_id, &head.payload_bytes,
+            ).map_err(|_| DbError::new("Failed to parse stored transaction accounting evidence"))
+        }).collect::<Result<Vec<_>, _>>()?;
+        let mut records =
+            crate::tasks::map_etherscan_transactions(normal_transactions, internal_transactions)
+                .map_err(|_| {
+                    DbError::new("Failed to map stored transaction accounting evidence")
+                })?;
+        let source_rows = {
+            let mut statement = conn
+                .prepare(
+                    "SELECT tx_hash, status, created_at, updated_at FROM chain_transactions
+                 WHERE asset_id = 'ethereum' AND network = ?1",
+                )
+                .map_err(|_| {
+                    DbError::new("Failed to load stored transaction accounting history")
+                })?;
+            statement
+                .query_map([network.as_str()], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        (
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                        ),
+                    ))
+                })
+                .map_err(|_| DbError::new("Failed to load stored transaction accounting history"))?
+                .collect::<Result<BTreeMap<_, _>, _>>()
+                .map_err(|_| DbError::new("Failed to load stored transaction accounting history"))?
+        };
+        // Correct stored history only. Raw-only observations belong to normal sync/replay.
+        records.retain(|record| source_rows.contains_key(record.tx_hash.as_str()));
+        let successful_hashes = records
+            .iter()
+            .filter(|record| {
+                record.status == crate::transactions::ChainTransactionStatus::Confirmed
+            })
+            .map(|record| record.tx_hash.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        for (hash, (status, _, _)) in &source_rows {
+            if status == "failed"
+                && !normals.contains_key(hash.as_str())
+                && !successful_hashes.contains(hash.as_str())
+            {
+                return Err(DbError::new(
+                    "Failed transaction repair requires recovery of source history",
+                ));
+            }
+        }
+        // Do not turn an ambiguous old success into an unrepairable failure on retry.
+        if records.iter().any(|record| {
+            record.status == crate::transactions::ChainTransactionStatus::Failed
+                && !normals.contains_key(record.tx_hash.as_str())
+        }) {
+            return Err(DbError::new(
+                "Failed transaction repair requires recovery of source history",
+            ));
+        }
+        replay.push((network, records, source_rows));
+    }
+
+    // Validate both networks before changing any derived history. Each replacement and
+    // its source timestamps commit together; completed replacements are safe to replay.
+    for (network, records, source_rows) in replay {
+        for record in records {
+            let tx = conn
+                .transaction()
+                .map_err(|_| DbError::new("Failed to start transaction accounting repair"))?;
+            let (_, created_at, updated_at) = source_rows
+                .get(record.tx_hash.as_str())
+                .ok_or_else(|| DbError::new("Failed to load transaction accounting timestamps"))?;
+            // Internal evidence cannot reconstruct the retained normal sender's fee/nonce.
+            // Keep known metadata only where replay has no normal transfer of its own.
+            let retained_normal_metadata = if record
+                .transfers
+                .iter()
+                .any(|transfer| transfer.provider_transfer_key.as_str() == "normal")
+            {
+                None
+            } else {
+                tx.query_row(
+                    "SELECT ct.block_height, ct.block_hash, ct.block_time,
+                            ct.fee_amount_hi, ct.fee_amount_lo, ct.nonce
+                     FROM chain_transactions ct
+                     WHERE ct.asset_id = 'ethereum' AND ct.network = ?1 AND ct.tx_hash = ?2
+                       AND EXISTS (SELECT 1 FROM account_transfers t
+                                   WHERE t.chain_transaction_id = ct.id
+                                     AND t.provider_transfer_key IN ('normal', 'legacy:0')
+                                     AND t.transfer_kind = 'normal' AND t.from_address IS NOT NULL)",
+                    params![network.as_str(), record.tx_hash.as_str()],
+                    |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?, row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<i64>>(4)?, row.get::<_, Option<i64>>(5)?)),
+                ).optional().map_err(|_| DbError::new("Failed to load retained transaction accounting metadata"))?
+            };
+            crate::db::transaction_sync::reconcile_account_transaction_tx(
+                &tx,
+                SyncedAssetId::Ethereum,
+                network,
+                &record,
+                updated_at,
+            )
+            .map_err(repair_error)?;
+            if let Some((height, hash, time, fee_hi, fee_lo, nonce)) = retained_normal_metadata {
+                tx.execute(
+                    "UPDATE chain_transactions SET
+                         block_height = COALESCE(block_height, ?1),
+                         block_hash = COALESCE(block_hash, ?2),
+                         block_time = COALESCE(block_time, ?3),
+                         fee_amount_hi = COALESCE(fee_amount_hi, ?4),
+                         fee_amount_lo = COALESCE(fee_amount_lo, ?5),
+                         nonce = COALESCE(nonce, ?6)
+                     WHERE asset_id = 'ethereum' AND network = ?7 AND tx_hash = ?8",
+                    params![
+                        height,
+                        hash,
+                        time,
+                        fee_hi,
+                        fee_lo,
+                        nonce,
+                        network.as_str(),
+                        record.tx_hash.as_str()
+                    ],
+                )
+                .map_err(|_| {
+                    DbError::new("Failed to preserve retained transaction accounting metadata")
+                })?;
+            }
+            tx.execute(
+                "UPDATE chain_transactions SET created_at = ?1, updated_at = ?2
+                     WHERE asset_id = 'ethereum' AND network = ?3 AND tx_hash = ?4",
+                params![
+                    created_at,
+                    updated_at,
+                    network.as_str(),
+                    record.tx_hash.as_str()
+                ],
+            )
+            .map_err(|_| DbError::new("Failed to preserve transaction accounting timestamps"))?;
+            tx.commit()
+                .map_err(|_| DbError::new("Failed to commit transaction accounting repair"))?;
+        }
+    }
+    // Includes native accounts that lost their final transfer during replay.
+    repair_native_ledger_balance_delta_conn(conn, now).map_err(repair_error)
 }
 
 fn head_is_newer(
@@ -846,6 +1035,431 @@ mod tests {
         Err(DbError::new("synthetic repair failure"))
     }
 
+    fn accounting_snapshot(
+        conn: &rusqlite::Connection,
+        tables: &[&str],
+    ) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+        tables
+            .iter()
+            .map(|table| {
+                let mut statement = conn
+                    .prepare(&format!("SELECT * FROM {table} ORDER BY 1"))
+                    .unwrap();
+                let columns = statement.column_count();
+                statement
+                    .query_map([], |row| {
+                        (0..columns)
+                            .map(|column| row.get(column))
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    fn reset_accounting_repair(conn: &rusqlite::Connection) {
+        conn.execute(
+            "DELETE FROM user_data_repairs WHERE repair_key = 'failed_transaction_accounting_v1'",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn seed_accounting_history(
+        conn: &mut rusqlite::Connection,
+        source: &str,
+        network: Network,
+        address: &str,
+        now: DateTime<Utc>,
+    ) {
+        let hash = "78".repeat(32);
+        seed_normal_head(conn, source, network, &hash, address, "33", now);
+        seed_internal_head(
+            conn,
+            source,
+            network,
+            &hash,
+            "1",
+            raw_internal_payload(&hash, "1", address, "11"),
+            now,
+        );
+        repair_etherscan_provider_transfer_keys_conn(conn, now).unwrap();
+        conn.execute(
+            "UPDATE chain_transactions SET status = 'failed' WHERE tx_hash = ?1",
+            [&hash],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE account_transfers SET value_amount_lo = 999 WHERE tx_hash = ?1",
+            [&hash],
+        )
+        .unwrap();
+        conn.execute("UPDATE account_transaction_ledger SET status = 'failed', occurred_at = ?1, balance_delta_lo = 999, closing_balance_lo = 999 WHERE tx_hash = ?2", params![now.to_rfc3339(), hash]).unwrap();
+        reset_accounting_repair(conn);
+    }
+
+    #[test]
+    fn failed_accounting_repair_replays_newest_heads_preserves_history_and_is_idempotent() {
+        let _runtime = acquire_test_runtime().unwrap();
+        for network in [Network::Mainnet, Network::Testnet] {
+            let user = UserId::new();
+            initialize_user_db_for_test(user).unwrap();
+            let now = dt("2026-09-20T10:00:00Z");
+            let address = parse_eth_address("0x52908400098527886E0F7030069857D2E4169EE7");
+            let account = crate::db::add_ethereum_address(
+                user,
+                &address,
+                network,
+                None,
+                Some(&parse_wallet_label("Repair")),
+                now,
+            )
+            .unwrap();
+            let competitor = crate::db::add_ethereum_address(
+                user,
+                &parse_eth_address("0x8617E340B3D01FA5F11F306F4090FD50E238070D"),
+                network,
+                None,
+                Some(&parse_wallet_label("Competing source")),
+                now,
+            )
+            .unwrap();
+            with_user_db_mut(user, |conn| {
+                let source = source_connection_id(conn, account.address_id);
+                seed_accounting_history(conn, &source, network, &address.checksummed(), now);
+                let hash = "78".repeat(32);
+                let mut failed: serde_json::Value = serde_json::from_slice(&raw_internal_payload(&hash, "1", &address.checksummed(), "11")).unwrap();
+                failed["isError"] = "1".into();
+                seed_internal_head(conn, &source, network, &hash, "1", serde_json::to_vec(&failed).unwrap(), now + Duration::seconds(1));
+                // An older competing version must not restore the reverted value.
+                let competing_source = source_connection_id(conn, competitor.address_id);
+                seed_internal_head(conn, &competing_source, network, &hash, "1", raw_internal_payload(&hash, "1", &address.checksummed(), "888"), now - Duration::seconds(1));
+                conn.execute("INSERT INTO chain_transactions (id, asset_id, network, tx_hash, status, created_at, updated_at) VALUES ('unrelated', 'ethereum', ?1, ?2, 'confirmed', ?3, ?3)", params![network.as_str(), "89".repeat(32), now.to_rfc3339()]).unwrap();
+                let raw_before = accounting_snapshot(conn, &["raw_etherscan_normal_transaction_versions", "raw_etherscan_internal_transaction_versions"]);
+                run_pending_user_data_repairs_conn(conn, user, now + Duration::days(1))?;
+                let row: (String, i64, i64, String, String) = conn.query_row("SELECT status, value_amount_lo, closing_balance_lo, occurred_at, (SELECT updated_at FROM chain_transactions WHERE tx_hash = ?1) FROM account_transaction_ledger WHERE tx_hash = ?1", [&hash], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))).unwrap();
+                assert_eq!(row, ("confirmed".into(), 33, 33, dt("2023-11-14T22:13:20Z").to_rfc3339(), now.to_rfc3339()));
+                assert_eq!(conn.query_row("SELECT COUNT(*) FROM chain_transactions WHERE id = 'unrelated'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+                assert_eq!(raw_before, accounting_snapshot(conn, &["raw_etherscan_normal_transaction_versions", "raw_etherscan_internal_transaction_versions"]));
+                assert_eq!(load_user_data_repair_status_conn(conn, "failed_transaction_accounting_v1")?, Some(UserDataRepairStatus::Completed));
+                let tables = ["chain_transactions", "account_transfers", "account_transaction_ledger", "user_data_repairs", "wallets", "digital_asset_accounts"];
+                let first = accounting_snapshot(conn, &tables);
+                run_pending_user_data_repairs_conn(conn, user, now + Duration::days(2))?;
+                assert_eq!(first, accounting_snapshot(conn, &tables));
+                Ok::<(), DbError>(())
+            }).unwrap();
+        }
+    }
+
+    #[derive(Clone)]
+    struct RepairLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for RepairLogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn failed_accounting_repair_failure_is_redacted_atomic_and_retryable() {
+        let _runtime = acquire_test_runtime().unwrap();
+        for failure in ["missing", "ambiguous", "downgrade", "malformed", "sql"] {
+            let user = UserId::new();
+            initialize_user_db_for_test(user).unwrap();
+            let now = dt("2026-09-20T10:00:00Z");
+            let address = parse_eth_address("0x52908400098527886E0F7030069857D2E4169EE7");
+            let account = create_eth_wallet_account_fixture(user, &address, "Repair", now);
+            with_user_db_mut(user, |conn| {
+                let source = source_connection_id(conn, account.address_id);
+                seed_accounting_history(conn, &source, Network::Mainnet, &address.checksummed(), now);
+                match failure {
+                    "missing" => { conn.execute("DELETE FROM raw_etherscan_normal_transaction_versions", []).unwrap(); conn.execute("DELETE FROM raw_etherscan_internal_transaction_versions", []).unwrap(); }
+                    "ambiguous" | "downgrade" => {
+                        conn.execute("DELETE FROM raw_etherscan_normal_transaction_versions", []).unwrap();
+                        let mut payload: serde_json::Value = serde_json::from_slice(&raw_internal_payload(&"78".repeat(32), "1", &address.checksummed(), "11")).unwrap();
+                        payload["isError"] = "1".into();
+                        conn.execute("UPDATE raw_etherscan_internal_transaction_versions SET payload_bytes = ?1", [serde_json::to_vec(&payload).unwrap()]).unwrap();
+                        if failure == "downgrade" {
+                            conn.execute("UPDATE chain_transactions SET status = 'confirmed'", []).unwrap();
+                        }
+                    }
+                    "malformed" => { conn.execute("UPDATE raw_etherscan_normal_transaction_versions SET payload_bytes = X'736563726574'", []).unwrap(); }
+                    _ => conn.execute_batch("CREATE TEMP TRIGGER fail_replay BEFORE UPDATE ON account_transfers BEGIN SELECT RAISE(FAIL, 'secret financial identifier'); END;").unwrap(),
+                }
+                let before = accounting_snapshot(conn, &["chain_transactions", "account_transfers", "account_transaction_ledger"]);
+                let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let writer = RepairLogWriter(logs.clone());
+                let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false).with_writer(move || writer.clone()).finish();
+                let error = tracing::subscriber::with_default(subscriber, || run_pending_user_data_repairs_conn(conn, user, now)).unwrap_err().to_string();
+                let logged = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+                assert!(logged.contains("user data repair failed"));
+                assert!(!logged.contains("secret"));
+                assert!(!logged.contains(&address.checksummed()));
+                assert!(!logged.contains(&"78".repeat(32)));
+                assert!(!error.contains("secret"));
+                assert!(!error.contains(&address.checksummed()));
+                assert!(!error.contains(&"78".repeat(32)));
+                assert_eq!(before, accounting_snapshot(conn, &["chain_transactions", "account_transfers", "account_transaction_ledger"]));
+                assert_eq!(load_user_data_repair_status_conn(conn, "failed_transaction_accounting_v1")?, Some(UserDataRepairStatus::Pending));
+                let stored: String = conn.query_row("SELECT last_error FROM user_data_repairs WHERE repair_key = 'failed_transaction_accounting_v1'", [], |row| row.get(0)).unwrap();
+                assert_eq!(stored, error);
+                if matches!(failure, "missing" | "ambiguous" | "downgrade") { assert_eq!(error, "Failed transaction repair requires recovery of source history"); }
+                conn.execute_batch("DROP TRIGGER IF EXISTS fail_replay").unwrap();
+                conn.execute("DELETE FROM raw_etherscan_normal_transaction_versions", []).unwrap();
+                seed_normal_head(conn, &source, Network::Mainnet, &"78".repeat(32), &address.checksummed(), "33", now);
+                run_pending_user_data_repairs_conn(conn, user, now + Duration::days(1))?;
+                assert_eq!(load_user_data_repair_status_conn(conn, "failed_transaction_accounting_v1")?, Some(UserDataRepairStatus::Completed));
+                Ok::<(), DbError>(())
+            }).unwrap();
+        }
+    }
+
+    #[test]
+    fn failed_accounting_repair_missing_evidence_blocks_database_open() {
+        let _runtime = acquire_test_runtime().unwrap();
+        let user = UserId::new();
+        initialize_user_db_for_test(user).unwrap();
+        with_user_db_mut(user, |conn| {
+            conn.execute("INSERT INTO chain_transactions (id, asset_id, network, tx_hash, status, created_at, updated_at) VALUES ('missing', 'ethereum', 'mainnet', ?1, 'failed', ?2, ?2)", params!["78".repeat(32), dt("2026-09-20T10:00:00Z").to_rfc3339()]).unwrap();
+            reset_accounting_repair(conn);
+            Ok::<(), DbError>(())
+        }).unwrap();
+        crate::db::user_db::close_user_db(user).unwrap();
+        let error = crate::db::user_db::initialize_user_db(
+            user,
+            crate::db::encryption::UserDbOpenMode::PlaintextTest,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Failed transaction repair requires recovery of source history"
+        );
+    }
+
+    #[test]
+    fn failed_accounting_repair_preserves_fallback_time_and_applies_paid_fee() {
+        let _runtime = acquire_test_runtime().unwrap();
+        let user = UserId::new();
+        initialize_user_db_for_test(user).unwrap();
+        let now = dt("2026-09-20T10:00:00Z");
+        let address = parse_eth_address("0x52908400098527886E0F7030069857D2E4169EE7");
+        let account = create_eth_wallet_account_fixture(user, &address, "Repair", now);
+        with_user_db_mut(user, |conn| {
+            let source = source_connection_id(conn, account.address_id);
+            let hash = "78".repeat(32);
+            seed_accounting_history(conn, &source, Network::Mainnet, &address.checksummed(), now);
+            // Existing funding has no raw coverage and must survive replay.
+            conn.execute("INSERT INTO chain_transactions (id, asset_id, network, tx_hash, status, block_time, created_at, updated_at) VALUES ('funding', 'ethereum', 'mainnet', ?1, 'confirmed', ?2, ?2, ?2)", params!["67".repeat(32), (now - Duration::days(1)).to_rfc3339()]).unwrap();
+            conn.execute("INSERT INTO account_transfers (id, chain_transaction_id, asset_id, network, tx_hash, transfer_index, provider_transfer_key, transfer_kind, to_address, to_address_id, value_amount_hi, value_amount_lo, created_at, updated_at) VALUES ('funding', 'funding', 'ethereum', 'mainnet', ?1, 0, 'normal', 'normal', ?2, ?3, 0, 50000, ?4, ?4)", params!["67".repeat(32), address.checksummed(), account.address_id.to_string(), now.to_rfc3339()]).unwrap();
+            let mut payload: serde_json::Value = serde_json::from_slice(&raw_normal_payload(&hash, "0x1111111111111111111111111111111111111111", "33")).unwrap();
+            payload["from"] = address.checksummed().into();
+            payload["isError"] = "1".into();
+            payload["txreceiptStatus"] = "0".into();
+            payload["timeStamp"] = "".into();
+            conn.execute("UPDATE raw_etherscan_normal_transaction_versions SET payload_bytes = ?1", [serde_json::to_vec(&payload).unwrap()]).unwrap();
+            conn.execute("DELETE FROM raw_etherscan_internal_transaction_versions", []).unwrap();
+            conn.execute("DELETE FROM account_transfers WHERE provider_transfer_key = 'internal:1'", []).unwrap();
+            run_pending_user_data_repairs_conn(conn, user, now + Duration::days(1))?;
+            let row: (String, String, i64, i64, i64, i64) = conn.query_row("SELECT status, occurred_at, value_amount_lo, balance_delta_lo, balance_delta_negative, closing_balance_lo FROM account_transaction_ledger WHERE tx_hash = ?1", [hash], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).unwrap();
+            assert_eq!(row, ("failed".into(), now.to_rfc3339(), 33, 21000, 1, 29000));
+            Ok::<(), DbError>(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn failed_accounting_repair_internal_success_resolves_old_failure() {
+        let _runtime = acquire_test_runtime().unwrap();
+        let user = UserId::new();
+        initialize_user_db_for_test(user).unwrap();
+        let now = dt("2026-09-20T10:00:00Z");
+        let address = parse_eth_address("0x52908400098527886E0F7030069857D2E4169EE7");
+        let account = create_eth_wallet_account_fixture(user, &address, "Repair", now);
+        with_user_db_mut(user, |conn| {
+            let source = source_connection_id(conn, account.address_id);
+            seed_accounting_history(conn, &source, Network::Mainnet, &address.checksummed(), now);
+            conn.execute("DELETE FROM raw_etherscan_normal_transaction_versions", [])
+                .unwrap();
+            conn.execute(
+                "DELETE FROM account_transfers WHERE provider_transfer_key = 'normal'",
+                [],
+            )
+            .unwrap();
+            run_pending_user_data_repairs_conn(conn, user, now + Duration::days(1))?;
+            let row: (String, i64) = conn
+                .query_row(
+                    "SELECT status, value_amount_lo FROM account_transaction_ledger",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(row, ("confirmed".into(), 11));
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn failed_accounting_repair_rebuilds_account_losing_final_transfer() {
+        let _runtime = acquire_test_runtime().unwrap();
+        let user = UserId::new();
+        initialize_user_db_for_test(user).unwrap();
+        let now = dt("2026-09-20T10:00:00Z");
+        let address = parse_eth_address("0x52908400098527886E0F7030069857D2E4169EE7");
+        let account = create_eth_wallet_account_fixture(user, &address, "Repair", now);
+        with_user_db_mut(user, |conn| {
+            let source = source_connection_id(conn, account.address_id);
+            seed_accounting_history(conn, &source, Network::Mainnet, &address.checksummed(), now);
+            let hash = "78".repeat(32);
+            let external = "0x1111111111111111111111111111111111111111";
+            conn.execute(
+                "UPDATE raw_etherscan_normal_transaction_versions SET payload_bytes = ?1",
+                [raw_normal_payload(&hash, external, "33")],
+            )
+            .unwrap();
+            conn.execute(
+                "DELETE FROM account_transfers WHERE provider_transfer_key = 'normal'",
+                [],
+            )
+            .unwrap();
+            let mut payload: serde_json::Value = serde_json::from_slice(&raw_internal_payload(
+                &hash,
+                "1",
+                &address.checksummed(),
+                "11",
+            ))
+            .unwrap();
+            payload["isError"] = "1".into();
+            conn.execute(
+                "UPDATE raw_etherscan_internal_transaction_versions SET payload_bytes = ?1",
+                [serde_json::to_vec(&payload).unwrap()],
+            )
+            .unwrap();
+            run_pending_user_data_repairs_conn(conn, user, now + Duration::days(1))?;
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM account_transaction_ledger WHERE account_id = ?1",
+                    [account.account_id.to_string()],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM account_transfers", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM raw_etherscan_internal_transaction_versions",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn failed_accounting_repair_leaves_raw_only_failure_unmaterialized_on_retry() {
+        let _runtime = acquire_test_runtime().unwrap();
+        let user = UserId::new();
+        initialize_user_db_for_test(user).unwrap();
+        let now = dt("2026-09-20T10:00:00Z");
+        let address = parse_eth_address("0x52908400098527886E0F7030069857D2E4169EE7");
+        let account = create_eth_wallet_account_fixture(user, &address, "Repair", now);
+        with_user_db_mut(user, |conn| {
+            let source = source_connection_id(conn, account.address_id);
+            seed_accounting_history(conn, &source, Network::Mainnet, &address.checksummed(), now);
+            let hash = "01".repeat(32);
+            let mut payload: serde_json::Value = serde_json::from_slice(&raw_internal_payload(&hash, "1", &address.checksummed(), "11")).unwrap();
+            payload["isError"] = "1".into();
+            seed_internal_head(conn, &source, Network::Mainnet, &hash, "1", serde_json::to_vec(&payload).unwrap(), now);
+            conn.execute_batch("CREATE TEMP TRIGGER fail_later BEFORE UPDATE ON account_transfers BEGIN SELECT RAISE(FAIL, 'synthetic failure'); END;").unwrap();
+            assert!(run_pending_user_data_repairs_conn(conn, user, now).is_err());
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM chain_transactions WHERE tx_hash = ?1", [&hash], |r| r.get::<_, i64>(0)).unwrap(), 0);
+            conn.execute_batch("DROP TRIGGER fail_later").unwrap();
+            run_pending_user_data_repairs_conn(conn, user, now + Duration::days(1))?;
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM chain_transactions WHERE tx_hash = ?1", [&hash], |r| r.get::<_, i64>(0)).unwrap(), 0);
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM raw_etherscan_internal_transaction_versions WHERE tx_hash = ?1", [&hash], |r| r.get::<_, i64>(0)).unwrap(), 1);
+            Ok::<(), DbError>(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn failed_accounting_repair_internal_evidence_preserves_legacy_sender_metadata() {
+        let _runtime = acquire_test_runtime().unwrap();
+        let user = UserId::new();
+        initialize_user_db_for_test(user).unwrap();
+        let now = dt("2026-09-20T10:00:00Z");
+        let address = parse_eth_address("0x52908400098527886E0F7030069857D2E4169EE7");
+        let account = create_eth_wallet_account_fixture(user, &address, "Repair", now);
+        with_user_db_mut(user, |conn| {
+            let source = source_connection_id(conn, account.address_id);
+            let hash = "78".repeat(32);
+            seed_accounting_history(conn, &source, Network::Mainnet, &address.checksummed(), now);
+            conn.execute("INSERT INTO chain_transactions (id, asset_id, network, tx_hash, status, block_time, created_at, updated_at) VALUES ('funding', 'ethereum', 'mainnet', ?1, 'confirmed', ?2, ?2, ?2)", params!["67".repeat(32), (now - Duration::days(1)).to_rfc3339()]).unwrap();
+            conn.execute("INSERT INTO account_transfers (id, chain_transaction_id, asset_id, network, tx_hash, transfer_index, provider_transfer_key, transfer_kind, to_address, to_address_id, value_amount_hi, value_amount_lo, created_at, updated_at) VALUES ('funding', 'funding', 'ethereum', 'mainnet', ?1, 0, 'normal', 'normal', ?2, ?3, 0, 50000, ?4, ?4)", params!["67".repeat(32), address.checksummed(), account.address_id.to_string(), now.to_rfc3339()]).unwrap();
+            conn.execute("UPDATE account_transfers SET from_address = ?1, from_address_id = ?2, to_address = '0x1111111111111111111111111111111111111111', to_address_id = NULL, value_amount_lo = 33 WHERE tx_hash = ?3 AND provider_transfer_key = 'normal'", params![address.checksummed(), account.address_id.to_string(), hash]).unwrap();
+            conn.execute("UPDATE chain_transactions SET block_hash = 'retained-block', block_time = ?1, nonce = 7 WHERE tx_hash = ?2", params![now.to_rfc3339(), hash]).unwrap();
+            conn.execute("DELETE FROM raw_etherscan_normal_transaction_versions", []).unwrap();
+            conn.execute("UPDATE account_transfers SET provider_transfer_key = 'legacy:0' WHERE tx_hash = ?1 AND provider_transfer_key = 'normal'", [&hash]).unwrap();
+            let mut payload: serde_json::Value = serde_json::from_slice(&raw_internal_payload(&hash, "1", &address.checksummed(), "11")).unwrap();
+            payload["timeStamp"] = "".into();
+            conn.execute("UPDATE raw_etherscan_internal_transaction_versions SET payload_bytes = ?1", [serde_json::to_vec(&payload).unwrap()]).unwrap();
+            run_pending_user_data_repairs_conn(conn, user, now + Duration::days(1))?;
+            let metadata = conn.query_row("SELECT status, fee_amount_hi, fee_amount_lo, nonce, block_height, block_hash, block_time FROM chain_transactions WHERE tx_hash = ?1", [&hash], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<i64>>(2)?, r.get::<_, Option<i64>>(3)?, r.get::<_, Option<i64>>(4)?, r.get::<_, Option<String>>(5)?, r.get::<_, Option<String>>(6)?))).unwrap();
+            assert_eq!(metadata, ("confirmed".into(), Some(0), Some(21000), Some(7), Some(10), Some("retained-block".into()), Some(now.to_rfc3339())));
+            let ledger: (Option<i64>, i64, i64, i64) = conn.query_row("SELECT fee_amount_lo, balance_delta_lo, balance_delta_negative, closing_balance_lo FROM account_transaction_ledger WHERE tx_hash = ?1", [&hash], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+            assert_eq!(ledger, (Some(21000), 21022, 1, 28978));
+            let tables = ["chain_transactions", "account_transfers", "account_transaction_ledger", "user_data_repairs"];
+            let snapshot = accounting_snapshot(conn, &tables);
+            run_pending_user_data_repairs_conn(conn, user, now + Duration::days(2))?;
+            assert_eq!(snapshot, accounting_snapshot(conn, &tables));
+            Ok::<(), DbError>(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn failed_accounting_repair_preserves_legacy_normal_fee_without_raw_history() {
+        let _runtime = acquire_test_runtime().unwrap();
+        let user = UserId::new();
+        initialize_user_db_for_test(user).unwrap();
+        let now = dt("2026-09-20T10:00:00Z");
+        let address = parse_eth_address("0x52908400098527886E0F7030069857D2E4169EE7");
+        let account = create_eth_wallet_account_fixture(user, &address, "Repair", now);
+        with_user_db_mut(user, |conn| {
+            for (id, hash, amount, sender, time) in [
+                ("funding", "67".repeat(32), 2000, false, now - Duration::days(1)),
+                ("send", "78".repeat(32), 400, true, now),
+            ] {
+                conn.execute("INSERT INTO chain_transactions (id, asset_id, network, tx_hash, status, block_time, fee_amount_hi, fee_amount_lo, created_at, updated_at) VALUES (?1, 'ethereum', 'mainnet', ?2, 'confirmed', ?3, 0, 1, ?3, ?3)", params![id, hash, time.to_rfc3339()]).unwrap();
+                conn.execute("INSERT INTO account_transfers (id, chain_transaction_id, asset_id, network, tx_hash, transfer_index, provider_transfer_key, transfer_kind, from_address_id, to_address_id, value_amount_hi, value_amount_lo, created_at, updated_at) VALUES (?1, ?1, 'ethereum', 'mainnet', ?2, 0, 'legacy:0', 'normal', ?3, ?4, 0, ?5, ?6, ?6)", params![id, hash, sender.then(|| account.address_id.to_string()), (!sender).then(|| account.address_id.to_string()), amount, time.to_rfc3339()]).unwrap();
+            }
+            reset_accounting_repair(conn);
+            run_pending_user_data_repairs_conn(conn, user, now)?;
+            let ledger = conn.query_row("SELECT fee_amount_lo, balance_delta_lo, balance_delta_negative, closing_balance_lo FROM account_transaction_ledger WHERE chain_transaction_id = 'send'", [], |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?))).unwrap();
+            assert_eq!(ledger, (Some(1), 401, 1, 1599));
+            conn.execute("UPDATE account_transfers SET transfer_kind = 'internal' WHERE id = 'send'", []).unwrap();
+            reset_accounting_repair(conn);
+            run_pending_user_data_repairs_conn(conn, user, now)?;
+            let ledger = conn.query_row("SELECT fee_amount_lo, balance_delta_lo, closing_balance_lo FROM account_transaction_ledger WHERE chain_transaction_id = 'send'", [], |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))).unwrap();
+            assert_eq!(ledger, (None, 400, 1600), "legacy internal participation must not pay normal gas");
+            Ok::<(), DbError>(())
+        }).unwrap();
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     struct LedgerSnapshot {
         tx_type: String,
@@ -872,6 +1486,10 @@ mod tests {
             );
             assert_eq!(
                 load_user_data_repair_status_conn(conn, NATIVE_LEDGER_BALANCE_DELTA_REPAIR)?,
+                Some(UserDataRepairStatus::Completed)
+            );
+            assert_eq!(
+                load_user_data_repair_status_conn(conn, FAILED_TRANSACTION_ACCOUNTING_REPAIR)?,
                 Some(UserDataRepairStatus::Completed)
             );
             Ok(())

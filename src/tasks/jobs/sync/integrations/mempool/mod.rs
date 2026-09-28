@@ -13,8 +13,9 @@ use crate::db::{
     load_known_tx_hashes_for_address, persist_mempool_address_observation_success,
     publish_bitcoin_account_completion, publish_mempool_history_proof,
     publish_strict_mempool_history_proof, reconcile_address_transactions_preserving_invalidation,
-    restart_strict_mempool_history_scan, update_address_mempool_backfill_cursor,
-    update_address_mempool_expected_tx_count, validate_strict_mempool_history_scan,
+    refresh_mempool_history_proof, restart_strict_mempool_history_scan,
+    update_address_mempool_backfill_cursor, update_address_mempool_expected_tx_count,
+    validate_strict_mempool_history_scan,
 };
 use crate::integrations::mempool::{
     AddressStats, MempoolAddressTransaction, MempoolClient, MempoolError, MempoolTransactionPage,
@@ -221,19 +222,22 @@ impl MempoolAddressSyncIntegration {
             let stats = fetch_mempool_address_stats(context, mempool_client)?;
             persist_mempool_observation(context, stats, tip_height)?;
             let account_progress = load_mempool_account_progress_observation(context)?;
+            let transition = mempool_history_proof_transition(
+                context.address.mempool_history_proof,
+                &stats,
+                tip_height,
+            );
+            // Fresh matching stats confirm the existing history at this tip, even
+            // when the account cannot fetch more transaction pages.
             let proof_transition = if !context.transaction_page_permitted
-                && context
-                    .address
-                    .mempool_history_proof
-                    .is_none_or(|proof| stats.tx_count.value() >= proof.confirmed_tx_count.value())
-            {
+                && matches!(
+                    transition,
+                    MempoolHistoryProofTransition::PreserveAndRestart
+                        | MempoolHistoryProofTransition::Restart
+                ) {
                 MempoolHistoryProofTransition::Preserve
             } else {
-                mempool_history_proof_transition(
-                    context.address.mempool_history_proof,
-                    &stats,
-                    tip_height,
-                )
+                transition
             };
             let restart_from_first_page = matches!(
                 proof_transition,
@@ -249,8 +253,23 @@ impl MempoolAddressSyncIntegration {
             ) && !context.legacy_mempool_history_repair;
             let proof_published = match proof_transition {
                 MempoolHistoryProofTransition::Publish(proof) => {
-                    publish_address_history_proof(context, None, proof)?;
-                    true
+                    if !context.transaction_page_permitted
+                        && context
+                            .address
+                            .mempool_history_proof
+                            .is_some_and(|existing| {
+                                existing.confirmed_tx_count == proof.confirmed_tx_count
+                            })
+                    {
+                        refresh_mempool_history_proof(
+                            context.run.user_id,
+                            context.address.address_id,
+                            proof,
+                        )?
+                    } else {
+                        publish_address_history_proof(context, None, proof)?;
+                        true
+                    }
                 }
                 MempoolHistoryProofTransition::InvalidateAndRestart => {
                     crate::db::invalidate_mempool_history_proof(
@@ -1519,15 +1538,22 @@ pub(crate) mod tests {
         IntegrationKind, StartSyncRunRequest, SyncRunScopeKind, SyncRunTriggerKind, start_sync_run,
     };
     use crate::db::{
-        acquire_test_runtime, get_non_hd_sync_addresses, mark_address_sync_started,
-        persist_sync_address_fixture, setup_test_user, unique_user_id,
+        BitcoinAccountHistoryCoverage, BitcoinHdDiscoveryPublication, SyncTransactionOutputRecord,
+        SyncTransactionRecord, acquire_test_runtime, get_non_hd_sync_addresses,
+        get_sync_addresses_for_account, mark_account_integration_sync_started,
+        mark_address_sync_started, persist_sync_address_fixture,
+        publish_bitcoin_account_completion, reconcile_address_transactions,
+        refresh_account_integration_sync_state, setup_test_user, unique_user_id,
+        upsert_account_sync_state, with_user_db, with_user_db_mut,
     };
     use crate::tasks::TriggerSource;
     use crate::tasks::jobs::sync::{
         LABEL_MEMPOOL, RunContext, SyncClients, SyncClock, SyncHttpCounters,
     };
     use crate::traces::client::{IntegrationLabel, TracedBlockingClient};
-    use crate::transactions::{TrackedAddress, TransactionSyncRunId};
+    use crate::transactions::{
+        ChainTransactionStatus, SyncIntegrationId, TrackedAddress, TransactionSyncRunId, TxHash,
+    };
     use crate::wallets::{DigitalAssetAddressId, Network, SyncedAssetId};
     use chrono::{TimeZone, Utc};
     use std::io::{Read, Write};
@@ -2027,6 +2053,297 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn stats_only_zero_history_proof_stays_current_across_tips() {
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let address = test_sync_address();
+        persist_sync_address_fixture(user_id, &address, test_now())
+            .expect("sync address fixture should persist");
+        mark_address_sync_started(
+            user_id,
+            address.address_id,
+            TransactionSyncRunId::new(),
+            test_now(),
+        )
+        .expect("sync state should exist");
+        let zero_stats = r#"{"chain_stats":{"tx_count":0,"funded_txo_sum":0,"spent_txo_sum":0},"mempool_stats":{"tx_count":0}}"#;
+        let first_tip = ChainTipHeight::try_new(800_001).expect("tip should parse");
+        let second_tip = ChainTipHeight::try_new(800_002).expect("tip should parse");
+
+        run_stats_only_visit(user_id, &address, zero_stats, first_tip)
+            .expect("first stats-only visit should succeed");
+        let persisted = get_non_hd_sync_addresses(user_id)
+            .expect("address should load")
+            .into_iter()
+            .find(|candidate| candidate.address_id == address.address_id)
+            .expect("address should exist");
+        assert_eq!(
+            persisted.mempool_history_proof,
+            Some(crate::db::MempoolHistoryProof {
+                confirmed_tx_count: TransactionCount::zero(),
+                complete_height: first_tip,
+            })
+        );
+
+        run_stats_only_visit(user_id, &persisted, zero_stats, second_tip)
+            .expect("second stats-only visit should succeed");
+        let reloaded = get_non_hd_sync_addresses(user_id)
+            .expect("address should load")
+            .into_iter()
+            .find(|candidate| candidate.address_id == address.address_id)
+            .expect("address should exist");
+        assert_eq!(
+            reloaded.mempool_history_proof,
+            Some(crate::db::MempoolHistoryProof {
+                confirmed_tx_count: TransactionCount::zero(),
+                complete_height: second_tip,
+            })
+        );
+        assert_eq!(reloaded.mempool_expected_tx_count, None);
+    }
+
+    #[test]
+    fn hd_stats_only_visits_keep_used_and_gap_proofs_complete_across_tips() {
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let account_id = crate::wallets::DigitalAssetAccountId::new();
+        let now = test_now();
+        let hd_address = |index: u32, raw: &str| {
+            let mut address = test_sync_address();
+            address.address = TrackedAddress::parse(raw).expect("test address should parse");
+            address.account_id = Some(account_id);
+            address.derivation_change = Some(0);
+            address.derivation_index = Some(index);
+            address
+        };
+        let used = hd_address(
+            0,
+            "bc1qtestaddressused000000000000000000000000000000000000000",
+        );
+        let gap = hd_address(
+            1,
+            "bc1qtestaddressgap0000000000000000000000000000000000000000",
+        );
+        for address in [&used, &gap] {
+            persist_sync_address_fixture(user_id, address, now).expect("HD address should persist");
+            mark_address_sync_started(
+                user_id,
+                address.address_id,
+                TransactionSyncRunId::new(),
+                now,
+            )
+            .expect("address sync should start");
+        }
+        upsert_account_sync_state(user_id, account_id, 20, Some(1), None, now)
+            .expect("HD account sync state should persist");
+        mark_account_integration_sync_started(user_id, account_id, SyncIntegrationId::Mempool, now)
+            .expect("account sync should start");
+        reconcile_address_transactions(
+            user_id,
+            SyncedAssetId::Bitcoin,
+            Network::Mainnet,
+            &[SyncTransactionRecord {
+                tx_hash: TxHash::parse(
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                )
+                .expect("tx hash should parse"),
+                status: ChainTransactionStatus::Confirmed,
+                block_height: Some(800_000),
+                block_hash: Some("block-800000".to_string()),
+                block_time: Some(now),
+                fee_amount: None,
+                inputs: Vec::new(),
+                outputs: vec![SyncTransactionOutputRecord {
+                    output_index: 0,
+                    raw_address: Some(used.address.clone()),
+                    script_pubkey_hex: "00".to_string(),
+                    value_amount: 7,
+                }],
+            }],
+            now,
+        )
+        .expect("used address history should persist");
+        publish_bitcoin_account_completion(
+            user_id,
+            BitcoinAccountCompletionPublication {
+                account_id,
+                final_address_proof: Some(BitcoinAddressProofPublication {
+                    address_id: used.address_id,
+                    proof: MempoolHistoryProof {
+                        confirmed_tx_count: TransactionCount::from_u32(1),
+                        complete_height: ChainTipHeight::try_new(800_000)
+                            .expect("tip should parse"),
+                    },
+                    scan_start_run_id: None,
+                }),
+                completed_hd_discovery: None,
+                observed_at: now,
+            },
+        )
+        .expect("used address proof should persist");
+
+        let used_stats = r#"{"chain_stats":{"tx_count":1,"funded_txo_sum":7,"spent_txo_sum":0},"mempool_stats":{"tx_count":0}}"#;
+        let zero_stats = r#"{"chain_stats":{"tx_count":0,"funded_txo_sum":0,"spent_txo_sum":0},"mempool_stats":{"tx_count":0}}"#;
+        for height in [800_001, 800_002] {
+            let tip = ChainTipHeight::try_new(height).expect("tip should parse");
+            let addresses = get_sync_addresses_for_account(user_id, account_id)
+                .expect("HD addresses should load");
+            for (address_id, stats) in [(used.address_id, used_stats), (gap.address_id, zero_stats)]
+            {
+                let current = addresses
+                    .iter()
+                    .find(|candidate| candidate.address_id == address_id)
+                    .expect("HD address should exist");
+                run_stats_only_visit(user_id, current, stats, tip)
+                    .expect("HD discovery visit should succeed");
+            }
+            publish_bitcoin_account_completion(
+                user_id,
+                BitcoinAccountCompletionPublication {
+                    account_id,
+                    final_address_proof: None,
+                    completed_hd_discovery: Some(BitcoinHdDiscoveryPublication {
+                        external_last_index: Some(1),
+                        internal_last_index: None,
+                        completed_tip: tip,
+                        completed_at: now,
+                    }),
+                    observed_at: now,
+                },
+            )
+            .expect("HD discovery should complete");
+            refresh_account_integration_sync_state(
+                user_id,
+                account_id,
+                SyncIntegrationId::Mempool,
+                now,
+            )
+            .expect("account integration success should persist");
+            let reliability = with_user_db(user_id, |conn| {
+                crate::db::balance_reliability::load_account_balance_reliability_context(
+                    conn, account_id,
+                )
+            })
+            .expect("HD reliability should load");
+            assert_eq!(
+                reliability.bitcoin_history_coverage,
+                Some(BitcoinAccountHistoryCoverage::Complete {
+                    coverage_height: tip,
+                })
+            );
+            assert_eq!(reliability.bitcoin_history_observed_tip, Some(tip));
+        }
+    }
+
+    #[test]
+    fn stats_only_matching_proof_refresh_does_not_rewrite_complete_ledger() {
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let account_id = crate::wallets::DigitalAssetAccountId::new();
+        let mut address = test_sync_address();
+        address.account_id = Some(account_id);
+        let now = test_now();
+        let old_tip = ChainTipHeight::try_new(800_000).expect("old tip should parse");
+        let new_tip = ChainTipHeight::try_new(800_001).expect("new tip should parse");
+        persist_sync_address_fixture(user_id, &address, now).expect("address should persist");
+        mark_address_sync_started(
+            user_id,
+            address.address_id,
+            TransactionSyncRunId::new(),
+            now,
+        )
+        .expect("sync state should exist");
+        reconcile_address_transactions(
+            user_id,
+            SyncedAssetId::Bitcoin,
+            Network::Mainnet,
+            &[SyncTransactionRecord {
+                tx_hash: TxHash::parse(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )
+                .expect("tx hash should parse"),
+                status: ChainTransactionStatus::Confirmed,
+                block_height: Some(800_000),
+                block_hash: Some("block-800000".to_string()),
+                block_time: Some(now),
+                fee_amount: None,
+                inputs: Vec::new(),
+                outputs: vec![SyncTransactionOutputRecord {
+                    output_index: 0,
+                    raw_address: Some(address.address.clone()),
+                    script_pubkey_hex: "00".to_string(),
+                    value_amount: 7,
+                }],
+            }],
+            now,
+        )
+        .expect("confirmed transaction should persist");
+        publish_bitcoin_account_completion(
+            user_id,
+            BitcoinAccountCompletionPublication {
+                account_id,
+                final_address_proof: Some(BitcoinAddressProofPublication {
+                    address_id: address.address_id,
+                    proof: MempoolHistoryProof {
+                        confirmed_tx_count: TransactionCount::from_u32(1),
+                        complete_height: old_tip,
+                    },
+                    scan_start_run_id: None,
+                }),
+                completed_hd_discovery: None,
+                observed_at: now,
+            },
+        )
+        .expect("account should become complete");
+        let ledger_count = with_user_db(user_id, |conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM account_transaction_ledger WHERE account_id = ?1",
+                [account_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|err| crate::db::DbError::new(format!("ledger count failed: {err}")))
+        })
+        .expect("ledger count should load");
+        assert_eq!(ledger_count, 1);
+        with_user_db_mut(user_id, |conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER reject_ledger_rewrite
+                 BEFORE DELETE ON account_transaction_ledger
+                 BEGIN SELECT RAISE(ABORT, 'ledger rewritten'); END;",
+            )
+            .map_err(|err| crate::db::DbError::new(format!("trigger failed: {err}")))
+        })
+        .expect("ledger rewrite guard should install");
+
+        address.mempool_history_proof = Some(MempoolHistoryProof {
+            confirmed_tx_count: TransactionCount::from_u32(1),
+            complete_height: old_tip,
+        });
+        run_stats_only_visit(
+            user_id,
+            &address,
+            r#"{"chain_stats":{"tx_count":1,"funded_txo_sum":7,"spent_txo_sum":0},"mempool_stats":{"tx_count":0}}"#,
+            new_tip,
+        )
+        .expect("height-only refresh should not rewrite the ledger");
+        let persisted = get_non_hd_sync_addresses(user_id)
+            .expect("address should load")
+            .into_iter()
+            .find(|candidate| candidate.address_id == address.address_id)
+            .expect("address should remain");
+        assert_eq!(
+            persisted.mempool_history_proof,
+            Some(MempoolHistoryProof {
+                confirmed_tx_count: TransactionCount::from_u32(1),
+                complete_height: new_tip,
+            })
+        );
+    }
+
+    #[test]
     fn stats_only_visit_leaves_expected_count_unset_without_confirmed_history() {
         let _runtime = acquire_test_runtime().expect("test runtime should initialize");
         let user_id = unique_user_id();
@@ -2295,7 +2612,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn capped_stats_only_visit_does_not_advance_retained_history_proof() {
+    fn capped_stats_only_visit_refreshes_matching_history_proof() {
         let _runtime = acquire_test_runtime().expect("test runtime should initialize");
         let user_id = unique_user_id();
         setup_test_user(user_id);
@@ -2331,8 +2648,54 @@ pub(crate) mod tests {
             .into_iter()
             .find(|candidate| candidate.address_id == address.address_id)
             .expect("address should remain");
-        assert_eq!(persisted.mempool_history_proof, Some(proof));
+        assert_eq!(
+            persisted.mempool_history_proof,
+            Some(MempoolHistoryProof {
+                confirmed_tx_count: TransactionCount::from_u32(2),
+                complete_height: new_tip,
+            })
+        );
         assert_eq!(persisted.last_tip_height, Some(new_tip));
+    }
+
+    #[test]
+    fn stats_only_refresh_does_not_resurrect_invalidated_proof() {
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let user_id = unique_user_id();
+        setup_test_user(user_id);
+        let proof = MempoolHistoryProof {
+            confirmed_tx_count: TransactionCount::from_u32(2),
+            complete_height: ChainTipHeight::try_new(800_000).expect("old tip should parse"),
+        };
+        let mut address = test_sync_address();
+        address.mempool_history_proof = Some(proof);
+        persist_sync_address_fixture(user_id, &address, test_now())
+            .expect("address should persist");
+        mark_address_sync_started(
+            user_id,
+            address.address_id,
+            TransactionSyncRunId::new(),
+            test_now(),
+        )
+        .expect("sync state should exist");
+        publish_mempool_history_proof(user_id, address.address_id, proof)
+            .expect("old proof should persist");
+        crate::db::invalidate_mempool_history_proof(user_id, address.address_id)
+            .expect("proof should invalidate after the snapshot was loaded");
+
+        run_stats_only_visit(
+            user_id,
+            &address,
+            r#"{"chain_stats":{"tx_count":2,"funded_txo_sum":2,"spent_txo_sum":0},"mempool_stats":{"tx_count":0}}"#,
+            ChainTipHeight::try_new(800_001).expect("new tip should parse"),
+        )
+        .expect("stale-snapshot visit should succeed");
+        let persisted = get_non_hd_sync_addresses(user_id)
+            .expect("address should load")
+            .into_iter()
+            .find(|candidate| candidate.address_id == address.address_id)
+            .expect("address should remain");
+        assert_eq!(persisted.mempool_history_proof, None);
     }
 
     #[test]

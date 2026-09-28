@@ -10,6 +10,80 @@ use rusqlite::params;
 use ulid::Ulid;
 
 #[test]
+fn touched_etherscan_hash_uses_normal_head_from_another_source() {
+    let _guard = acquire_test_runtime();
+    let user_id = UserId::new();
+    crate::db::initialize_user_db_for_test(user_id).expect("user db should initialize");
+    let normal_address_id = DigitalAssetAddressId::new();
+    let internal_address_id = DigitalAssetAddressId::new();
+    insert_test_eth_address(user_id, normal_address_id, &sample_eth_address("ab"));
+    insert_test_eth_address(user_id, internal_address_id, &sample_eth_address("cd"));
+    let normal_source = source_connection_id_for_address(
+        user_id,
+        IntegrationKind::Etherscan,
+        Network::Mainnet,
+        normal_address_id,
+    );
+    let internal_source = source_connection_id_for_address(
+        user_id,
+        IntegrationKind::Etherscan,
+        Network::Mainnet,
+        internal_address_id,
+    );
+    let tx_hash = sample_txid("11");
+    let normal_payload = sample_payload(
+        r#"{"hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa11","blockNumber":"10","timeStamp":"1700000000","from":"0x1111111111111111111111111111111111111111","to":"0x2222222222222222222222222222222222222222","value":"5","gasPrice":"7","gasUsed":"9","isError":"0","txreceipt_status":"1","nonce":"3"}"#,
+    );
+    insert_raw_etherscan_normal_transaction_version(
+        user_id,
+        InsertRawEtherscanNormalTransactionVersionRequest {
+            source_connection_id: normal_source,
+            chain_id: EtherscanChainId::try_new(1).expect("chain id"),
+            network: Network::Mainnet,
+            tx_hash: tx_hash.clone(),
+            payload_hash_sha256_hex: PayloadSha256Hex::from_payload(&normal_payload),
+            payload_bytes: normal_payload,
+            first_observed_at: utc_dt(2026, 4, 4, 10, 0, 0),
+        },
+    )
+    .expect("normal head should insert");
+    let internal_payload = sample_payload(
+        r#"{"hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa11","blockNumber":"10","timeStamp":"1700000000","from":"0x2222222222222222222222222222222222222222","to":"0x3333333333333333333333333333333333333333","value":"20","isError":"1","type":"call","traceId":"2"}"#,
+    );
+    insert_raw_etherscan_internal_transaction_version(
+        user_id,
+        InsertRawEtherscanInternalTransactionVersionRequest {
+            source_connection_id: internal_source,
+            chain_id: EtherscanChainId::try_new(1).expect("chain id"),
+            network: Network::Mainnet,
+            tx_hash: tx_hash.clone(),
+            trace_id: EtherscanTraceId::parse("2").expect("trace id"),
+            payload_hash_sha256_hex: PayloadSha256Hex::from_payload(&internal_payload),
+            payload_bytes: internal_payload,
+            first_observed_at: utc_dt(2026, 4, 4, 10, 0, 1),
+        },
+    )
+    .expect("internal head should insert");
+    let touched = std::iter::once(tx_hash.as_str().to_string()).collect();
+    let rows = crate::tasks::raw_ingestion_executor::map_retained_etherscan_touched_hashes(
+        user_id,
+        Network::Mainnet,
+        &touched,
+    )
+    .expect("touched hash should map");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].status,
+        crate::transactions::ChainTransactionStatus::Confirmed
+    );
+    assert_eq!(rows[0].transfers.len(), 1);
+    assert_eq!(
+        rows[0].excluded_transfer_keys[0].internal_trace_id(),
+        Some("2")
+    );
+}
+
+#[test]
 fn insert_raw_etherscan_normal_version_reuses_existing_row_for_exact_duplicate() {
     let _guard = acquire_test_runtime();
     let user_id = UserId::new();

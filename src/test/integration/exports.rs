@@ -13,7 +13,7 @@ use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD},
 };
-use chrono::{Duration, Utc};
+use chrono::{Duration, TimeZone, Utc};
 use dioxus::fullstack::StatusCode;
 use ed25519_dalek::{Signer, SigningKey};
 use serde::Deserialize;
@@ -26,6 +26,12 @@ use super::fixtures::{
     add_ethereum_wallet_account, add_xpub_wallet_account, deterministic_test_xpub, register_user,
 };
 use super::{IntegrationTestServer, setup_test_server, setup_test_server_no_db};
+use crate::amounts::UnsignedAmount;
+use crate::db::{
+    ProviderTransferKey, SyncAccountTransactionRecord, SyncAccountTransferRecord,
+    rebuild_account_transaction_ledger, reconcile_account_transactions,
+};
+use crate::ethereum::TransferKind;
 use crate::models::{ApiKeyProvider, AuthResponse, SimpleApiKey, UserId};
 use crate::payments::keys::{expected_signing_key_hash, set_signing_public_key_override_for_test};
 use crate::payments::types::{
@@ -33,7 +39,8 @@ use crate::payments::types::{
     PaymentAmount, PaymentOrderId, PaymentOrderStatus, PaymentSecret, ProductTier,
     SubscriptionSubjectId, TokenClaims, TokenId,
 };
-use crate::wallets::BIP44_GAP_LIMIT;
+use crate::transactions::{ChainTransactionStatus, TrackedAddress, TxHash};
+use crate::wallets::{BIP44_GAP_LIMIT, DigitalAssetAccountId, Network, SyncedAssetId};
 
 const TEST_PUBLIC_KEY_B64: &str = "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik";
 const PAYMENT_ORDER_ID: &str = "01JQABCDEF000000000000000E";
@@ -603,6 +610,75 @@ async fn test_download_hledger_happy_path_unencrypted() {
     .await;
     add_custom_balance_assertion(&server, custom_account_id, "2026-02-20", "2.00", None).await;
 
+    let user_id = current_user_id(&server).await;
+    let account_id = DigitalAssetAccountId::from_str(&wallet.account_id).expect("valid account id");
+    let owned = "0x52908400098527886E0F7030069857D2E4169EE7";
+    let external = "0x1111111111111111111111111111111111111111";
+    let mined_at = |day| {
+        Utc.with_ymd_and_hms(2026, 2, day, 12, 0, 0)
+            .single()
+            .expect("valid mined time")
+    };
+    let make_tx =
+        |hash: &str, status, day, from: &str, to: &str, value, fee| SyncAccountTransactionRecord {
+            tx_hash: TxHash::parse(hash).expect("valid hash"),
+            status,
+            block_height: Some(i64::from(day)),
+            block_hash: Some(format!("eth-block-{day}")),
+            block_time: Some(mined_at(day)),
+            fee_amount: Some(UnsignedAmount::from_u128(fee)),
+            nonce: Some(i64::from(day)),
+            excluded_transfer_keys: Vec::new(),
+            transfers: vec![SyncAccountTransferRecord {
+                provider_transfer_key: ProviderTransferKey::normal(),
+                transfer_index: 0,
+                transfer_kind: TransferKind::Normal,
+                from_address: Some(TrackedAddress::parse(from).expect("valid sender")),
+                to_address: Some(TrackedAddress::parse(to).expect("valid recipient")),
+                value_amount: UnsignedAmount::from_u128(value),
+            }],
+        };
+    let paid_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let unpaid_hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    reconcile_account_transactions(
+        user_id,
+        SyncedAssetId::Ethereum,
+        Network::Mainnet,
+        &[
+            make_tx(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ChainTransactionStatus::Confirmed,
+                7,
+                external,
+                owned,
+                2_000_000_000_000_000_000,
+                0,
+            ),
+            make_tx(
+                paid_hash,
+                ChainTransactionStatus::Failed,
+                8,
+                owned,
+                external,
+                400_000_000_000_000_000,
+                1_000_000_000_000_000,
+            ),
+            make_tx(
+                unpaid_hash,
+                ChainTransactionStatus::Failed,
+                9,
+                external,
+                owned,
+                300_000_000_000_000_000,
+                1_000_000_000_000_000,
+            ),
+        ],
+        mined_at(10),
+    )
+    .expect("ethereum transactions should reconcile");
+    rebuild_account_transaction_ledger(user_id, account_id, mined_at(10))
+        .expect("ethereum ledger should rebuild");
+
     let response = server
         .post("/_app/user/exports/hledger/download")
         .json(&json!({ "encrypted": false }))
@@ -658,6 +734,23 @@ async fn test_download_hledger_happy_path_unencrypted() {
 
     let directives = read_zip_entry(&zip_bytes, "directives.j.txt", None).expect("read directives");
     assert!(directives.contains("commodity 0.000000 ADA"));
+    let ethereum_journal_path =
+        format!("{username}/MainWallet/EthereumAccount1/journal/2026/2026.j.txt");
+    let ethereum_journal = read_zip_entry(&zip_bytes, &ethereum_journal_path, None)
+        .expect("read Ethereum journal from HTTP download");
+    let paid_entry = ethereum_journal
+        .split("\n\n")
+        .find(|entry| entry.contains(paid_hash))
+        .expect("paid failed fee entry should be present");
+    assert!(paid_entry.contains("2026-02-08 * Failed transaction fee — Ethereum"));
+    assert!(paid_entry.contains("-0.001000000000000000 ETH = 1.999000000000000000 ETH"));
+    assert!(
+        paid_entry.contains("expenses:Fees:Ethereum:Network:Mainnet    0.001000000000000000 ETH")
+    );
+    assert!(!ethereum_journal.contains(unpaid_hash));
+    assert!(!paid_entry.contains("0.400000000000000000 ETH"));
+    assert!(!paid_entry.contains("expenses:unknown"));
+    assert!(!paid_entry.contains("income:unknown"));
 
     let root_entry = read_zip_entry(&zip_bytes, "bitgarth.j.txt", None).expect("read root entry");
     assert_eq!(
@@ -800,6 +893,39 @@ async fn test_download_hledger_zero_data_user() {
         root_entry,
         "; Generated by https://bitgarth.app/\n\ninclude directives.j.txt\ninclude all-years.j.txt\n"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_download_hledger_generation_error_returns_error_status() {
+    let server = setup_test_server();
+    let _ = register_user(&server).await;
+    let wallet = add_ethereum_wallet_account(
+        &server,
+        "0x52908400098527886E0F7030069857D2E4169EE7",
+        "Export error wallet",
+    )
+    .await;
+    let manual = add_manual_asset_account(&server, &wallet.wallet_id, "ADA").await;
+    let account_id = manual["account_id"].as_str().expect("manual account id");
+    let user_id = current_user_id(&server).await;
+    crate::db::with_user_db_mut(user_id, |connection| {
+        connection
+            .execute(
+                "UPDATE manual_asset_accounts SET unit_code = '' WHERE id = ?1",
+                rusqlite::params![account_id],
+            )
+            .map_err(|err| {
+                crate::db::DbError::from_rusqlite_error("corrupt export fixture", err)
+            })?;
+        Ok::<(), crate::db::DbError>(())
+    })
+    .expect("fixture should corrupt unit code");
+
+    let response = server
+        .post("/_app/user/exports/hledger/download")
+        .json(&json!({ "encrypted": false }))
+        .await;
+    assert_eq!(response.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[tokio::test(flavor = "current_thread")]

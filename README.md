@@ -50,6 +50,10 @@ brew services start ferntrail/tap/bitgarth-web
 same tap. See [FernTrail's Homebrew tap](https://github.com/FernTrail/homebrew-tap)
 for service management, the per-service environment file, and platform details.
 
+## Install with Snap
+
+For amd64 Ubuntu, see the [Snap installation guide](docs/user/snap.md).
+
 ## Web server downloads
 
 Download the `bitgarth-web` archive for your platform from
@@ -150,7 +154,7 @@ Install these prerequisites and make their executables available in Git Bash:
 - Node.js 24 and npm, `cargo-deny`, RTK, and hledger. The exact CI tool versions
   are recorded in [ci.yml](.github/workflows/ci.yml).
 - OpenSSL development libraries and the matching runtime DLL. The Windows
-  release workflow uses vcpkg's `openssl:x64-windows` package.
+  release workflow uses vcpkg's `openssl:x64-windows-release` package.
 
 For an existing vcpkg installation at `C:\dev\vcpkg`, configure OpenSSL in
 Git Bash as follows (adjust the installation path):

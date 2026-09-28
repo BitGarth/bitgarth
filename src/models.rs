@@ -928,7 +928,13 @@ impl EtherscanBaseUrl {
 
     pub(crate) fn transaction_url(&self, tx_hash: &str) -> Result<String, EtherscanBaseUrlError> {
         self.derive_web_explorer_root()?
-            .join(&format!("tx/{tx_hash}"))
+            .join(&format!(
+                "tx/{}",
+                crate::transactions::display_tx_hash(
+                    crate::wallets::SyncedAssetId::Ethereum,
+                    tx_hash
+                )
+            ))
             .map(|url| url.to_string())
             .map_err(|err| EtherscanBaseUrlError::InvalidUrl(err.to_string()))
     }

@@ -104,6 +104,10 @@ Plain text is easy to inspect, back up, diff, archive, and move between tools. I
 
 That openness means exported files are your responsibility. Treat them like financial records. Store them somewhere you control, encrypt backups where appropriate, and avoid syncing them into services you do not trust.
 
+Failed transactions do not transfer their attempted value. Exports include
+only a known fee paid by your account; failures with no balance effect are
+omitted.
+
 If an account's Bitcoin history is still syncing, unscanned, or stopped by its
 configured transaction limit, hledger exports keep the transaction postings
 and any persisted transaction/provider balance assertions for the available

@@ -5,6 +5,9 @@ use crate::amounts::UnsignedAmount;
 use crate::balance_reliability::{BalanceProvisionalReason, BalanceReliability};
 use crate::db::balance_reliability::AccountBalanceReliabilityContext;
 use crate::db::transaction_sync::BitcoinAccountHistoryCoverage;
+use crate::db::transaction_sync::{
+    ProviderTransferKey, SyncAccountTransactionRecord, SyncAccountTransferRecord,
+};
 use crate::db::{
     AddressSyncSuccess, SyncTransactionInputRecord, SyncTransactionOutputRecord,
     SyncTransactionRecord, acquire_test_runtime, add_bitcoin_address,
@@ -12,15 +15,15 @@ use crate::db::{
     mark_account_integration_sync_started, mark_address_sync_completed_failure,
     mark_address_sync_completed_success, mark_address_sync_started,
     publish_bitcoin_account_completion, publish_mempool_history_proof,
-    reconcile_address_transactions, refresh_account_integration_sync_state,
-    update_address_mempool_backfill_cursor, update_address_mempool_expected_tx_count,
-    upsert_account_sync_state,
+    reconcile_account_transactions, reconcile_address_transactions,
+    refresh_account_integration_sync_state, update_address_mempool_backfill_cursor,
+    update_address_mempool_expected_tx_count, upsert_account_sync_state,
 };
 use crate::db::{
     BitcoinAccountCompletionPublication, BitcoinAddressProofPublication,
     BitcoinHdDiscoveryPublication, MempoolHistoryProof,
 };
-use crate::ethereum::{EthAddress, RawEthAddress};
+use crate::ethereum::{EthAddress, RawEthAddress, TransferKind};
 use crate::models::{UserId, parse_datetime};
 use crate::transactions::{
     ApiConfirmedBalance, ChainTipHeight, ChainTransactionStatus, MempoolCursorTxid,
@@ -42,6 +45,332 @@ fn dt(s: &str) -> DateTime<Utc> {
 fn parse_eth_address(value: &str) -> EthAddress {
     let raw = RawEthAddress::new(value.to_string());
     EthAddress::parse(&raw).expect("test eth address should parse")
+}
+
+#[test]
+fn pending_eth_send_includes_known_normal_sender_fee_in_provisional_balance() {
+    let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+    let user_id = UserId::new();
+    initialize_user_db_for_test(user_id).expect("user db should initialize");
+    let seen = dt("2026-09-24T00:00:00Z");
+    let sender = parse_eth_address("0x52908400098527886E0F7030069857D2E4169EE7");
+    let external = parse_eth_address("0x0000000000000000000000000000000000000001");
+    let account = create_eth_wallet_account_fixture(user_id, &sender, "Pending fee", seen);
+    let tracked = |address: &EthAddress| {
+        TrackedAddress::parse(&address.checksummed()).expect("tracked address")
+    };
+    let record = |hash: u8, status, from: &EthAddress, to: &EthAddress, value, fee_amount| {
+        SyncAccountTransactionRecord {
+            tx_hash: TxHash::parse(&format!("{hash:064x}")).expect("tx hash"),
+            status,
+            block_height: (status == ChainTransactionStatus::Confirmed).then_some(i64::from(hash)),
+            block_hash: None,
+            block_time: (status == ChainTransactionStatus::Confirmed).then_some(seen),
+            fee_amount,
+            nonce: Some(i64::from(hash)),
+            transfers: vec![SyncAccountTransferRecord {
+                provider_transfer_key: ProviderTransferKey::normal(),
+                transfer_index: 0,
+                transfer_kind: TransferKind::Normal,
+                from_address: Some(tracked(from)),
+                to_address: Some(tracked(to)),
+                value_amount: UnsignedAmount::from_u128(value),
+            }],
+            excluded_transfer_keys: Vec::new(),
+        }
+    };
+    let records = [
+        record(
+            1,
+            ChainTransactionStatus::Confirmed,
+            &external,
+            &sender,
+            2_000,
+            None,
+        ),
+        record(
+            2,
+            ChainTransactionStatus::Pending,
+            &sender,
+            &external,
+            400,
+            Some(UnsignedAmount::from_u128(1)),
+        ),
+    ];
+    reconcile_account_transactions(
+        user_id,
+        SyncedAssetId::Ethereum,
+        Network::Mainnet,
+        &records,
+        seen,
+    )
+    .expect("transactions should reconcile");
+    super::ledger_rebuild::rebuild_account_transaction_ledger(user_id, account.account_id, seen)
+        .expect("ledger should rebuild");
+    let (delta, negative, balance) = crate::db::with_user_db(user_id, |conn| {
+        conn.query_row(
+            "SELECT balance_delta_lo, balance_delta_negative, closing_balance_lo
+             FROM account_transaction_ledger WHERE account_id = ?1 AND status = 'pending'",
+            [account.account_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )
+        .map_err(|err| crate::db::DbError::new(format!("pending ledger query failed: {err}")))
+    })
+    .expect("pending ledger row should load");
+    assert_eq!((delta, negative, balance), (401, 1, Some(1_599)));
+}
+
+#[test]
+fn failed_eth_reconciliation_preserves_attempt_and_charges_only_normal_sender() {
+    let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+    let user_id = UserId::new();
+    initialize_user_db_for_test(user_id).expect("user db should initialize");
+    let mined = dt("2026-01-02T00:00:00Z");
+    let seen = dt("2026-09-24T00:00:00Z");
+    let sender = parse_eth_address("0x52908400098527886E0F7030069857D2E4169EE7");
+    let receiver = parse_eth_address("0x8617E340B3D01FA5F11F306F4090FD50E238070D");
+    let internal = parse_eth_address("0xde709f2102306220921060314715629080e2fb77");
+    let sender_account = create_eth_wallet_account_fixture(user_id, &sender, "Sender", mined);
+    let receiver_account = create_eth_wallet_account_fixture(user_id, &receiver, "Receiver", mined);
+    let internal_account = create_eth_wallet_account_fixture(user_id, &internal, "Internal", mined);
+    let tracked = |address: &EthAddress| {
+        TrackedAddress::parse(&address.checksummed()).expect("tracked address")
+    };
+    let transfer =
+        |key, index, from: &EthAddress, to: &EthAddress, value| SyncAccountTransferRecord {
+            provider_transfer_key: key,
+            transfer_index: index,
+            transfer_kind: if index == 0 {
+                TransferKind::Normal
+            } else {
+                TransferKind::Internal
+            },
+            from_address: Some(tracked(from)),
+            to_address: Some(tracked(to)),
+            value_amount: UnsignedAmount::from_u128(value),
+        };
+    let record = |hash: u8, status, block_time, fee_amount: Option<u128>, transfers| {
+        SyncAccountTransactionRecord {
+            tx_hash: TxHash::parse(&format!("{hash:064x}")).expect("tx hash"),
+            status,
+            block_height: Some(i64::from(hash)),
+            block_hash: None,
+            block_time,
+            fee_amount: fee_amount.map(UnsignedAmount::from_u128),
+            nonce: Some(i64::from(hash)),
+            transfers,
+            excluded_transfer_keys: Vec::new(),
+        }
+    };
+    let external = parse_eth_address("0x0000000000000000000000000000000000000001");
+    let records = vec![
+        record(
+            1,
+            ChainTransactionStatus::Confirmed,
+            Some(mined - chrono::Duration::days(1)),
+            None,
+            vec![transfer(
+                ProviderTransferKey::normal(),
+                0,
+                &external,
+                &sender,
+                2_000,
+            )],
+        ),
+        record(
+            2,
+            ChainTransactionStatus::Failed,
+            Some(mined),
+            Some(1),
+            vec![transfer(
+                ProviderTransferKey::normal(),
+                0,
+                &sender,
+                &receiver,
+                400,
+            )],
+        ),
+        record(
+            3,
+            ChainTransactionStatus::Failed,
+            Some(mined),
+            Some(1),
+            vec![transfer(
+                ProviderTransferKey::normal(),
+                0,
+                &sender,
+                &sender,
+                400,
+            )],
+        ),
+        record(
+            4,
+            ChainTransactionStatus::Failed,
+            Some(mined),
+            Some(1),
+            vec![
+                transfer(ProviderTransferKey::normal(), 0, &external, &receiver, 400),
+                transfer(
+                    ProviderTransferKey::from_internal_trace_id("0_1").expect("trace key"),
+                    1,
+                    &internal,
+                    &receiver,
+                    300,
+                ),
+            ],
+        ),
+        record(
+            5,
+            ChainTransactionStatus::Failed,
+            None,
+            None,
+            vec![transfer(
+                ProviderTransferKey::normal(),
+                0,
+                &sender,
+                &receiver,
+                400,
+            )],
+        ),
+        record(
+            6,
+            ChainTransactionStatus::Failed,
+            Some(mined),
+            Some(0),
+            vec![transfer(
+                ProviderTransferKey::normal(),
+                0,
+                &sender,
+                &receiver,
+                400,
+            )],
+        ),
+        record(
+            8,
+            ChainTransactionStatus::Confirmed,
+            Some(mined - chrono::Duration::days(1)),
+            None,
+            vec![transfer(
+                ProviderTransferKey::normal(),
+                0,
+                &external,
+                &internal,
+                500,
+            )],
+        ),
+        record(
+            9,
+            ChainTransactionStatus::Confirmed,
+            Some(mined + chrono::Duration::days(1)),
+            Some(1),
+            vec![
+                transfer(ProviderTransferKey::normal(), 0, &external, &receiver, 400),
+                transfer(
+                    ProviderTransferKey::from_internal_trace_id("0_1").expect("trace key"),
+                    1,
+                    &internal,
+                    &receiver,
+                    300,
+                ),
+            ],
+        ),
+    ];
+    reconcile_account_transactions(
+        user_id,
+        SyncedAssetId::Ethereum,
+        Network::Mainnet,
+        &records,
+        seen,
+    )
+    .expect("records should reconcile");
+    for account_id in [
+        sender_account.account_id,
+        receiver_account.account_id,
+        internal_account.account_id,
+    ] {
+        super::ledger_rebuild::rebuild_account_transaction_ledger(user_id, account_id, seen)
+            .expect("ledger should rebuild");
+    }
+    let rows = crate::db::with_user_db(user_id, |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT account_id, tx_hash, occurred_at, value_amount_lo, fee_amount_lo, balance_delta_lo, balance_delta_negative, closing_balance_lo
+             FROM account_transaction_ledger ORDER BY account_id, tx_hash"
+        ).map_err(|err| crate::db::DbError::new(format!("ledger query failed: {err}")))?;
+        stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, Option<i64>>(4)?, row.get::<_, i64>(5)?, row.get::<_, i64>(6)?, row.get::<_, Option<i64>>(7)?)))
+            .map_err(|err| crate::db::DbError::new(format!("ledger rows failed: {err}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| crate::db::DbError::new(format!("ledger row failed: {err}")))
+    }).expect("ledger rows should load");
+    let row = |account: DigitalAssetAccountId, hash: u8| {
+        rows.iter()
+            .find(|row| row.0 == account.to_string() && row.1 == format!("{hash:064x}"))
+            .expect("ledger row")
+    };
+    let failed_send = row(sender_account.account_id, 2);
+    assert_eq!(
+        (
+            failed_send.3,
+            failed_send.4,
+            failed_send.5,
+            failed_send.6,
+            failed_send.7
+        ),
+        (400, Some(1), 1, 1, Some(1_999))
+    );
+    assert_eq!(failed_send.2, mined.to_rfc3339());
+    assert_eq!(
+        (
+            row(receiver_account.account_id, 2).4,
+            row(receiver_account.account_id, 2).5,
+            row(receiver_account.account_id, 2).7
+        ),
+        (None, 0, Some(0))
+    );
+    assert_eq!(
+        (
+            row(internal_account.account_id, 9).4,
+            row(internal_account.account_id, 9).5,
+            row(internal_account.account_id, 9).6,
+            row(internal_account.account_id, 9).7
+        ),
+        (None, 300, 1, Some(200))
+    );
+    assert_eq!(
+        (
+            row(sender_account.account_id, 3).4,
+            row(sender_account.account_id, 3).7
+        ),
+        (Some(1), Some(1_998))
+    );
+    assert_eq!(
+        (
+            row(internal_account.account_id, 4).4,
+            row(internal_account.account_id, 4).5,
+            row(internal_account.account_id, 4).7
+        ),
+        (None, 0, Some(500))
+    );
+    assert_eq!(
+        (
+            row(sender_account.account_id, 5).4,
+            row(sender_account.account_id, 5).7
+        ),
+        (None, Some(1_998))
+    );
+    assert_eq!(row(sender_account.account_id, 5).2, seen.to_rfc3339());
+    assert_eq!(
+        (
+            row(sender_account.account_id, 6).4,
+            row(sender_account.account_id, 6).7
+        ),
+        (Some(0), Some(1_998))
+    );
 }
 
 fn seed_eth_ledger_row(
@@ -126,12 +455,272 @@ fn seed_eth_ledger_row(
     .expect("eth ledger fixture should persist");
 }
 
+#[test]
+fn failed_settled_rows_drive_history_balances_and_year_boundary_reports() {
+    let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+    let user_id = UserId::new();
+    initialize_user_db_for_test(user_id).expect("user db should initialize");
+    let address = parse_eth_address("0x52908400098527886E0F7030069857D2E4169EE7");
+    let account = create_eth_wallet_account_fixture(
+        user_id,
+        &address,
+        "Failed history",
+        dt("2025-12-30T00:00:00Z"),
+    );
+    let cases = [
+        ("a", "2025-12-30T12:00:00Z", 2_000, "confirmed"),
+        ("b", "2025-12-31T12:00:00Z", 1_999, "failed"),
+        ("c", "2026-01-01T12:00:00Z", 1_998, "failed"),
+        ("d", "2026-01-02T12:00:00Z", 1_998, "pending"),
+        ("e", "2026-01-03T12:00:00Z", 1_998, "dropped"),
+    ];
+    for (hash, at, balance, status) in cases {
+        seed_eth_ledger_row(
+            user_id,
+            account.account_id,
+            &address.checksummed(),
+            &hash.repeat(64),
+            &dt(at).to_rfc3339(),
+            UnsignedAmount::from_u128(1),
+            UnsignedAmount::from_u128(balance),
+        );
+        if status != "confirmed" {
+            crate::db::with_user_db_mut(user_id, |conn| {
+                conn.execute("UPDATE account_transaction_ledger SET status = ?3 WHERE account_id = ?1 AND tx_hash = ?2", params![account.account_id.to_string(), hash.repeat(64), status])
+                    .map(|_| ())
+                    .map_err(|err| crate::db::DbError::new(format!("status fixture failed: {err}")))
+            }).expect("failed status should persist");
+        }
+    }
+    crate::db::with_user_db(user_id, |conn| {
+        let amount = |value: Option<UnsignedAmount>| value.map(UnsignedAmount::value);
+        assert_eq!(
+            amount(balance::load_account_overall_balance(
+                conn,
+                account.account_id
+            )?),
+            Some(1_998)
+        );
+        assert_eq!(
+            amount(balance::load_balance_before_date(
+                conn,
+                account.account_id,
+                dt("2025-12-31T12:00:00Z")
+            )?),
+            Some(2_000)
+        );
+        assert_eq!(
+            amount(balance::load_balance_as_of_date(
+                conn,
+                account.account_id,
+                dt("2025-12-31T12:00:00Z")
+            )?),
+            Some(1_999)
+        );
+        assert_eq!(
+            amount(balance::load_balance_before_date(
+                conn,
+                account.account_id,
+                dt("2026-01-01T12:00:00Z")
+            )?),
+            Some(1_999)
+        );
+        assert_eq!(
+            amount(balance::load_balance_as_of_date(
+                conn,
+                account.account_id,
+                dt("2026-01-01T12:00:00Z")
+            )?),
+            Some(1_998)
+        );
+        Ok::<(), crate::db::DbError>(())
+    })
+    .expect("settled balances should load");
+    let balances = crate::db::load_all_account_balances(user_id).expect("wallet balances");
+    assert_eq!(
+        balances.accounts[0].account_balance.confirmed,
+        NativeBalanceState::KnownAmount(UnsignedAmount::from_u128(1_998))
+    );
+    let report = super::wallet_report::load_wallet_report(
+        user_id,
+        account.wallet_id,
+        Some(chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("date")),
+        Some(chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("date")),
+        crate::models::UserTimezone("UTC".parse().expect("timezone")),
+        TransactionCount::from_u32(u32::MAX),
+    )
+    .expect("report should load");
+    assert_eq!(
+        report.accounts[0]
+            .opening_balance
+            .map(UnsignedAmount::value),
+        Some(1_999)
+    );
+    assert_eq!(
+        report.accounts[0]
+            .closing_balance
+            .map(UnsignedAmount::value),
+        Some(1_998)
+    );
+    let history =
+        crate::db::load_account_transaction_history(user_id).expect("preview should load");
+    let entries = history.get(&account.account_id).expect("account history");
+    assert_eq!(
+        entries.iter().map(|entry| entry.status).collect::<Vec<_>>(),
+        vec![
+            ChainTransactionStatus::Dropped,
+            ChainTransactionStatus::Pending,
+            ChainTransactionStatus::Failed,
+            ChainTransactionStatus::Failed,
+            ChainTransactionStatus::Confirmed
+        ]
+    );
+    let filters = TransactionFilters {
+        status: vec![ChainTransactionStatus::Failed],
+        from_date: None,
+        to_date: None,
+    };
+    let first = page_query::load_account_transactions_pages(
+        user_id,
+        account.account_id,
+        (1, 1),
+        1,
+        TransactionSortDirection::Descending,
+        &filters,
+        TransactionCount::from_u32(u32::MAX),
+    )
+    .expect("first page");
+    let second = page_query::load_account_transactions_pages(
+        user_id,
+        account.account_id,
+        (1, 2),
+        1,
+        TransactionSortDirection::Descending,
+        &filters,
+        TransactionCount::from_u32(u32::MAX),
+    )
+    .expect("second page");
+    assert_eq!(first.pending.total, 0);
+    assert_eq!(first.confirmed.total, 2);
+    assert_eq!(first.confirmed.rows[0].tx_hash, "c".repeat(64));
+    assert_eq!(second.confirmed.rows[0].tx_hash, "b".repeat(64));
+}
+
+#[test]
+fn failure_only_history_has_first_date_and_stable_equal_time_pages() {
+    let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+    let user_id = UserId::new();
+    initialize_user_db_for_test(user_id).expect("user db should initialize");
+    let at = dt("2025-12-31T12:00:00Z");
+    let address = parse_eth_address("0x52908400098527886E0F7030069857D2E4169EE7");
+    let account = create_eth_wallet_account_fixture(user_id, &address, "Failures only", at);
+    for hash in ["a".repeat(64), "b".repeat(64)] {
+        seed_eth_ledger_row(
+            user_id,
+            account.account_id,
+            &address.checksummed(),
+            &hash,
+            &at.to_rfc3339(),
+            UnsignedAmount::from_u128(400),
+            UnsignedAmount::from_u128(1_999),
+        );
+        crate::db::with_user_db_mut(user_id, |conn| {
+            conn.execute("UPDATE account_transaction_ledger SET status = 'failed' WHERE account_id = ?1 AND tx_hash = ?2", params![account.account_id.to_string(), hash])
+                .map(|_| ())
+                .map_err(|err| crate::db::DbError::new(format!("failure fixture failed: {err}")))
+        }).expect("failure should persist");
+    }
+    let first = crate::db::with_user_db(user_id, |conn| {
+        balance::load_first_transaction_date(conn, account.account_id)
+    })
+    .expect("first date");
+    assert_eq!(first, Some(at));
+    let filters = TransactionFilters {
+        status: vec![ChainTransactionStatus::Failed],
+        from_date: None,
+        to_date: None,
+    };
+    for (page, expected) in [(1, "a"), (2, "b")] {
+        let result = page_query::load_account_transactions_pages(
+            user_id,
+            account.account_id,
+            (1, page),
+            1,
+            TransactionSortDirection::Ascending,
+            &filters,
+            TransactionCount::from_u32(u32::MAX),
+        )
+        .expect("failure page");
+        assert_eq!(result.confirmed.total, 2);
+        assert_eq!(result.confirmed.rows[0].tx_hash, expected.repeat(64));
+    }
+}
+
 fn seed_btc_partial_backfill_fixture(
     user_id: UserId,
 ) -> (DigitalAssetAccountId, DateTime<Utc>, DateTime<Utc>) {
     let (account_id, _, transaction_time, sync_completed) =
         seed_btc_partial_backfill_fixture_with_balance(user_id, 150_000);
     (account_id, transaction_time, sync_completed)
+}
+
+#[test]
+fn synthetic_failed_bitcoin_row_has_no_delta_and_uses_block_time() {
+    let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+    let user_id = UserId::new();
+    initialize_user_db_for_test(user_id).expect("user db should initialize");
+    let (account_id, _, _) = seed_btc_partial_backfill_fixture(user_id);
+    let seen = dt("2026-09-24T00:00:00Z");
+    let mined = dt("2026-01-11T00:00:00Z");
+    let address = TrackedAddress::parse("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
+        .expect("tracked address");
+    let failed = SyncTransactionRecord {
+        tx_hash: TxHash::parse("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            .expect("tx hash"),
+        status: ChainTransactionStatus::Failed,
+        block_height: Some(101),
+        block_hash: None,
+        block_time: Some(mined),
+        fee_amount: Some(1_000),
+        inputs: vec![SyncTransactionInputRecord {
+            input_index: 0,
+            prev_tx_hash: TxHash::parse(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .expect("prev hash"),
+            prev_output_index: 0,
+            prev_address: Some(address),
+            value_amount: Some(50_000),
+        }],
+        outputs: Vec::new(),
+    };
+    reconcile_address_transactions(
+        user_id,
+        SyncedAssetId::Bitcoin,
+        Network::Mainnet,
+        &[failed],
+        seen,
+    )
+    .expect("failed row should reconcile");
+    super::ledger_rebuild::rebuild_account_transaction_ledger(user_id, account_id, seen)
+        .expect("ledger should rebuild");
+    let row = crate::db::with_user_db(user_id, |conn| {
+        conn.query_row(
+            "SELECT occurred_at, balance_delta_lo, closing_balance_lo
+             FROM account_transaction_ledger WHERE account_id = ?1 AND status = 'failed'",
+            [account_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )
+        .map_err(|err| crate::db::DbError::new(format!("failed Bitcoin row query failed: {err}")))
+    })
+    .expect("failed Bitcoin row should load");
+    assert_eq!(row, (mined.to_rfc3339(), 0, Some(150_000)));
 }
 
 fn seed_btc_partial_backfill_fixture_with_balance(

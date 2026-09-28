@@ -11,6 +11,7 @@ use crate::amounts::AmountError;
 use crate::amounts::UnsignedAmount;
 use crate::wallets::SyncedAssetId;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 use ulid::Ulid;
@@ -66,6 +67,14 @@ impl TxHash {
 
     pub(crate) fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+pub(crate) fn display_tx_hash<'a>(asset: SyncedAssetId, hash: &'a str) -> Cow<'a, str> {
+    if asset == SyncedAssetId::Ethereum && !hash.starts_with("0x") {
+        Cow::Owned(format!("0x{hash}"))
+    } else {
+        Cow::Borrowed(hash)
     }
 }
 

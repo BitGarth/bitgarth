@@ -173,11 +173,13 @@ fn total_sync_account_count(
 fn planner_input_for_preload<'a>(
     preload: &'a SyncRunPreload,
     now_utc: DateTime<Utc>,
+    source: TriggerSource,
     account_transaction_counts: &'a HashMap<DigitalAssetAccountId, TransactionCount>,
     run_excluded_address_ids: &'a HashSet<crate::wallets::DigitalAssetAddressId>,
 ) -> SyncPlannerInput<'a> {
     SyncPlannerInput {
         now_utc,
+        source,
         transaction_fetch_policy: transaction_fetch_policy_for_preload(preload),
         native_account_modes: preload.native_account_modes.as_ref(),
         account_transaction_counts,
@@ -347,6 +349,7 @@ pub(super) fn run_sync_cycle(
     let planner_input = planner_input_for_preload(
         preload,
         run.clock.utc_now(),
+        run.source,
         &account_transaction_counts,
         &run_excluded_address_ids,
     );
@@ -372,7 +375,7 @@ pub(super) fn run_sync_cycle(
 
     for address in &mut non_hd_addresses {
         if address_is_blocked_for_planner(address, &planner_input) {
-            accumulator.add_skipped();
+            accumulator.add_skipped(super::cycle::SyncSkipReason::Blocked);
             continue;
         }
 
@@ -698,7 +701,7 @@ pub(super) fn empty_sync_summary(
         addresses_synced: AddressCount::zero(),
         addresses_failed: AddressCount::zero(),
         addresses_skipped: AddressCount::zero(),
-        addresses_skipped_tip_unchanged: AddressCount::zero(),
+        skipped_by_reason: super::cycle::SyncSkipCounts::default(),
         addresses_early_exited: AddressCount::zero(),
         pagination_cache_hits: 0,
         total_api_calls: 0,
@@ -1058,7 +1061,7 @@ fn publish_and_log_sync_completed(
         addresses_synced = summary.addresses_synced.value(),
         addresses_failed = summary.addresses_failed.value(),
         addresses_skipped = summary.addresses_skipped.value(),
-        addresses_skipped_tip_unchanged = summary.addresses_skipped_tip_unchanged.value(),
+        addresses_skipped_tip_unchanged = summary.skipped_by_reason.tip_unchanged,
         addresses_early_exited = summary.addresses_early_exited.value(),
         pagination_cache_hits = summary.pagination_cache_hits,
         total_api_calls = summary.total_api_calls,
@@ -1459,7 +1462,7 @@ fn run_automatic_inner_with_runner(
             addresses_synced = summary.addresses_synced.value(),
             addresses_failed = summary.addresses_failed.value(),
             addresses_skipped = summary.addresses_skipped.value(),
-            addresses_skipped_tip_unchanged = summary.addresses_skipped_tip_unchanged.value(),
+            addresses_skipped_tip_unchanged = summary.skipped_by_reason.tip_unchanged,
             addresses_early_exited = summary.addresses_early_exited.value(),
             pagination_cache_hits = summary.pagination_cache_hits,
             total_api_calls = summary.total_api_calls,
@@ -3329,7 +3332,7 @@ mod tests {
             })
             .expect("raised-cap restart should succeed");
             assert_eq!(
-                raised_accumulator.addresses_skipped_tip_unchanged, 0,
+                raised_accumulator.skipped_by_reason.tip_unchanged, 0,
                 "proof/count restart work must bypass the unchanged-tip gate"
             );
             let raised_requests = raised_server.join();
@@ -4196,7 +4199,7 @@ mod tests {
             assert_eq!(summary.addresses_synced.value(), 3);
             assert_eq!(summary.addresses_failed.value(), 0);
             assert_eq!(summary.addresses_skipped.value(), 0);
-            assert_eq!(summary.addresses_skipped_tip_unchanged.value(), 0);
+            assert_eq!(summary.skipped_by_reason.tip_unchanged, 0);
             assert_eq!(summary.addresses_early_exited.value(), 0);
             assert_eq!(summary.new_tx_count.value(), 0);
             assert_eq!(summary.updated_tx_count.value(), 0);
@@ -4674,7 +4677,13 @@ mod tests {
 
         let counts = HashMap::new();
         let excluded = HashSet::new();
-        let planner_input = planner_input_for_preload(&preload, test_utc_now(), &counts, &excluded);
+        let planner_input = planner_input_for_preload(
+            &preload,
+            test_utc_now(),
+            TriggerSource::Schedule,
+            &counts,
+            &excluded,
+        );
         sort_addresses_by_planner_priority(&mut addresses, &planner_input);
 
         assert_eq!(
@@ -5171,7 +5180,7 @@ mod tests {
             // Block B+1: T4 (+7 sat) arrives. The account is already at its cap,
             // so sync must fetch statistics only and must not touch the ledger.
             // Both preconditions matter: the balance refresh must not be fresh
-            // (BALANCE_REFRESH_TTL is 30 minutes) and the tip must advance.
+            // (BALANCE_REFRESH_TTL is the 15-minute account refresh interval) and the tip must advance.
             clock.sleep(Duration::from_secs(31 * 60));
             let run_next = next_run_for_user(&clock, run_b.user_id);
             let server_next = start_historical_sync_mempool_server(vec![btc_stats_json(4, 130, 0)]);

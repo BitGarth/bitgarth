@@ -20,6 +20,7 @@ pub(crate) fn DateRangeToolbar(
     on_this_year: EventHandler<()>,
     on_start_change: EventHandler<String>,
     on_end_change: EventHandler<String>,
+    #[props(default)] on_all_time: Option<EventHandler<()>>,
     #[props(default)] right_side_extension: Option<Element>,
     #[props(default)] secondary_row: Option<Element>,
 ) -> Element {
@@ -55,6 +56,15 @@ pub(crate) fn DateRangeToolbar(
                         r#type: "button",
                         onclick: move |_| on_this_year.call(()),
                         "This Year"
+                    }
+                }
+
+                if let Some(on_all_time) = on_all_time {
+                    button {
+                        class: "btn btn-outline date-range-all-time",
+                        r#type: "button",
+                        onclick: move |_| on_all_time.call(()),
+                        "All time"
                     }
                 }
 

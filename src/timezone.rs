@@ -1,29 +1,31 @@
-use crate::models::DateTimeFormat;
+use crate::models::{DateTimeFormat, UserId, UserTimezone};
+use crate::{AuthState, AuthStatus};
 use chrono::{DateTime, TimeZone, Utc};
 use chrono_tz::Tz;
+use dioxus::logger::tracing;
 use dioxus::prelude::*;
 
 #[cfg(feature = "web")]
-async fn detect_timezone_web() -> Tz {
+async fn detect_timezone_web() -> Option<Tz> {
     use dioxus::document::eval;
 
     let mut eval_result = eval(r#"dioxus.send(Intl.DateTimeFormat().resolvedOptions().timeZone)"#);
     match eval_result.recv().await {
-        Ok(serde_json::Value::String(tz_str)) => tz_str.parse::<Tz>().unwrap_or(Tz::UTC),
-        _ => Tz::UTC,
+        Ok(serde_json::Value::String(tz_str)) => tz_str.parse::<Tz>().ok(),
+        _ => None,
     }
 }
 
 #[cfg(feature = "desktop")]
-fn detect_timezone_desktop() -> Tz {
+fn detect_timezone_desktop() -> Option<Tz> {
     iana_time_zone::get_timezone()
         .ok()
         .and_then(|s| s.parse::<Tz>().ok())
-        .unwrap_or(Tz::UTC)
 }
 
-pub(crate) fn use_timezone() -> Signal<Tz> {
-    let tz = use_signal(|| Tz::UTC);
+/// The browser/OS zone, `None` until detected (always during SSR) or when detection fails.
+pub(crate) fn use_timezone() -> Signal<Option<Tz>> {
+    let tz = use_signal(|| None);
 
     #[cfg(feature = "web")]
     {
@@ -46,6 +48,38 @@ pub(crate) fn use_timezone() -> Signal<Tz> {
     }
 
     tz
+}
+
+/// Saves the detected zone for a signed-in user who never saved one, so every
+/// device and every SSR render agree instead of each following its own browser.
+pub(crate) fn use_persist_detected_timezone(
+    detected: Signal<Option<Tz>>,
+    auth_state: AuthState,
+    mut timezone: Signal<UserTimezone>,
+) {
+    let mut persisted_for = use_signal(|| None::<UserId>);
+    use_effect(move || {
+        let Some(detected) = detected() else {
+            return;
+        };
+        let user_id = match &*auth_state.read() {
+            AuthStatus::Authenticated(auth) if auth.settings.timezone.is_none() => {
+                auth.user.user_id
+            }
+            _ => return,
+        };
+        if *persisted_for.peek() == Some(user_id) {
+            return;
+        }
+        persisted_for.set(Some(user_id));
+        let detected = UserTimezone::from(detected);
+        timezone.set(detected);
+        spawn(async move {
+            if let Err(err) = crate::backend::save_timezone(detected).await {
+                tracing::warn!(error = %err, "settings: failed to save detected timezone");
+            }
+        });
+    });
 }
 
 pub(crate) fn format_timestamp(

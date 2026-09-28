@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+port="$(snapctl get port)"
+case "$port" in
+  "") ;;
+  0*|*[!0-9]*|??????*)
+    echo "port must be a number from 1 to 65535" >&2
+    exit 1 ;;
+  *)
+    if [ "$port" -gt 65535 ]; then
+      echo "port must be a number from 1 to 65535" >&2
+      exit 1
+    fi ;;
+esac
+# snapd runs configure on install and refresh too; restart only a running service.
+if snapctl services "$SNAP_INSTANCE_NAME.bitgarth-web" | grep -qw active; then
+  snapctl restart "$SNAP_INSTANCE_NAME.bitgarth-web"
+fi

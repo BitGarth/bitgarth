@@ -11,7 +11,7 @@ use super::label::{
 use super::queries::{
     ExportAccountBoundaryMode, ExportAccountRow, ExportAccountTransactionLedgerRow,
     ExportManualAssetBalanceAssertionRow, ExportNativeApiBalanceAssertionRow,
-    load_all_accounts_for_export, load_all_confirmed_account_transaction_ledger_rows_for_export,
+    load_account_transaction_ledger_rows_for_export, load_all_accounts_for_export,
     load_all_manual_asset_balance_assertion_rows_for_export,
     load_all_native_api_balance_assertion_rows_for_export,
     load_incomplete_bitcoin_account_ids_for_export,
@@ -464,12 +464,17 @@ fn export_all_accounts_to_dir(
 ) -> Result<ExportResult, ExportEngineError> {
     let account_rows = load_all_accounts_for_export(user_id)?;
     let history_cap = export_history_cap(user_id)?;
-    let incomplete_bitcoin_accounts =
+    let mut incomplete_bitcoin_accounts =
         load_incomplete_bitcoin_account_ids_for_export(user_id, &account_rows, history_cap)?;
+    let bitcoin_accounts = account_rows
+        .iter()
+        .filter(|row| row.native_asset_id == Some(SyncedAssetId::Bitcoin))
+        .map(|row| row.account_id)
+        .collect();
     let naming = HledgerAccountNaming::new(hledger_owner_posting_segment, None);
     let resolved_accounts = resolve_accounts(account_rows, &naming)?;
     let transactions_by_account =
-        load_transactions_by_account(user_id, &incomplete_bitcoin_accounts)?;
+        load_transactions_by_account(user_id, &bitcoin_accounts, &mut incomplete_bitcoin_accounts)?;
 
     let temp_hledger_dir = create_temp_export_dir(final_hledger_dir)?;
     let mut sink = FsSink {
@@ -552,12 +557,17 @@ pub(crate) fn export_all_accounts_to_zip<W: Write + std::io::Seek>(
 ) -> Result<(W, ZipExportResult), ExportEngineError> {
     let account_rows = load_all_accounts_for_export(user_id)?;
     let history_cap = export_history_cap(user_id)?;
-    let incomplete_bitcoin_accounts =
+    let mut incomplete_bitcoin_accounts =
         load_incomplete_bitcoin_account_ids_for_export(user_id, &account_rows, history_cap)?;
+    let bitcoin_accounts = account_rows
+        .iter()
+        .filter(|row| row.native_asset_id == Some(SyncedAssetId::Bitcoin))
+        .map(|row| row.account_id)
+        .collect();
     let naming = HledgerAccountNaming::new(hledger_owner_posting_segment, hledger_account_prefix);
     let resolved_accounts = resolve_accounts(account_rows, &naming)?;
     let transactions_by_account =
-        load_transactions_by_account(user_id, &incomplete_bitcoin_accounts)?;
+        load_transactions_by_account(user_id, &bitcoin_accounts, &mut incomplete_bitcoin_accounts)?;
 
     let mut sink = ZipSink::new(writer, password);
     let write_counts = write_snapshot(
@@ -667,6 +677,7 @@ fn native_render_context(
             let asset_display_name = asset_id.display_name().to_string();
             let network_display_name = native_network_display_name(network);
             Ok(Some(NativeTransactionRenderContext {
+                asset: asset_id,
                 network_fee_account: format!(
                     "expenses:Fees:{asset_display_name}:Network:{network_display_name}"
                 ),
@@ -692,11 +703,12 @@ fn export_history_cap(
 
 fn load_transactions_by_account(
     user_id: UserId,
-    incomplete_bitcoin_accounts: &std::collections::HashSet<WalletAccountId>,
+    bitcoin_accounts: &std::collections::HashSet<WalletAccountId>,
+    unasserted_bitcoin_accounts: &mut std::collections::HashSet<WalletAccountId>,
 ) -> Result<HashMap<WalletAccountId, Vec<ExportAccountTransaction>>, ExportEngineError> {
     let mut transactions_by_account: HashMap<WalletAccountId, Vec<ExportAccountTransaction>> =
         HashMap::new();
-    let ledger_rows = load_all_confirmed_account_transaction_ledger_rows_for_export(user_id)?;
+    let ledger_rows = load_account_transaction_ledger_rows_for_export(user_id)?;
 
     for row in ledger_rows {
         let account_id = row.account_id;
@@ -737,11 +749,14 @@ fn load_transactions_by_account(
     }
 
     for (account_id, transactions) in transactions_by_account.iter_mut() {
-        prepare_account_transactions_for_export(
+        if prepare_account_transactions_for_export(
             *account_id,
             transactions,
-            incomplete_bitcoin_accounts.contains(account_id),
-        )?;
+            bitcoin_accounts.contains(account_id),
+            unasserted_bitcoin_accounts.contains(account_id),
+        )? {
+            unasserted_bitcoin_accounts.insert(*account_id);
+        }
     }
 
     Ok(transactions_by_account)
@@ -750,18 +765,119 @@ fn load_transactions_by_account(
 fn prepare_account_transactions_for_export(
     account_id: WalletAccountId,
     transactions: &mut [ExportAccountTransaction],
+    is_bitcoin: bool,
     allow_unasserted_native_window: bool,
-) -> Result<(), ExportEngineError> {
+) -> Result<bool, ExportEngineError> {
     transactions.sort_by(compare_export_transactions);
-    if !allow_unasserted_native_window
-        || transactions.iter().any(|transaction| {
-            matches!(
-                transaction,
-                ExportAccountTransaction::Native(native) if native.closing_balance.is_some()
-            )
-        })
-    {
+    if is_bitcoin && !allow_unasserted_native_window {
+        order_bitcoin_native_transactions(account_id, transactions)?;
+    }
+    let mut last_year = None;
+    let reversed_year = is_bitcoin
+        && transactions
+            .iter()
+            .filter_map(|transaction| match transaction {
+                ExportAccountTransaction::Native(native) => Some(native.occurred_at.year()),
+                ExportAccountTransaction::ManualAssertion(_) => None,
+            })
+            .any(|year| {
+                let reversed = last_year.is_some_and(|previous| year < previous);
+                last_year = Some(year);
+                reversed
+            });
+    let unasserted = allow_unasserted_native_window || reversed_year;
+    if unasserted {
+        for transaction in transactions.iter_mut() {
+            if let ExportAccountTransaction::Native(native) = transaction {
+                native.closing_balance = None;
+            }
+        }
+    } else {
         verify_native_ledger_chain(account_id, transactions)?;
+    }
+    Ok(unasserted)
+}
+
+fn order_bitcoin_native_transactions(
+    account_id: WalletAccountId,
+    transactions: &mut [ExportAccountTransaction],
+) -> Result<(), ExportEngineError> {
+    let native_count = transactions
+        .iter()
+        .take_while(|transaction| matches!(transaction, ExportAccountTransaction::Native(_)))
+        .count();
+    transactions[..native_count].sort_by(|left, right| match (left, right) {
+        (ExportAccountTransaction::Native(left), ExportAccountTransaction::Native(right)) => left
+            .block_height
+            .cmp(&right.block_height)
+            .then(left.occurred_at.cmp(&right.occurred_at))
+            .then(left.tx_hash.cmp(&right.tx_hash)),
+        _ => std::cmp::Ordering::Equal,
+    });
+
+    let mut previous_balance = None;
+    let mut start = 0;
+    while start < native_count {
+        let height = match &transactions[start] {
+            ExportAccountTransaction::Native(native) => native.block_height,
+            _ => unreachable!(),
+        };
+        let end = (start..native_count)
+            .find(|&index| matches!(&transactions[index], ExportAccountTransaction::Native(native) if native.block_height != height))
+            .unwrap_or(native_count);
+        let group = transactions[start..end].to_vec();
+        let mut edges = Vec::with_capacity(group.len());
+        let mut degree = HashMap::<i128, i32>::new();
+        let mut outgoing = HashMap::<i128, Vec<usize>>::new();
+        for (index, transaction) in group.iter().enumerate() {
+            let ExportAccountTransaction::Native(native) = transaction else {
+                unreachable!()
+            };
+            let closing = native
+                .closing_balance
+                .and_then(|value| i128::try_from(value.value()).ok())
+                .ok_or_else(|| ExportEngineError::Invariant(format!(
+                    "Bitcoin ledger row lacks a representable closing balance for account {account_id}"
+                )))?;
+            let opening = closing.checked_sub(native.balance_delta).ok_or_else(|| {
+                ExportEngineError::Invariant(format!(
+                    "Bitcoin ledger opening balance overflow for account {account_id}"
+                ))
+            })?;
+            edges.push((opening, closing));
+            *degree.entry(opening).or_default() += 1;
+            *degree.entry(closing).or_default() -= 1;
+            outgoing.entry(opening).or_default().push(index);
+        }
+        for indices in outgoing.values_mut() {
+            indices.reverse();
+        }
+        let initial = previous_balance.unwrap_or_else(|| {
+            degree
+                .iter()
+                .find_map(|(&balance, &difference)| (difference == 1).then_some(balance))
+                .unwrap_or(edges[0].0)
+        });
+        let mut stack = vec![(initial, None)];
+        let mut ordered = Vec::with_capacity(group.len());
+        while let Some(&(balance, _)) = stack.last() {
+            if let Some(index) = outgoing.get_mut(&balance).and_then(Vec::pop) {
+                stack.push((edges[index].1, Some(index)));
+            } else if let Some((_, Some(index))) = stack.pop() {
+                ordered.push(index);
+            }
+        }
+        if ordered.len() != group.len() {
+            return Err(ExportEngineError::Invariant(format!(
+                "Bitcoin ledger chain cannot be ordered for account {account_id}"
+            )));
+        }
+        ordered.reverse();
+        previous_balance = ordered.last().map(|&index| edges[index].1);
+        for (offset, index) in ordered.into_iter().enumerate() {
+            transactions[start + offset] = group[index].clone();
+        }
+        start = end;
     }
     Ok(())
 }
@@ -931,6 +1047,7 @@ fn map_account_transaction_ledger_row(
         account_id: row.account_id,
         tx_hash: row.tx_hash,
         direction: row.direction,
+        status: row.status,
         balance_delta: row.balance_delta,
         fee,
         occurred_at: row.occurred_at,
@@ -1901,6 +2018,7 @@ mod test_helpers {
             account_id,
             tx_hash: tx_hash.to_string(),
             direction,
+            status: crate::transactions::ChainTransactionStatus::Confirmed,
             balance_delta,
             fee: UnsignedAmount::zero(),
             occurred_at: order.occurred_at,
@@ -2095,7 +2213,7 @@ mod pure_tests {
             }),
         ];
 
-        prepare_account_transactions_for_export(account_id, &mut transactions, false)
+        prepare_account_transactions_for_export(account_id, &mut transactions, false, false)
             .expect("proven transaction window should validate");
 
         assert_eq!(transactions.len(), 3);
@@ -2142,7 +2260,7 @@ mod pure_tests {
             }),
         ];
 
-        prepare_account_transactions_for_export(account_id, &mut transactions, true)
+        prepare_account_transactions_for_export(account_id, &mut transactions, true, true)
             .expect("fully unasserted incomplete Bitcoin window should export");
 
         assert_eq!(transactions.len(), 3);
@@ -2150,6 +2268,83 @@ mod pure_tests {
             transaction,
             ExportAccountTransaction::ManualAssertion(assertion)
                 if assertion.source == BalanceAssertionSource::Api
+        )));
+    }
+
+    #[test]
+    fn hledger_preparation_omits_native_assertions_for_incomplete_bitcoin() {
+        let account_id = WalletAccountId::new();
+        let mut transactions = vec![
+            native_tx(account_id, "a", 100, 100, Some(1), None),
+            native_tx(account_id, "b", -50, 50, Some(2), None),
+        ];
+        prepare_account_transactions_for_export(account_id, &mut transactions, true, true)
+            .expect("incomplete Bitcoin window exports without assertions");
+        assert!(transactions.iter().all(|transaction| matches!(
+            transaction,
+            ExportAccountTransaction::Native(native) if native.closing_balance.is_none()
+        )));
+    }
+
+    #[test]
+    fn hledger_preparation_exports_bitcoin_with_reversed_block_timestamps() {
+        let account_id = WalletAccountId::new();
+        let mut transactions = vec![
+            native_tx(account_id, "a", 10, 10, Some(100), None),
+            native_tx(account_id, "b", 2, 12, Some(101), None),
+            native_tx(account_id, "c", 3, 15, Some(102), None),
+        ];
+        for (transaction, time) in transactions.iter_mut().zip([
+            "2024-10-17T13:03:00Z",
+            "2024-10-17T13:04:01Z",
+            "2024-10-17T13:04:00Z",
+        ]) {
+            if let ExportAccountTransaction::Native(native) = transaction {
+                native.occurred_at = chrono::DateTime::parse_from_rfc3339(time)
+                    .expect("fixture time")
+                    .with_timezone(&chrono::Utc);
+            }
+        }
+        prepare_account_transactions_for_export(account_id, &mut transactions, true, false)
+            .expect("valid Bitcoin balances should not abort export");
+    }
+
+    #[test]
+    fn hledger_preparation_preserves_same_block_balance_order() {
+        let account_id = WalletAccountId::new();
+        let mut transactions = vec![
+            native_tx(account_id, "z-parent", 10, 10, Some(100), None),
+            native_tx(account_id, "a-child", 2, 12, Some(100), None),
+        ];
+        prepare_account_transactions_for_export(account_id, &mut transactions, true, false)
+            .expect("same-block balance chain should export");
+        assert!(
+            matches!(&transactions[0], ExportAccountTransaction::Native(native) if native.tx_hash == "z-parent")
+        );
+    }
+
+    #[test]
+    fn hledger_preparation_omits_assertions_when_bitcoin_years_reverse() {
+        let account_id = WalletAccountId::new();
+        let mut transactions = vec![
+            native_tx(account_id, "a", 10, 10, Some(100), None),
+            native_tx(account_id, "b", 2, 12, Some(101), None),
+        ];
+        for (transaction, time) in transactions
+            .iter_mut()
+            .zip(["2025-01-01T00:00:01Z", "2024-12-31T23:59:59Z"])
+        {
+            if let ExportAccountTransaction::Native(native) = transaction {
+                native.occurred_at = chrono::DateTime::parse_from_rfc3339(time)
+                    .expect("fixture time")
+                    .with_timezone(&chrono::Utc);
+            }
+        }
+        prepare_account_transactions_for_export(account_id, &mut transactions, true, false)
+            .expect("Bitcoin activity should export across reversed year timestamps");
+        assert!(transactions.iter().all(|transaction| matches!(
+            transaction,
+            ExportAccountTransaction::Native(native) if native.closing_balance.is_none()
         )));
     }
 
@@ -2164,13 +2359,14 @@ mod pure_tests {
             native_tx_order(Some(1), None, None),
         )];
 
-        let error = prepare_account_transactions_for_export(account_id, &mut transactions, false)
-            .expect_err("fully unasserted Ethereum window must fail");
+        let error =
+            prepare_account_transactions_for_export(account_id, &mut transactions, false, false)
+                .expect_err("fully unasserted Ethereum window must fail");
         assert!(error.to_string().contains("missing closing balance"));
     }
 
     #[test]
-    fn hledger_preparation_rejects_mixed_transaction_assertions() {
+    fn hledger_preparation_omits_mixed_transaction_assertions_for_incomplete_bitcoin() {
         let account_id = WalletAccountId::new();
         let mut transactions = vec![
             native_tx(account_id, "a", 100, 100, Some(1), None),
@@ -2183,9 +2379,12 @@ mod pure_tests {
             ),
         ];
 
-        let error = prepare_account_transactions_for_export(account_id, &mut transactions, true)
-            .expect_err("mixed asserted and unasserted rows must fail");
-        assert!(error.to_string().contains("missing closing balance"));
+        prepare_account_transactions_for_export(account_id, &mut transactions, true, true)
+            .expect("incomplete Bitcoin window should omit both assertions");
+        assert!(transactions.iter().all(|transaction| matches!(
+            transaction,
+            ExportAccountTransaction::Native(native) if native.closing_balance.is_none()
+        )));
     }
 
     #[test]
@@ -2356,6 +2555,7 @@ mod pure_tests {
             account_id: WalletAccountId::new(),
             tx_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             direction: AccountTransactionDirection::SelfTransfer,
+            status: crate::transactions::ChainTransactionStatus::Confirmed,
             fee: None,
             balance_delta: 0,
             occurred_at: fixed_time(24, 1),
@@ -2375,6 +2575,7 @@ mod pure_tests {
             account_id: WalletAccountId::new(),
             tx_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             direction: AccountTransactionDirection::Outgoing,
+            status: crate::transactions::ChainTransactionStatus::Confirmed,
             fee: Some(UnsignedAmount::zero()),
             balance_delta: -100,
             occurred_at: fixed_time_in_year(2025, 3, 1),
@@ -2387,6 +2588,7 @@ mod pure_tests {
             account_id: WalletAccountId::new(),
             tx_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
             direction: AccountTransactionDirection::Incoming,
+            status: crate::transactions::ChainTransactionStatus::Confirmed,
             fee: None,
             balance_delta: 200,
             occurred_at: fixed_time_in_year(2027, 4, 1),
@@ -3067,6 +3269,7 @@ mod tests {
                 block_time: Some(now),
                 fee_amount: Some(UnsignedAmount::zero()),
                 nonce: Some(1),
+                excluded_transfer_keys: Vec::new(),
                 transfers: vec![SyncAccountTransferRecord {
                     provider_transfer_key: ProviderTransferKey::normal(),
                     transfer_index: 0,
@@ -3096,14 +3299,18 @@ mod tests {
 
         let account_rows =
             load_all_accounts_for_export(user_id).expect("export accounts should load");
-        let incomplete_bitcoin_accounts = load_incomplete_bitcoin_account_ids_for_export(
+        let mut incomplete_bitcoin_accounts = load_incomplete_bitcoin_account_ids_for_export(
             user_id,
             &account_rows,
             export_history_cap(user_id).expect("export history cap should load"),
         )
         .expect("incomplete Bitcoin accounts should load");
-        let error = load_transactions_by_account(user_id, &incomplete_bitcoin_accounts)
-            .expect_err("unasserted Ethereum window must fail preparation");
+        let error = load_transactions_by_account(
+            user_id,
+            &std::collections::HashSet::new(),
+            &mut incomplete_bitcoin_accounts,
+        )
+        .expect_err("unasserted Ethereum window must fail preparation");
         assert!(error.to_string().contains("missing closing balance"));
     }
 
@@ -3296,7 +3503,7 @@ mod tests {
             "    ; Transaction abababababababababababababababababababababababababababababababab"
         ));
         assert!(journal.contains("2026-02-22 * API Balance Assertion: provider balance sync"));
-        assert_eq!(journal.matches("= 0.00100000 BTC").count(), 2);
+        assert_eq!(journal.matches("= 0.00100000 BTC").count(), 1);
         assert!(
             !hledger_owner_account_year_opening_journal_path(
                 &hledger_dir,
@@ -3650,6 +3857,7 @@ mod tests {
             block_time: Some(fixed_time(23, 13)),
             fee_amount: Some(UnsignedAmount::zero()),
             nonce: Some(1_i64),
+            excluded_transfer_keys: Vec::new(),
             transfers: vec![SyncAccountTransferRecord {
                 provider_transfer_key: ProviderTransferKey::normal(),
                 transfer_index: 0,
@@ -3675,6 +3883,7 @@ mod tests {
             block_time: Some(fixed_time(23, 14)),
             fee_amount: Some(UnsignedAmount::from_u128(10_000_000_000_000_000_u128)),
             nonce: Some(2_i64),
+            excluded_transfer_keys: Vec::new(),
             transfers: vec![SyncAccountTransferRecord {
                 provider_transfer_key: ProviderTransferKey::normal(),
                 transfer_index: 0,
@@ -3832,7 +4041,7 @@ mod tests {
         assert!(!eth_journal.contains("include "));
         assert!(eth_journal.contains("2026-02-23 * Received Ethereum"));
         assert!(eth_journal.contains(
-            "    ; Transaction bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            "    ; Transaction 0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         ));
         assert!(eth_journal.contains("1.000000000000000000 ETH = 1.000000000000000000 ETH"));
         assert!(eth_journal.contains("2026-02-23 * Sent Ethereum"));
@@ -3845,7 +4054,7 @@ mod tests {
         let received_section = &eth_journal[received_marker..sent_marker];
         assert!(!received_section.contains("expenses:Fees:Ethereum:Network:Mainnet"));
         assert!(eth_journal.contains(
-            "    ; Transaction cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            "    ; Transaction 0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
         ));
         assert!(eth_journal.contains("-0.510000000000000000 ETH = 0.490000000000000000 ETH"));
         assert!(
@@ -4377,5 +4586,190 @@ mod tests {
         assert!(!journal_contents.contains(EMPTY_ACCOUNT_COMMENT));
         assert!(!journal_contents.contains("expenses:unknown"));
         assert!(!journal_contents.contains("income:unknown"));
+    }
+
+    #[test]
+    fn export_failed_ethereum_fee_only_and_year_closing() {
+        let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+        let user_id = UserId::new();
+        initialize_user_db_for_test(user_id).expect("user db should initialize");
+        let temp_root = TempExportRoot::new();
+        let username = "rustic-detective";
+        let (owner_directory_segment, owner_posting_segment) =
+            owner_segments_from_username(username);
+        let now = fixed_time_in_year(2027, 2, 12);
+        insert_test_user(user_id, username, now);
+
+        let owned = EthAddress::parse(&RawEthAddress::new(
+            "0x52908400098527886E0F7030069857D2E4169EE7".to_string(),
+        ))
+        .expect("valid ETH address");
+        let owned_address = owned.checksummed();
+        let external_address = "0x1111111111111111111111111111111111111111";
+        let response = add_ethereum_address(
+            user_id,
+            &owned,
+            Network::Mainnet,
+            None,
+            Some(&wallet_label("Hardware Wallet")),
+            now,
+        )
+        .expect("ethereum account should insert");
+        update_wallet_account_label(
+            user_id,
+            response.account_id,
+            account_label("Ethereum Account"),
+            now,
+        )
+        .expect("account label should update");
+
+        let make_tx =
+            |hash: &str, status, occurred_at, from: &str, to: &str, value, fee, height| {
+                SyncAccountTransactionRecord {
+                    tx_hash: TxHash::parse(hash).expect("valid hash"),
+                    status,
+                    block_height: Some(height),
+                    block_hash: Some(format!("eth-block-{height}")),
+                    block_time: Some(occurred_at),
+                    fee_amount: Some(UnsignedAmount::from_u128(fee)),
+                    nonce: Some(height),
+                    excluded_transfer_keys: Vec::new(),
+                    transfers: vec![SyncAccountTransferRecord {
+                        provider_transfer_key: ProviderTransferKey::normal(),
+                        transfer_index: 0,
+                        transfer_kind: TransferKind::Normal,
+                        from_address: Some(TrackedAddress::parse(from).expect("valid sender")),
+                        to_address: Some(TrackedAddress::parse(to).expect("valid recipient")),
+                        value_amount: UnsignedAmount::from_u128(value),
+                    }],
+                }
+            };
+        let paid_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let unpaid_hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        reconcile_account_transactions(
+            user_id,
+            SyncedAssetId::Ethereum,
+            Network::Mainnet,
+            &[
+                make_tx(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    ChainTransactionStatus::Confirmed,
+                    fixed_time_in_year(2025, 1, 12),
+                    external_address,
+                    &owned_address,
+                    2_000_000_000_000_000_000,
+                    0,
+                    100,
+                ),
+                make_tx(
+                    paid_hash,
+                    ChainTransactionStatus::Failed,
+                    fixed_time_in_year(2026, 1, 12),
+                    &owned_address,
+                    external_address,
+                    400_000_000_000_000_000,
+                    1_000_000_000_000_000,
+                    101,
+                ),
+                make_tx(
+                    unpaid_hash,
+                    ChainTransactionStatus::Failed,
+                    fixed_time_in_year(2026, 2, 12),
+                    external_address,
+                    &owned_address,
+                    300_000_000_000_000_000,
+                    1_000_000_000_000_000,
+                    102,
+                ),
+                make_tx(
+                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    ChainTransactionStatus::Confirmed,
+                    fixed_time_in_year(2027, 1, 12),
+                    external_address,
+                    &owned_address,
+                    1,
+                    0,
+                    103,
+                ),
+            ],
+            now,
+        )
+        .expect("ethereum transactions should reconcile");
+        rebuild_account_transaction_ledger(user_id, response.account_id, now)
+            .expect("ethereum ledger should rebuild");
+
+        let rows = load_account_transaction_ledger_rows_for_export(user_id)
+            .expect("export rows should load");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].tx_hash, paid_hash);
+        assert_eq!(rows[1].status, ChainTransactionStatus::Failed);
+        assert_eq!(rows[1].occurred_at, fixed_time_in_year(2026, 1, 12));
+        assert_eq!(rows[1].balance_delta, -1_000_000_000_000_000);
+
+        let hledger_dir = temp_root.hledger_dir(user_id);
+        let result = export_all_accounts_to_dir(
+            user_id,
+            &hledger_dir,
+            &owner_directory_segment,
+            &owner_posting_segment,
+        )
+        .expect("failed fee export should succeed");
+        assert_eq!(result.transactions_exported, 3);
+        let wallet_segment = normalize_label_for_hledger("Hardware Wallet");
+        let account_segment = normalize_label_for_hledger("Ethereum Account");
+        let journal = std::fs::read_to_string(hledger_owner_account_year_journal_path(
+            &hledger_dir,
+            &owner_directory_segment,
+            &wallet_segment,
+            &account_segment,
+            "2026",
+        ))
+        .expect("2026 journal should exist");
+        assert!(journal.contains("2026-02-01 * Failed transaction fee — Ethereum"));
+        assert!(journal.contains("-0.001000000000000000 ETH = 1.999000000000000000 ETH"));
+        assert!(
+            journal.contains("expenses:Fees:Ethereum:Network:Mainnet    0.001000000000000000 ETH")
+        );
+        assert!(!journal.contains(unpaid_hash));
+        assert!(!journal.contains("0.400000000000000000 ETH"));
+        assert!(!journal.contains("expenses:unknown"));
+        let closing = std::fs::read_to_string(hledger_owner_account_year_closing_journal_path(
+            &hledger_dir,
+            &owner_directory_segment,
+            &wallet_segment,
+            &account_segment,
+            "2026",
+        ))
+        .expect("2026 closing journal should exist");
+        assert!(closing.contains("1.999000000000000000 ETH"));
+
+        with_user_db_mut_for_test(user_id, |connection| {
+            connection
+                .execute(
+                    "UPDATE account_transaction_ledger SET fee_amount_lo = 2000000000000000 WHERE tx_hash = ?1",
+                    params![paid_hash],
+                )
+                .expect("fee should corrupt");
+        });
+        let error = load_account_transaction_ledger_rows_for_export(user_id)
+            .expect_err("mismatched failed fee must reject export");
+        assert!(error.to_string().contains("failed transaction fee/delta"));
+
+        with_user_db_mut_for_test(user_id, |connection| {
+            connection
+                .execute(
+                    "UPDATE account_transaction_ledger SET fee_amount_lo = 1000000000000000, closing_balance_lo = 0 WHERE tx_hash = ?1",
+                    params![paid_hash],
+                )
+                .expect("closing balance should corrupt");
+        });
+        let error = export_all_accounts_to_dir(
+            user_id,
+            &hledger_dir,
+            &owner_directory_segment,
+            &owner_posting_segment,
+        )
+        .expect_err("inconsistent closing balance must reject export");
+        assert!(error.to_string().contains("ledger chain"));
     }
 }
