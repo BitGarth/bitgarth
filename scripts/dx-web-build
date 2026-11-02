@@ -1,3 +1,7 @@
 #!/usr/bin/env sh
 
+# Prefer Cargo-installed Dioxus over other tools named dx (such as Deno).
+PATH="${CARGO_HOME:-"$HOME/.cargo"}/bin:$PATH"
+export PATH
+
 time dx build --web --release --debug-symbols=false

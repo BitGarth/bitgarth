@@ -1,0 +1,113 @@
+name: Docker Release
+
+on:
+  workflow_run:
+    workflows: [CLI and Web Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published stable vMAJOR.MINOR.PATCH tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+# One publisher at a time, including manual recovery. A stale queued run is
+# rejected by the numeric latest-release check immediately before publication.
+concurrency:
+  group: bitgarth-docker-release
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    if: >-
+      github.repository == 'BitGarth/bitgarth' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require exact public CI and complete binary release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.workflow_run.head_branch }}
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          args=("$RELEASE_TAG" --stage binary --require-latest --github-output)
+          if [[ -n "$EXPECTED_SHA" ]]; then args+=(--expected-sha "$EXPECTED_SHA"); fi
+          python3 scripts/release/status.py "${args[@]}"
+
+  build:
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare Docker
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          test -n "$DOCKERHUB_USERNAME" && test -n "$DOCKERHUB_TOKEN"
+          printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+          docker buildx create --use
+          docker buildx inspect --bootstrap
+      - name: Build exact tagged source and smoke-test staging image
+        env:
+          RELEASE_TAG: ${{ needs.gate.outputs.tag }}
+          RELEASE_ARCH: ${{ matrix.arch }}
+        run: |
+          ./scripts/docker-build.sh "build-$RELEASE_ARCH" "$RELEASE_TAG"
+          bash scripts/release/smoke-docker.sh "$RELEASE_TAG" "$RELEASE_ARCH"
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout
+
+  publish:
+    needs: [gate, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Publish verified multi-platform manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.gate.outputs.tag }}
+          RELEASE_SHA: ${{ needs.gate.outputs.sha }}
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          python3 scripts/release/status.py "$RELEASE_TAG" --stage binary --expected-sha "$RELEASE_SHA" --require-latest
+          test -n "$DOCKERHUB_USERNAME" && test -n "$DOCKERHUB_TOKEN"
+          printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+          ./scripts/docker-build.sh publish-manifest "$RELEASE_TAG"
+          python3 scripts/release/status.py "$RELEASE_TAG" --stage docker --expected-sha "$RELEASE_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout

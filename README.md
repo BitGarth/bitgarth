@@ -359,7 +359,10 @@ of Commerce (KVK) 42108345.
 
 # License
 
-BitGarth is source-available under the [Functional Source License 1.1 with
-Apache 2.0 future license](LICENSE.md) (`FSL-1.1-ALv2`). Each published version
-additionally becomes available under the Apache License 2.0 on the second
-anniversary of its publication.
+BitGarth is open source software licensed under the
+[GNU Affero General Public License, version 3 only](LICENSE.md)
+(`AGPL-3.0-only`).
+
+Versions previously published under FSL-1.1-ALv2 retain their original terms,
+including the Apache License 2.0 grant effective on the second anniversary of
+each version's publication.

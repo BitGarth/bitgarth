@@ -27,12 +27,13 @@ usually makes it *harder* for us to fix the bug ourselves — see below.
 Occasionally a proposed change is worth taking. In that case, before anything is
 merged, the contributor must sign the [Contributor License Agreement](CLA.md).
 
-We ask for this because BitGarth is licensed under the
-[Functional Source License](LICENSE.md), which converts each version to Apache
-2.0 after two years, and FernTrail B.V. needs to remain able to change the
-project's licensing in future. Without a signed CLA, every contributor would
-hold a veto over that. The CLA does **not** transfer your copyright — you keep
-it, and you grant FernTrail B.V. a licence broad enough to relicense the work.
+BitGarth is licensed under the
+[GNU Affero General Public License, version 3 only](LICENSE.md)
+(`AGPL-3.0-only`). We ask for a CLA because FernTrail B.V. needs to remain able
+to change the project's licensing in future. Without a signed CLA, every
+contributor would hold a veto over that. The CLA does **not** transfer your
+copyright — you keep it, and you grant FernTrail B.V. a licence broad enough to
+relicense the work.
 
 To sign: read [CLA.md](CLA.md) and follow the "How to sign" section at the end.
 It takes one email. One signature covers all of your future contributions.

@@ -13,6 +13,18 @@ env:
   HLEDGER_LINUX_X64_SHA256: "7a296cbf550a60fc6caf868dcd10d1df0c163c58597b4c40417415d6bd9b5deb"
 
 jobs:
+  release-tools:
+    name: Release tooling
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test release automation without publishing
+        run: |
+          python3 -m unittest discover -s tests -p 'test_release_*.py' -q
+          bash tests/test_docker_build.sh
+
   verify:
     name: Run all tests
     runs-on: ubuntu-latest

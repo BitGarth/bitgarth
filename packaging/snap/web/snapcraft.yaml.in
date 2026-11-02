@@ -17,8 +17,8 @@ description: |
 
   Website and documentation: https://bitgarth.app
 
-  BitGarth is distributed under the FSL-1.1-ALv2 license.
-license: Proprietary
+  BitGarth is distributed under the GNU Affero General Public License, version 3 only.
+license: AGPL-3.0-only
 website: https://bitgarth.app
 source-code: https://github.com/BitGarth/bitgarth
 base: core24

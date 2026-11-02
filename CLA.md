@@ -56,10 +56,9 @@ contributed, any future or replacement licence, additional or alternative
 licences offered in parallel, and separate commercial licences granted to third
 parties.
 
-This clause exists because BitGarth's licence converts each published version to
-the Apache License 2.0 over time, and because future circumstances may call for
-different terms. Without it, every past contributor would hold a veto over the
-project's licensing.
+This clause exists because future circumstances may call for different licence
+terms. Without it, every past contributor would hold a veto over the project's
+licensing.
 
 ## 4. Grant of Patent Licence
 

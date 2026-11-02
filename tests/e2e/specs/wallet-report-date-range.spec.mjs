@@ -90,8 +90,11 @@ test("wallet report canonicalizes missing route and keeps the selected range", a
   expect(canonicalUrl.searchParams.get("from")).toBeNull();
   expect(canonicalUrl.searchParams.get("to")).toBeNull();
 
-  // Date inputs live behind the "Custom range" disclosure now.
-  await reportPage.locator(".date-range-custom-toggle").click();
+  // Clamped ranges already open the custom date fields.
+  const customToggle = reportPage.locator(".date-range-custom-toggle");
+  if ((await customToggle.getAttribute("aria-expanded")) !== "true") {
+    await customToggle.click();
+  }
 
   const startInput = reportPage.locator("#wallet-report-start");
   const endInput = reportPage.locator("#wallet-report-end");
@@ -102,7 +105,10 @@ test("wallet report canonicalizes missing route and keeps the selected range", a
   const previousYearStart = `${previousYear}-01-01`;
   const previousYearEnd = `${previousYear}-12-31`;
 
-  await reportPage.getByRole("button", { name: "Previous year", exact: true }).click();
+  // Set the end first so the intermediate, inverted range does not navigate.
+  await endInput.fill(previousYearEnd);
+  await startInput.fill(previousYearStart);
+  await startInput.press("Tab");
 
   await expect
     .poll(() => {
@@ -119,4 +125,17 @@ test("wallet report canonicalizes missing route and keeps the selected range", a
   assertNoBrowserDiagnostics(diagnostics);
   await reportPage.close();
   await markTestBoundary(testInfo, "END");
+});
+
+test("holdings report canonicalizes a missing range", async ({ page }) => {
+  await registerViaUiAndExpectAuthenticated(page);
+  await page.goto("/reports/holdings");
+  await expect(page.getByRole("heading", { name: "Holdings Report", exact: true })).toBeVisible();
+
+  await expect
+    .poll(() => {
+      const url = new URL(page.url());
+      return Boolean(url.searchParams.get("start") && url.searchParams.get("end"));
+    })
+    .toBe(true);
 });

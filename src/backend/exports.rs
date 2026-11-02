@@ -843,7 +843,7 @@ fn unwrap_wallet_data_zip(
 
     let (entry_name, encrypted) = {
         let entry = archive.by_index_raw(0).map_err(zip_archive_error)?;
-        let entry_name = entry.name().to_string();
+        let entry_name = entry.name().map_err(zip_archive_error)?.into_owned();
         if entry.is_dir() || entry.is_symlink() {
             return Err(ExportError::Validation(
                 "The selected file does not contain a valid wallet-data export.".to_string(),

@@ -419,10 +419,12 @@ pub(crate) fn WalletReport(
         let canonical_range =
             WalletReportDateRange::new(report.resolved_from, report.resolved_to).ok();
         if let Some(canonical_range) = canonical_range {
-            if report.access.range_clamped {
+            if report.access.range_clamped && *active_selection.peek() != DateRangeSelection::Empty
+            {
                 // The server clamped the requested range to the Free window. Show the
                 // effective range in the controls without moving the requested route,
                 // so the fetch (and the Free-window badge) still reflect the request.
+                // A missing range must first be canonicalized from the server response.
                 let outcome = transition_date_range_filter(
                     DateRangeFilterPolicy::RequiredCanonicalRange,
                     &filter_state.peek().clone(),

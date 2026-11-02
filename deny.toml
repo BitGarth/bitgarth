@@ -13,15 +13,6 @@ yanked = "deny"
 # To audit the full list: temporarily set unmaintained = "all" and run
 # `cargo deny check advisories`.
 unmaintained = "workspace"
-ignore = [
-    # quick-xml v0.39.4: build-time proc-macro dependency only, via
-    # iso4217-macros -> iso4217-static -> bitgarth. Not present in the
-    # shipped binary. iso4217-static pins the quick-xml version upstream,
-    # so there is no upgrade path from here. Revisit when iso4217-static
-    # updates its quick-xml dependency.
-    { id = "RUSTSEC-2026-0194", reason = "build-time only via iso4217-macros -> iso4217-static, not in shipped binary, no upgrade path until iso4217-static updates" },
-    { id = "RUSTSEC-2026-0195", reason = "build-time only via iso4217-macros -> iso4217-static, not in shipped binary, no upgrade path until iso4217-static updates" },
-]
 
 [licenses]
 version = 2

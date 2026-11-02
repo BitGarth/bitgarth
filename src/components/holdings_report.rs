@@ -261,7 +261,9 @@ pub(crate) fn HoldingsReport(start: Option<String>, end: Option<String>) -> Elem
         let canonical_range =
             WalletReportDateRange::new(report.resolved_from, report.resolved_to).ok();
         if let Some(canonical_range) = canonical_range {
-            if report.access.range_clamped {
+            // Preserve explicit requests, but canonicalize a missing range even when clamped.
+            if report.access.range_clamped && *active_selection.peek() != DateRangeSelection::Empty
+            {
                 let outcome = transition_date_range_filter(
                     DateRangeFilterPolicy::RequiredCanonicalRange,
                     &filter_state.peek().clone(),
