@@ -36,6 +36,7 @@ mod models;
 mod payments;
 mod report_access;
 mod report_dates;
+mod route_params;
 mod services;
 mod settings;
 mod timezone;
@@ -327,7 +328,9 @@ enum Route {
     Register,
 
     #[route("/pair/:code/login")]
-    PairingLogin { code: String },
+    PairingLogin {
+        code: route_params::PairingLoginCode,
+    },
 
     #[route("/style-guide")]
     StyleGuide,
@@ -382,7 +385,9 @@ enum Route {
     WalletDataExport,
     #[end_layout]
     #[route("/:..segments")]
-    NotFound { segments: Vec<String> },
+    NotFound {
+        segments: route_params::UnmatchedSegments,
+    },
 }
 
 #[cfg(test)]
@@ -396,8 +401,17 @@ mod route_tests {
             .expect("pairing login route with code should parse");
         assert!(matches!(
             route,
-            Route::PairingLogin { code } if code == "544B-CQHN"
+            Route::PairingLogin { code } if code.0 == "544B-CQHN"
         ));
+    }
+
+    #[test]
+    fn unknown_path_round_trips_escaped_text_in_multiple_segments() {
+        let path = "/unknown/a%3Fb/with%20space";
+        let route = Route::from_str(path).expect("unknown path should match the fallback");
+        assert!(matches!(&route, Route::NotFound { segments }
+            if segments.0 == ["unknown", "a?b", "with space"]));
+        assert_eq!(route.to_string(), path);
     }
 }
 

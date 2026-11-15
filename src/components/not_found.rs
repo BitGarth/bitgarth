@@ -10,7 +10,7 @@ fn missing_path(segments: &[String]) -> String {
 }
 
 #[component]
-pub fn NotFound(segments: Vec<String>) -> Element {
+pub fn NotFound(segments: crate::route_params::UnmatchedSegments) -> Element {
     #[cfg(feature = "server")]
     dioxus::fullstack::FullstackContext::commit_http_status(
         dioxus::fullstack::StatusCode::NOT_FOUND,
@@ -21,7 +21,7 @@ pub fn NotFound(segments: Vec<String>) -> Element {
         *use_context::<AuthState>().read(),
         AuthStatus::Authenticated(_)
     );
-    let path = missing_path(&segments);
+    let path = missing_path(&segments.0);
 
     rsx! {
         div { class: "not-found-shell",

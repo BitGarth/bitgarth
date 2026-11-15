@@ -15,7 +15,9 @@ use dioxus::prelude::*;
 #[component]
 pub(crate) fn StyleGuide() -> Element {
     rsx! {
-        crate::components::NotFound { segments: vec!["style-guide".to_string()] }
+        crate::components::NotFound {
+            segments: crate::route_params::UnmatchedSegments(vec!["style-guide".to_string()]),
+        }
     }
 }
 

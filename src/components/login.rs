@@ -18,7 +18,8 @@ pub fn Login() -> Element {
 }
 
 #[component]
-pub fn PairingLogin(code: String) -> Element {
+pub fn PairingLogin(code: crate::route_params::PairingLoginCode) -> Element {
+    let code = code.0;
     let auth_state = use_context::<AuthState>();
     let navigator = use_navigator();
 

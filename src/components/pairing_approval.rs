@@ -122,7 +122,7 @@ pub fn PairingApproval(code: Option<String>) -> Element {
                     p { "Unlock BitGarth before approving a Client Key." }
                     Link {
                         class: "btn btn-primary",
-                        to: Route::PairingLogin { code },
+                        to: Route::PairingLogin { code: crate::route_params::PairingLoginCode(code) },
                         "Sign in"
                     }
                 }
