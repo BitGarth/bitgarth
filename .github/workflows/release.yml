@@ -77,7 +77,8 @@ jobs:
 
       - name: Build web
         if: matrix.product == 'web'
-        run: dx build --web --release --debug-symbols=false --locked
+        shell: bash
+        run: '"${CARGO_HOME:-$HOME/.cargo}/bin/dx" build --web --release --debug-symbols=false --locked'
 
       - name: Stage release files
         shell: bash
@@ -418,7 +419,7 @@ jobs:
             printf 'gh release verify-asset %s ./bitgarth-web-%s-linux-x86_64-gnu.tar.gz -R BitGarth/bitgarth\n' "$tag" "$tag"
             printf 'gh attestation verify ./bitgarth-web-%s-linux-x86_64-gnu.tar.gz -R BitGarth/bitgarth --signer-workflow BitGarth/bitgarth/.github/workflows/release.yml --source-ref refs/tags/%s --source-digest %s\n' "$tag" "$tag" "$(git rev-parse HEAD)"
             printf '%s\n' '```' ''
-            cat "$notes"
+            sed "s/{{public_commit}}/$(git rev-parse HEAD)/g" "$notes"
           } > "$github_notes"
 
           (

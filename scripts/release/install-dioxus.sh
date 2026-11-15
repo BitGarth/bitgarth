@@ -27,4 +27,6 @@ fi
 binary=dx
 if [[ "$target" == *-windows-msvc ]]; then binary=dx.exe; fi
 unzip -q "$archive" "$binary" -d "$work_dir"
-install -m 755 "$work_dir/$binary" "${CARGO_HOME:-$HOME/.cargo}/bin/$binary"
+bin_dir="${CARGO_HOME:-$HOME/.cargo}/bin"
+mkdir -p "$bin_dir"
+install -m 755 "$work_dir/$binary" "$bin_dir/$binary"

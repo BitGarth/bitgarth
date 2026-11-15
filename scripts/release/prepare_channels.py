@@ -135,7 +135,8 @@ def render_umbrel(text, sections, release_version):
 def prepare(tag, landing, umbrel):
     sha, release = binary_release(tag)
     require_latest(tag)
-    sections = parse_notes(source_file(f"docs/release-notes/{tag[1:]}.md", sha).decode(), tag[1:])
+    notes = source_file(f"docs/release-notes/{tag[1:]}.md", sha).decode()
+    sections = parse_notes(notes.replace("{{public_commit}}", sha), tag[1:])
     digest = docker_release(tag, sha)
     landing_path, app_path, compose_path = landing / "releases.html", umbrel / "umbrel-app.yml", umbrel / "docker-compose.yml"
     page, app, compose = map(read_editable, (landing_path, app_path, compose_path))
