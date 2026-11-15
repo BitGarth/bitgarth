@@ -22,7 +22,7 @@ use dioxus::document::eval;
 use dioxus::logger::tracing;
 use dioxus::prelude::*;
 
-use super::{CheckIcon, CopyIcon, ExternalLinkIcon, RefreshIcon, copy_to_clipboard};
+use super::{CheckIcon, CopyFeedback, CopyIcon, ExternalLinkIcon, RefreshIcon, use_copy_feedback};
 
 const ATLOS_SCRIPT_URL: &str = "https://atlos.io/packages/app/atlos.js";
 
@@ -262,6 +262,7 @@ pub fn Payments() -> Element {
     let mut order_history = use_signal(Vec::<PaymentOrderHistoryView>::new);
     let mut app_compatibility = use_signal(|| None::<AppCompatibilityView>);
     let mut options_message = use_signal(|| None::<String>);
+    let mut showing_saved_descriptions = use_signal(|| false);
     let mut pricing_summary = use_signal(|| None::<TierBulletView>);
     let mut selected_term = use_signal(|| None::<String>);
     let mut action_error = use_signal(|| None::<String>);
@@ -308,6 +309,7 @@ pub fn Payments() -> Element {
         match value {
             Some(Ok(catalog)) => {
                 let PaymentCatalogView {
+                    showing_saved_descriptions: saved,
                     tiers,
                     options,
                     app_compatibility: compatibility,
@@ -322,6 +324,7 @@ pub fn Payments() -> Element {
                 let next_term = prior_term
                     .filter(|term| options.iter().any(|o| &o.term_label == term))
                     .or_else(|| default_global_term(&options));
+                showing_saved_descriptions.set(saved);
                 payment_tiers.set(tiers);
                 payment_options.set(options);
                 order_history.set(page_order_history);
@@ -801,6 +804,7 @@ pub fn Payments() -> Element {
                     selected_term: selected_term_snapshot.clone(),
                     app_compatibility: app_compatibility_snapshot.clone(),
                     pricing_summary: pricing_summary_snapshot.clone(),
+                    showing_saved_descriptions: showing_saved_descriptions(),
                     upgrade_detail,
                     upgrade_required,
                     catalog_loading,
@@ -855,6 +859,7 @@ fn PaymentsBody(
     upgrade_detail: Option<String>,
     upgrade_required: bool,
     catalog_loading: bool,
+    showing_saved_descriptions: bool,
     poll_refresh_failed: bool,
     acting: bool,
     widget_phase: WidgetPhase,
@@ -952,6 +957,24 @@ fn PaymentsBody(
                 UpgradeRequiredNotice { detail: upgrade_detail.clone() }
             }
 
+            if !catalog_loading && !upgrade_required && (payment_tiers.is_empty() || showing_saved_descriptions) {
+                div { class: "card payments-catalog-error",
+                    div { class: "card-body",
+                        p { class: "alert alert-error",
+                            "data-testid": "payments-catalog-error",
+                            {upgrade_detail.clone().unwrap_or_else(|| "Could not reach BitGarth's servers.".to_string())}
+                        }
+                        button {
+                            class: "btn btn-secondary",
+                            "data-testid": "payments-catalog-retry",
+                            r#type: "button",
+                            onclick: move |_| on_retry_catalog.call(()),
+                            "Retry"
+                        }
+                    }
+                }
+            }
+
             if catalog_loading {
                 CatalogSkeleton {}
             } else if !payment_tiers.is_empty() {
@@ -994,22 +1017,6 @@ fn PaymentsBody(
                     p {
                         em { "Clear limits." }
                         " BitGarth helps organize records. It is not tax, legal, financial, accounting, or investment advice."
-                    }
-                }
-            } else if !upgrade_required {
-                div { class: "card payments-catalog-error",
-                    div { class: "card-body",
-                        p { class: "alert alert-error",
-                            "data-testid": "payments-catalog-error",
-                            {upgrade_detail.clone().unwrap_or_else(|| "Could not reach BitGarth payment service.".to_string())}
-                        }
-                        button {
-                            class: "btn btn-secondary",
-                            "data-testid": "payments-catalog-retry",
-                            r#type: "button",
-                            onclick: move |_| on_retry_catalog.call(()),
-                            "Retry"
-                        }
                     }
                 }
             }
@@ -1763,11 +1770,14 @@ fn BulletText(bullet: TierBulletView) -> Element {
 
 #[component]
 fn PaymentOrderHistory(orders: Vec<PaymentOrderHistoryView>) -> Element {
-    if orders.is_empty() {
+    // Cancelled orders never charged anything; listing them is noise.
+    let mut ordered_orders: Vec<_> = orders
+        .into_iter()
+        .filter(|order| order.status != PaymentOrderStatusView::Canceled)
+        .collect();
+    if ordered_orders.is_empty() {
         return rsx! {};
     }
-
-    let mut ordered_orders = orders;
     ordered_orders.reverse();
 
     rsx! {
@@ -1789,11 +1799,16 @@ fn PaymentOrderHistoryRow(order: PaymentOrderHistoryView) -> Element {
     let settings_state = use_context::<SettingsState>();
     let date_time_format = (settings_state.date_time_format)();
     let timezone = (settings_state.timezone)();
-    let paid_at = order.paid_at.as_deref().and_then(|raw| {
+    let format_raw = |raw: &str| {
         DateTime::parse_from_rfc3339(raw)
             .ok()
             .map(|dt| format_timestamp(&dt.with_timezone(&Utc), timezone.into(), date_time_format))
-    });
+    };
+    let order_date = match (order.paid_at.as_deref(), order.created_at.as_deref()) {
+        (Some(paid_at), _) => format_raw(paid_at).map(|date| format!("Paid {date}")),
+        (None, Some(created_at)) => format_raw(created_at).map(|date| format!("Ordered {date}")),
+        (None, None) => None,
+    };
     let amount = format!("{} {}", order.display_amount, order.currency);
     let status_tag = payment_order_status_tag(order.status);
     let status_label = payment_order_status_label(order.status);
@@ -1821,8 +1836,8 @@ fn PaymentOrderHistoryRow(order: PaymentOrderHistoryView) -> Element {
             }
             div { class: "payments-history-meta",
                 span { "{plan_label}" }
-                if let Some(paid_at) = paid_at.as_deref() {
-                    span { "{paid_at}" }
+                if let Some(order_date) = order_date.as_deref() {
+                    span { "{order_date}" }
                 }
             }
         }
@@ -2046,24 +2061,18 @@ fn PaymentSummary(
 
 #[component]
 fn PaymentsCopyButton(value: String, aria_label: String) -> Element {
-    let mut copied = use_signal(|| false);
+    let (feedback, copy) = use_copy_feedback(1500);
+    let copied = feedback == CopyFeedback::Copied;
+    let label = feedback.label(&aria_label, "Copied!");
 
     rsx! {
         button {
-            class: if copied() { "inline-copy-btn copied" } else { "inline-copy-btn" },
+            class: if copied { "inline-copy-btn copied" } else { "inline-copy-btn" },
             r#type: "button",
-            "aria-label": if copied() { "Copied!" } else { aria_label.as_str() },
-            title: if copied() { "Copied!" } else { aria_label.as_str() },
-            onclick: move |_| {
-                copy_to_clipboard(&value);
-                copied.set(true);
-                spawn(async move {
-                    let mut timer = eval(r#"setTimeout(() => { dioxus.send(null); }, 1500);"#);
-                    let _ = timer.recv::<serde_json::Value>().await;
-                    copied.set(false);
-                });
-            },
-            if copied() {
+            "aria-label": label,
+            title: label,
+            onclick: move |_| copy.call(value.clone()),
+            if copied {
                 CheckIcon {}
             } else {
                 CopyIcon {}
@@ -2210,6 +2219,7 @@ mod tests {
             display_amount: "9.99".to_string(),
             currency: "USD".to_string(),
             status: PaymentOrderStatusView::Pending,
+            created_at: None,
             paid_at: None,
         }]
     }
@@ -2260,6 +2270,7 @@ mod tests {
                     upgrade_detail: None,
                     upgrade_required: false,
                     catalog_loading: false,
+                    showing_saved_descriptions: false,
                     poll_refresh_failed: false,
                     acting: false,
                     widget_phase: WidgetPhase::Idle,

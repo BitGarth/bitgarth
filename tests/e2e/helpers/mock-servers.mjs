@@ -40,6 +40,7 @@ export async function startMockServers(options = {}) {
   const mempool = await startMockMempoolServer({
     responseDelayMs: mempoolDelayMs,
     addressData: mempoolAddressData,
+    chainTipHeight: options.mempoolChainTipHeight,
   });
 
   try {

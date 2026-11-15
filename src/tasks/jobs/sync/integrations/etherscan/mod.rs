@@ -572,11 +572,7 @@ fn run_etherscan_iteration(
                 None
             }
             Err(_) => {
-                tracing::warn!(
-                    user_id = %run.user_id,
-                    address_id = %address.address_id,
-                    "etherscan balance observation failed after transaction page"
-                );
+                tracing::warn!(target: "wallet_sync", run_id = %run.run_id, "sync provider observation failed");
                 None
             }
         }
@@ -968,7 +964,7 @@ fn fetch_etherscan_api_confirmed_balance(
             if let Ok(request_metadata) = state
                 .client
                 .native_balance_request_metadata(&normalized_address)
-                && let Err(record_error) = record_etherscan_request_failure(
+                && record_etherscan_request_failure(
                     EtherscanRequestFailureRecord {
                         user_id: context.run.user_id,
                         raw_sync_run_id: context.raw_sync_run_id,
@@ -979,13 +975,9 @@ fn fetch_etherscan_api_confirmed_balance(
                     },
                     &error,
                 )
+                .is_err()
             {
-                tracing::warn!(
-                    user_id = %context.run.user_id,
-                    address_id = %context.address.address_id,
-                    error = %record_error,
-                    "etherscan balance failure diagnostics could not be recorded"
-                );
+                tracing::warn!(target: "wallet_sync", run_id = %context.run.run_id, "failed to persist sync diagnostics");
             }
             Err(error.into())
         }

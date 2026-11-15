@@ -220,12 +220,8 @@ fn not_found_error(message: impl Into<String>) -> TransactionsError {
 }
 
 #[cfg(feature = "server")]
-fn internal_error(context: &str, detail: impl std::fmt::Display) -> TransactionsError {
-    tracing::error!(
-        context,
-        error = %detail,
-        "transactions: internal failure"
-    );
+fn internal_error(context: &'static str, _detail: impl std::fmt::Display) -> TransactionsError {
+    tracing::error!(context, "transactions: internal failure");
     TransactionsError::internal()
 }
 
@@ -348,8 +344,13 @@ fn transaction_history_coverage_notice(
 pub(crate) async fn get_sync_state() -> Result<AggregateSyncSnapshot, TransactionsError> {
     tracing::debug!("transactions: sync state requested");
     let initialized_session = initialized_session_from_cookie(&cookies)?;
-    let user_id = initialized_session.session.user_id;
+    get_sync_state_for_user(initialized_session.session.user_id).await
+}
 
+#[cfg(feature = "server")]
+pub(crate) async fn get_sync_state_for_user(
+    user_id: crate::models::UserId,
+) -> Result<AggregateSyncSnapshot, TransactionsError> {
     let snapshot = load_aggregate_sync_snapshot_db(user_id)
         .map_err(|err| internal_error("load_aggregate_sync_snapshot", err))?;
     tracing::debug!(
@@ -367,7 +368,13 @@ pub(crate) async fn get_account_sync_snapshots()
 -> Result<Vec<AccountSyncSnapshot>, TransactionsError> {
     tracing::debug!("transactions: account sync snapshots requested");
     let initialized_session = initialized_session_from_cookie(&cookies)?;
-    let user_id = initialized_session.session.user_id;
+    get_account_sync_snapshots_for_user(initialized_session.session.user_id).await
+}
+
+#[cfg(feature = "server")]
+pub(crate) async fn get_account_sync_snapshots_for_user(
+    user_id: crate::models::UserId,
+) -> Result<Vec<AccountSyncSnapshot>, TransactionsError> {
     let snapshots = load_account_sync_snapshots_db(user_id)
         .map_err(|err| internal_error("load_account_sync_snapshots", err))?;
     let running_accounts = snapshots
@@ -464,6 +471,7 @@ fn page_range(
 fn to_table_response(
     asset_id: crate::wallets::SyncedAssetId,
     page: crate::db::AccountTransactionLedgerPage,
+    prices: Option<&super::transaction_values::TransactionPrices>,
 ) -> Result<crate::wallets::AccountTransactionTableResponse, TransactionsError> {
     let decimal_precision = asset_instance(
         &synced_asset_instance(synced_asset_instance_id(asset_id)).asset_instance_id,
@@ -483,6 +491,15 @@ fn to_table_response(
         .into_iter()
         .map(|row| {
             let balance_reliability = row.balance_reliability;
+            let fiat = prices.and_then(|prices| {
+                super::transaction_values::transaction_fiat_view(
+                    prices,
+                    row.occurred_at,
+                    row.value,
+                    row.fee,
+                    decimal_precision,
+                )
+            });
             crate::wallets::AccountTransactionRowResponse {
                 tx_hash: row.tx_hash,
                 status: row.status,
@@ -498,6 +515,7 @@ fn to_table_response(
                     .closing_balance
                     .map(|value| balance_amount_view(value, decimal_precision)),
                 balance_reliability: balance_reliability.clone(),
+                fiat,
             }
         })
         .collect();
@@ -641,6 +659,7 @@ fn load_manual_asset_account_transactions_response(
     account_id: crate::wallets::WalletAccountId,
     page: u32,
     sort: crate::wallets::TransactionSortDirection,
+    filters: &crate::wallets::TransactionFilters,
 ) -> Result<ManualAssetAccountTransactionsResponse, TransactionsError> {
     let history = load_manual_asset_account_history_db(
         user_id,
@@ -648,8 +667,8 @@ fn load_manual_asset_account_transactions_response(
         page,
         crate::wallets::ACCOUNT_TRANSACTIONS_PAGE_SIZE,
         sort,
-        None,
-        None,
+        filters.from_date.map(|time| time.date_naive()),
+        filters.to_date.map(|time| time.date_naive()),
     )
     .map_err(map_manual_assertion_db_error)?;
 
@@ -670,6 +689,9 @@ fn load_manual_asset_account_transactions_response(
         symbol: history.symbol,
         asset_name: history.asset_name,
         network_name: history.network_name,
+        catalog_asset_key: crate::asset_views::CatalogAssetKey::from_trusted(
+            history.asset_id.as_str(),
+        ),
         opening_balance_state: custom_balance_state_view(
             history.opening_balance_state,
             decimal_precision,
@@ -685,8 +707,8 @@ fn load_manual_asset_account_transactions_response(
             .closing_balance_date
             .map(|date| date.format("%Y-%m-%d").to_string()),
         sort,
-        active_from_date: None,
-        active_to_date: None,
+        active_from_date: filters.from_date.map(|time| time.date_naive().to_string()),
+        active_to_date: filters.to_date.map(|time| time.date_naive().to_string()),
         assertions: to_manual_assertion_table_response(history.assertions, decimal_precision),
     })
 }
@@ -703,6 +725,27 @@ pub(crate) async fn get_account_transactions(
     filters: Option<String>,
 ) -> Result<WalletAccountHistoryResponse, TransactionsError> {
     tracing::debug!("transactions: account transactions requested");
+    let initialized_session = initialized_session_from_cookie(&cookies)?;
+    get_account_transactions_for_user(
+        initialized_session.session.user_id,
+        account_id,
+        pending_page,
+        confirmed_page,
+        sort,
+        filters,
+    )
+    .await
+}
+
+#[cfg(feature = "server")]
+pub(crate) async fn get_account_transactions_for_user(
+    user_id: crate::models::UserId,
+    account_id: crate::wallets::WalletAccountId,
+    pending_page: Option<u32>,
+    confirmed_page: Option<u32>,
+    sort: Option<String>,
+    filters: Option<String>,
+) -> Result<WalletAccountHistoryResponse, TransactionsError> {
     let validated = crate::wallets::GetAccountTransactionsRequest {
         account_id,
         pending_page,
@@ -712,9 +755,6 @@ pub(crate) async fn get_account_transactions(
     }
     .try_into_validated()
     .map_err(validation_error)?;
-
-    let initialized_session = initialized_session_from_cookie(&cookies)?;
-    let user_id = initialized_session.session.user_id;
     let account_kind = resolve_wallet_account_record_kind_db(user_id, validated.account_id)
         .map_err(|err| internal_error("resolve_wallet_account_record_kind", err))?
         .ok_or_else(|| not_found_error("Account not found"))?;
@@ -752,6 +792,31 @@ pub(crate) async fn get_account_transactions(
                 )
             })?;
             let decimal_precision = instance.decimal_precision;
+            let settled_flows = crate::db::load_account_settled_transaction_flows(
+                user_id,
+                native_account_id,
+                &validated.filters,
+            )
+            .map_err(|err| internal_error("load_account_settled_transaction_flows", err))?;
+            let priced_timestamps: Vec<_> = settled_flows
+                .iter()
+                .map(|row| row.occurred_at)
+                .chain(db_response.pending.rows.iter().map(|row| row.occurred_at))
+                .chain(db_response.confirmed.rows.iter().map(|row| row.occurred_at))
+                .collect();
+            let transaction_prices = super::transaction_values::resolve_transaction_prices(
+                user_id,
+                db_response.asset_id,
+                db_response.network,
+                &priced_timestamps,
+            )
+            .map_err(|err| internal_error("resolve_transaction_prices", err))?;
+            let flow_summary = super::transaction_values::summarize_flows(
+                &settled_flows,
+                transaction_prices.as_ref(),
+                decimal_precision,
+            )
+            .map_err(|err| internal_error("summarize_flows", err))?;
             let estimated_tx_count =
                 crate::db::load_account_mempool_expected_tx_count(user_id, native_account_id)
                     .map_err(|err| internal_error("load_account_mempool_expected_tx_count", err))?;
@@ -907,8 +972,18 @@ pub(crate) async fn get_account_transactions(
                     active_from_date: validated.filters.from_date.map(|d| d.to_rfc3339()),
                     active_to_date: validated.filters.to_date.map(|d| d.to_rfc3339()),
                     confirmed_empty_hint,
-                    pending: to_table_response(db_response.asset_id, db_response.pending)?,
-                    confirmed: to_table_response(db_response.asset_id, db_response.confirmed)?,
+                    fiat_currency: transaction_prices.as_ref().map(|prices| prices.currency),
+                    flow_summary,
+                    pending: to_table_response(
+                        db_response.asset_id,
+                        db_response.pending,
+                        transaction_prices.as_ref(),
+                    )?,
+                    confirmed: to_table_response(
+                        db_response.asset_id,
+                        db_response.confirmed,
+                        transaction_prices.as_ref(),
+                    )?,
                 },
             ))
         }
@@ -918,6 +993,7 @@ pub(crate) async fn get_account_transactions(
                 validated.account_id,
                 validated.confirmed_page,
                 validated.sort,
+                &validated.filters,
             )?,
         )),
     }
@@ -932,7 +1008,14 @@ pub(crate) async fn add_manual_asset_balance_assertion(
         "transactions: add manual asset balance assertion requested"
     );
     let initialized_session = initialized_session_from_cookie(&cookies)?;
-    let user_id = initialized_session.session.user_id;
+    add_manual_asset_balance_assertion_for_user(initialized_session.session.user_id, request).await
+}
+
+#[cfg(feature = "server")]
+pub(crate) async fn add_manual_asset_balance_assertion_for_user(
+    user_id: crate::models::UserId,
+    request: AddManualAssetBalanceAssertionRequest,
+) -> Result<AddManualAssetBalanceAssertionResponse, TransactionsError> {
     let decimal_precision = resolve_decimal_precision(user_id, request.account_id)?;
 
     let validated = request
@@ -954,7 +1037,15 @@ pub(crate) async fn update_manual_asset_balance_assertion(
         "transactions: update manual asset balance assertion requested"
     );
     let initialized_session = initialized_session_from_cookie(&cookies)?;
-    let user_id = initialized_session.session.user_id;
+    update_manual_asset_balance_assertion_for_user(initialized_session.session.user_id, request)
+        .await
+}
+
+#[cfg(feature = "server")]
+pub(crate) async fn update_manual_asset_balance_assertion_for_user(
+    user_id: crate::models::UserId,
+    request: UpdateManualAssetBalanceAssertionRequest,
+) -> Result<(), TransactionsError> {
     let decimal_precision = resolve_decimal_precision(user_id, request.account_id)?;
 
     let validated = request
@@ -975,8 +1066,21 @@ pub(crate) async fn delete_manual_asset_balance_assertion(
         "transactions: delete manual asset balance assertion requested"
     );
     let initialized_session = initialized_session_from_cookie(&cookies)?;
-    let user_id = initialized_session.session.user_id;
-    delete_manual_asset_balance_assertion_db(user_id, request.assertion_id)
+    delete_manual_asset_balance_assertion_for_user(
+        initialized_session.session.user_id,
+        None,
+        request,
+    )
+    .await
+}
+
+#[cfg(feature = "server")]
+pub(crate) async fn delete_manual_asset_balance_assertion_for_user(
+    user_id: crate::models::UserId,
+    expected_account: Option<crate::wallets::WalletAccountId>,
+    request: DeleteManualAssetBalanceAssertionRequest,
+) -> Result<(), TransactionsError> {
+    delete_manual_asset_balance_assertion_db(user_id, expected_account, request.assertion_id)
         .map_err(map_manual_assertion_db_error)?;
     Ok(())
 }
@@ -989,10 +1093,17 @@ pub(crate) async fn trigger_sync(
         request = ?request,
         "transactions: sync trigger requested"
     );
+    let initialized_session = initialized_session_from_cookie(&cookies)?;
+    trigger_sync_for_user(initialized_session.session.user_id, request).await
+}
+
+#[cfg(feature = "server")]
+pub(crate) async fn trigger_sync_for_user(
+    user_id: crate::models::UserId,
+    request: RawTransactionSyncTriggerRequest,
+) -> Result<TriggerSyncResponse, TransactionsError> {
     let validated = request.try_into_validated().map_err(validation_error)?;
     let task_source = task_trigger_source(validated.source);
-    let initialized_session = initialized_session_from_cookie(&cookies)?;
-    let user_id = initialized_session.session.user_id;
     let run_id = TransactionSyncRunId::new();
 
     match validated.scope {
@@ -1177,6 +1288,8 @@ mod tests {
             active_from_date: None,
             active_to_date: None,
             confirmed_empty_hint: None,
+            fiat_currency: None,
+            flow_summary: None,
             pending: empty_table.clone(),
             confirmed: empty_table,
         };
@@ -1421,6 +1534,7 @@ fn transactions_error_to_status(error: TransactionsError) -> AxumStatusCode {
         ApiErrorCode::Conflict => AxumStatusCode::CONFLICT,
         ApiErrorCode::NotFound => AxumStatusCode::NOT_FOUND,
         ApiErrorCode::TooManyRequests => AxumStatusCode::TOO_MANY_REQUESTS,
+        ApiErrorCode::ServiceUnavailable => AxumStatusCode::SERVICE_UNAVAILABLE,
         ApiErrorCode::Internal => AxumStatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -1497,12 +1611,8 @@ async fn forward_sync_events(
         };
         let serialized = match serde_json::to_string(&sync_event) {
             Ok(payload) => payload,
-            Err(err) => {
-                tracing::warn!(
-                    user_id = %user_id,
-                    error = %err,
-                    "transactions sse: failed to serialize sync event"
-                );
+            Err(_) => {
+                tracing::warn!("transactions sse: failed to serialize sync event");
                 continue;
             }
         };

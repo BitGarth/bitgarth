@@ -57,7 +57,7 @@ pub(crate) fn list_all_api_keys(
             let (provider_raw, api_key_raw) =
                 row.map_err(|error| DbError::new(format!("Failed to map API key row: {error}")))?;
             let Some(provider) = ApiKeyProvider::from_storage_key(&provider_raw) else {
-                tracing::debug!(provider = %provider_raw, "api keys: skipping unknown provider row");
+                tracing::debug!("api keys: skipping unknown provider row");
                 continue;
             };
             let Some(api_key) = SimpleApiKey::from_non_empty_storage(api_key_raw) else {

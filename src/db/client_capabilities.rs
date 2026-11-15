@@ -24,6 +24,7 @@ fn parse_record(row: &Row<'_>) -> rusqlite::Result<ClientCapabilityRecord> {
     let expires_at_raw: Option<String> = row.get(7)?;
     let last_used_at_raw: Option<String> = row.get(8)?;
     let revoked_at_raw: Option<String> = row.get(9)?;
+    let permission_cap_raw: Option<String> = row.get(10)?;
 
     let capability_id =
         CapabilityId::from_str(&capability_id_raw).map_err(|error| invalid_column(0, error))?;
@@ -51,6 +52,9 @@ fn parse_record(row: &Row<'_>) -> rusqlite::Result<ClientCapabilityRecord> {
         wrapped_dek: row.get(3)?,
         wrap_nonce: row.get(4)?,
         permission,
+        permission_cap: permission_cap_raw
+            .map(|raw| ClientPermission::from_db(&raw).map_err(|error| invalid_column(10, error)))
+            .transpose()?,
         created_at,
         expires_at: parse_optional_time(7, expires_at_raw)?,
         last_used_at: parse_optional_time(8, last_used_at_raw)?,
@@ -58,12 +62,15 @@ fn parse_record(row: &Row<'_>) -> rusqlite::Result<ClientCapabilityRecord> {
     })
 }
 
-const RECORD_COLUMNS: &str = "capability_id, user_id, key_verifier, wrapped_dek, wrap_nonce, permission, created_at, expires_at, last_used_at, revoked_at";
+const RECORD_COLUMNS: &str = "capability_id, user_id, key_verifier, wrapped_dek, wrap_nonce, permission, created_at, expires_at, last_used_at, revoked_at, permission_cap";
 
 pub(crate) fn insert_active_client_capability(
     record: &ClientCapabilityRecord,
 ) -> Result<(), DbError> {
-    if record.wrapped_dek.is_some() != record.wrap_nonce.is_some() || record.revoked_at.is_some() {
+    if record.wrapped_dek.is_some() != record.wrap_nonce.is_some()
+        || record.revoked_at.is_some()
+        || record.permission_cap.is_some()
+    {
         return Err(DbError::new(
             "active client capability requires matching wrap material and no revocation",
         ));
@@ -192,7 +199,7 @@ pub(crate) fn record_client_capability_activity(
     capability_id: CapabilityId,
     user_id: UserId,
     now: DateTime<Utc>,
-) -> Result<(), DbError> {
+) -> Result<bool, DbError> {
     super::with_db_mut(|conn| {
         let transaction = conn.transaction().map_err(|error| {
             DbError::from_rusqlite_error("begin capability activity update", error)
@@ -207,7 +214,7 @@ pub(crate) fn record_client_capability_activity(
             )
             .map_err(|error| DbError::from_rusqlite_error("update capability activity", error))?;
         if updated != 1 {
-            return Err(DbError::new("client capability is not active"));
+            return Ok(false);
         }
         transaction
             .execute(
@@ -218,7 +225,7 @@ pub(crate) fn record_client_capability_activity(
         transaction
             .commit()
             .map_err(|error| DbError::from_rusqlite_error("commit capability activity", error))?;
-        Ok(())
+        Ok(true)
     })
 }
 
@@ -243,6 +250,26 @@ pub(crate) fn list_expired_client_capabilities(
             })?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| DbError::from_rusqlite_error("read expired capability list", error))
+    })
+}
+
+/// Lowers an active capability's access. Returns false when no active
+/// capability matched. Callers must check that `cap` is below the current
+/// effective permission; enforcement takes the minimum either way.
+pub(crate) fn limit_client_capability(
+    user_id: UserId,
+    capability_id: CapabilityId,
+    cap: ClientPermission,
+) -> Result<bool, DbError> {
+    super::with_db_mut(|conn| {
+        let updated = conn
+            .execute(
+                "UPDATE client_capabilities SET permission_cap = ?1
+                 WHERE capability_id = ?2 AND user_id = ?3 AND revoked_at IS NULL",
+                params![cap.as_str(), capability_id.to_string(), user_id.to_string()],
+            )
+            .map_err(|error| DbError::from_rusqlite_error("limit client capability", error))?;
+        Ok(updated == 1)
     })
 }
 
@@ -355,6 +382,7 @@ mod tests {
             wrapped_dek: Some(vec![1, 2, 3]),
             wrap_nonce: Some(vec![4; 12]),
             permission: ClientPermission::BalancesRead,
+            permission_cap: None,
             created_at: now,
             expires_at,
             last_used_at: None,
@@ -416,6 +444,7 @@ mod tests {
                 "expires_at",
                 "last_used_at",
                 "revoked_at",
+                "permission_cap",
             ]
         );
         assert!(
@@ -531,7 +560,10 @@ mod tests {
                 .expect("revoked capability lookup should succeed")
                 .is_none()
         );
-        assert!(record_client_capability_activity(capability_id, user_id, now).is_err());
+        assert!(
+            !record_client_capability_activity(capability_id, user_id, now)
+                .expect("inactive check")
+        );
 
         let expired_id = CapabilityId::from_bytes([7_u8; 32]);
         insert_active_client_capability(&active_unencrypted_record(
@@ -683,5 +715,42 @@ mod tests {
         .expect("activity timestamps should load");
         assert_eq!(capability_activity, now.to_rfc3339());
         assert_eq!(user_activity, now.to_rfc3339());
+    }
+
+    #[test]
+    fn permission_cap_only_lowers_effective_permission() {
+        let (_runtime, user_id) = setup();
+        let now = Utc::now();
+        let capability_id = CapabilityId::from_bytes([30_u8; 32]);
+        let mut record = active_record(user_id, capability_id, &[30_u8; 32], now, None);
+        record.permission = ClientPermission::Full;
+        insert_active_client_capability(&record).expect("capability should insert");
+
+        assert!(
+            limit_client_capability(user_id, capability_id, ClientPermission::Read)
+                .expect("limit should run")
+        );
+        let limited = load_client_capability(capability_id)
+            .expect("load should run")
+            .expect("capability should exist");
+        assert_eq!(limited.permission, ClientPermission::Full);
+        assert_eq!(limited.permission_cap, Some(ClientPermission::Read));
+        assert_eq!(limited.effective_permission(), ClientPermission::Read);
+
+        // A cap above the granted permission (e.g. a hand-edited row) changes nothing.
+        let mut read_only = limited.clone();
+        read_only.permission = ClientPermission::Read;
+        read_only.permission_cap = Some(ClientPermission::Full);
+        assert_eq!(read_only.effective_permission(), ClientPermission::Read);
+
+        revoke_client_capability(user_id, capability_id, now).expect("revoke should run");
+        assert!(
+            !limit_client_capability(user_id, capability_id, ClientPermission::BalancesRead)
+                .expect("limit should run")
+        );
+        assert!(
+            !limit_client_capability(UserId::new(), capability_id, ClientPermission::Read)
+                .expect("limit should run")
+        );
     }
 }

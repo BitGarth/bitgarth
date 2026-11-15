@@ -74,12 +74,8 @@ const LOGIN_ENVELOPE_READ_SUPPORT_CODE: &str = "AUTH-LOGIN-ENVELOPE-READ";
 const LOGIN_ENVELOPE_UNLOCK_SUPPORT_CODE: &str = "AUTH-LOGIN-ENVELOPE-UNLOCK";
 
 #[cfg(feature = "server")]
-fn internal_error(context: &str, detail: impl std::fmt::Display) -> AuthError {
-    tracing::error!(
-        context,
-        error = %detail,
-        "auth: internal failure"
-    );
+fn internal_error(context: &str, _detail: impl std::fmt::Display) -> AuthError {
+    tracing::error!(context, "auth: internal failure");
     AuthError::internal()
 }
 
@@ -90,25 +86,35 @@ fn login_support_error(
     technical_detail: impl Into<String>,
     support_code: &str,
 ) -> AuthError {
+    // Paths, user IDs and parser detail stay in the server log; the user sees
+    // the summary and a support code to quote.
     let envelope_path = user_envelope_path(user_id)
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| "unavailable".to_string());
-    let technical_detail = technical_detail.into();
-    let message = format!(
-        "{summary} User ID: {user_id}. Envelope file: {envelope_path}. Technical detail: {technical_detail}. Support code: {support_code}."
+    let technical_detail: String = technical_detail.into();
+    tracing::error!(
+        user_id = %user_id,
+        envelope_path = %envelope_path,
+        technical_detail = %technical_detail,
+        support_code,
+        "auth: login blocked"
     );
-    AuthError::conflict(message, FieldErrors::new())
+    AuthError::conflict(
+        format!("{summary} Support code: {support_code}."),
+        FieldErrors::new(),
+    )
 }
 
 #[cfg(feature = "server")]
 fn login_envelope_read_error(user_id: UserId, detail: impl Into<String>) -> AuthError {
     let detail = detail.into();
-    let summary = if detail.starts_with("Envelope file not found at ") {
-        "Your account cannot be opened because its encrypted database envelope file is missing. BitGarth verified your password, but the JSON envelope required to unlock your private database was not found."
+    let missing = detail.starts_with("Envelope file not found at ");
+    let summary = if missing {
+        "Your password is correct, but the file that unlocks your encrypted data is missing, so your account cannot be opened."
     } else {
-        "Your account cannot be opened because its encrypted database envelope is unreadable. BitGarth verified your password, but the JSON envelope required to unlock your private database could not be read."
+        "Your password is correct, but the file that unlocks your encrypted data could not be read, so your account cannot be opened."
     };
-    let support_code = if detail.starts_with("Envelope file not found at ") {
+    let support_code = if missing {
         LOGIN_ENVELOPE_MISSING_SUPPORT_CODE
     } else {
         LOGIN_ENVELOPE_READ_SUPPORT_CODE
@@ -120,7 +126,7 @@ fn login_envelope_read_error(user_id: UserId, detail: impl Into<String>) -> Auth
 fn login_envelope_unlock_error(user_id: UserId, detail: impl Into<String>) -> AuthError {
     login_support_error(
         user_id,
-        "Your account cannot be opened because its encrypted database envelope could not unlock the database key. BitGarth verified your password, but the stored envelope wrapper could not decrypt the key needed to open your private database.",
+        "Your password is correct, but the key that unlocks your encrypted data could not be decrypted, so your account cannot be opened.",
         detail,
         LOGIN_ENVELOPE_UNLOCK_SUPPORT_CODE,
     )
@@ -408,6 +414,18 @@ fn get_user_by_username(username: &ValidatedUsername) -> Option<User> {
         "auth: lookup user by username"
     );
     user
+}
+
+/// Username for a paired client's `/api/v1/me` response.
+#[cfg(all(
+    feature = "server",
+    any(
+        all(not(test), not(feature = "desktop")),
+        all(test, not(bitgarth_db_unit_only))
+    )
+))]
+pub(crate) fn username_for_user(user_id: UserId) -> Option<String> {
+    get_user_by_id(&user_id).map(|user| user.username.as_str().to_owned())
 }
 
 #[cfg(feature = "server")]
@@ -842,11 +860,7 @@ pub(crate) async fn login(
     );
 
     let envelope = read_envelope(user.user_id).map_err(|e| {
-        tracing::error!(
-            user_id = %user.user_id,
-            error = %e,
-            "auth: login blocked by envelope read failure"
-        );
+        tracing::error!("auth: login blocked by envelope read failure");
         login_envelope_read_error(user.user_id, e.to_string())
     })?;
 
@@ -855,11 +869,7 @@ pub(crate) async fn login(
             let dek = envelope
                 .unwrap_with_password(validated.password.as_str())
                 .map_err(|e| {
-                    tracing::error!(
-                        user_id = %user.user_id,
-                        error = %e,
-                        "auth: login blocked by envelope unlock failure"
-                    );
+                    tracing::error!("auth: login blocked by envelope unlock failure");
                     login_envelope_unlock_error(user.user_id, e.to_string())
                 })?;
             let sqlcipher_compatibility = envelope.sqlcipher_compatibility().ok_or_else(|| {
@@ -910,13 +920,8 @@ pub(crate) async fn login(
     );
 
     if let Err(error) = record_last_login(user.user_id, Utc::now()) {
-        if let Err(delete_error) = session::delete_session(&sess.token) {
-            tracing::warn!(
-                user_id = %user.user_id,
-                session_id = %sess.session_id,
-                error = %delete_error,
-                "auth: failed to remove session after last_login_at write failure"
-            );
+        if session::delete_session(&sess.token).is_err() {
+            tracing::warn!("auth: failed to remove session after last_login_at write failure");
         }
         return Err(error);
     }
@@ -1128,12 +1133,8 @@ pub(crate) async fn change_password(
                 .map_err(|e| internal_error("update_password_hash", e))?;
 
             envelope.compact_password_wrappers(new_wrap_id.as_str());
-            if let Err(e) = write_envelope(user_id, &envelope) {
-                tracing::warn!(
-                    user_id = %user_id,
-                    error = %e,
-                    "auth: change password envelope compaction failed (non-fatal)"
-                );
+            if write_envelope(user_id, &envelope).is_err() {
+                tracing::warn!("auth: change password envelope compaction failed (non-fatal)");
             }
 
             tracing::debug!(
@@ -1974,14 +1975,15 @@ mod tests {
         assert!(
             error
                 .message
-                .contains("encrypted database envelope file is missing")
+                .contains("unlocks your encrypted data is missing")
         );
+        assert!(error.message.contains(LOGIN_ENVELOPE_MISSING_SUPPORT_CODE));
+        // Internal details belong in the logs, not the sign-in screen.
         assert!(
-            error
+            !error
                 .message
                 .contains(&register_response.user.user_id.to_string())
         );
-        assert!(error.message.contains(&envelope_path.display().to_string()));
-        assert!(error.message.contains(LOGIN_ENVELOPE_MISSING_SUPPORT_CODE));
+        assert!(!error.message.contains(&envelope_path.display().to_string()));
     }
 }

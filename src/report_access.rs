@@ -1,4 +1,3 @@
-#[cfg(any(feature = "server", test))]
 use crate::report_dates::LocalReportDateRange;
 #[cfg(any(feature = "server", test))]
 use chrono::Months;
@@ -20,6 +19,18 @@ pub(crate) struct ReportAccessView {
     pub(crate) gate: ReportAccessGate,
     pub(crate) range_clamped: bool,
     pub(crate) can_edit_prices: bool,
+}
+
+impl ReportAccessView {
+    /// Reports fall back to the whole allowed window for a disjoint request.
+    /// A Prices page lookup must stay within the dates the user selected.
+    pub(crate) fn requested_overlap(self) -> Option<LocalReportDateRange> {
+        LocalReportDateRange::new(
+            self.requested_from.max(self.effective_from),
+            self.requested_to.min(self.effective_to),
+        )
+        .ok()
+    }
 }
 
 #[cfg(any(feature = "server", test))]

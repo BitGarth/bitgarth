@@ -18,7 +18,7 @@ pub(crate) enum AppDbStage {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MigrationIdentity {
-    pub(crate) version: u32,
+    pub(crate) version: i32,
     pub(crate) name: String,
     pub(crate) checksum: u64,
 }

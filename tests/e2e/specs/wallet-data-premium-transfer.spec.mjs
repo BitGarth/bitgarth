@@ -337,7 +337,7 @@ test("wallet-data subscription transfer service failure keeps retry available", 
   await page.getByTestId("wallet-data-subscription-transfer-confirm-button").click();
 
   await expect(page.getByTestId("wallet-data-subscription-transfer-result")).toContainText(
-    "could not reach the payment service",
+    "servers could not be reached reliably",
     { timeout: 10_000 },
   );
   await expect(page.getByTestId("wallet-data-subscription-transfer-confirm-button")).toBeVisible();

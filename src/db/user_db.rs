@@ -120,8 +120,12 @@ impl UserDbLockState {
 }
 
 #[cfg(any(test, debug_assertions))]
-static USER_DB_LOCK_STATES: Lazy<Mutex<HashMap<ScopedUserDbKey, UserDbLockState>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+thread_local! {
+    // Database closures run synchronously. A different request can hold a read
+    // lock while this thread safely publishes an event or dispatches HTTP.
+    static USER_DB_LOCK_STATES: std::cell::RefCell<HashMap<ScopedUserDbKey, UserDbLockState>> =
+        std::cell::RefCell::new(HashMap::new());
+}
 
 #[cfg(any(test, debug_assertions))]
 #[derive(Clone, Copy)]
@@ -139,19 +143,13 @@ struct UserDbLockTracker {
 #[cfg(any(test, debug_assertions))]
 impl UserDbLockTracker {
     fn acquire(key: ScopedUserDbKey, kind: UserDbLockKind) -> Self {
-        let mut guard = match USER_DB_LOCK_STATES.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let state = guard.entry(key).or_default();
-        match kind {
-            UserDbLockKind::Read => {
-                state.read_locks = state.read_locks.saturating_add(1);
+        USER_DB_LOCK_STATES.with_borrow_mut(|locks| {
+            let state = locks.entry(key).or_default();
+            match kind {
+                UserDbLockKind::Read => state.read_locks += 1,
+                UserDbLockKind::Write => state.write_locks += 1,
             }
-            UserDbLockKind::Write => {
-                state.write_locks = state.write_locks.saturating_add(1);
-            }
-        }
+        });
         Self { key, kind }
     }
 }
@@ -159,35 +157,25 @@ impl UserDbLockTracker {
 #[cfg(any(test, debug_assertions))]
 impl Drop for UserDbLockTracker {
     fn drop(&mut self) {
-        let mut guard = match USER_DB_LOCK_STATES.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let Some(state) = guard.get_mut(&self.key) else {
-            return;
-        };
-        match self.kind {
-            UserDbLockKind::Read => {
-                state.read_locks = state.read_locks.saturating_sub(1);
+        USER_DB_LOCK_STATES.with_borrow_mut(|locks| {
+            let Some(state) = locks.get_mut(&self.key) else {
+                return;
+            };
+            match self.kind {
+                UserDbLockKind::Read => state.read_locks -= 1,
+                UserDbLockKind::Write => state.write_locks -= 1,
             }
-            UserDbLockKind::Write => {
-                state.write_locks = state.write_locks.saturating_sub(1);
+            if state.is_unlocked() {
+                locks.remove(&self.key);
             }
-        }
-        if state.is_unlocked() {
-            guard.remove(&self.key);
-        }
+        });
     }
 }
 
 #[cfg(any(test, debug_assertions))]
 fn current_user_db_lock_state(user_id: UserId) -> UserDbLockState {
     let key = ScopedUserDbKey::new(user_id);
-    let guard = match USER_DB_LOCK_STATES.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    guard.get(&key).copied().unwrap_or_default()
+    USER_DB_LOCK_STATES.with_borrow(|locks| locks.get(&key).copied().unwrap_or_default())
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -573,8 +561,7 @@ fn prepare_new_user_db_for_incremental_vacuum(
         )));
     }
 
-    tracing::info!(
-        user_id = %user_id,
+    tracing::debug!(
         auto_vacuum_mode = mode.as_str(),
         "user db: enabled incremental auto_vacuum for new database"
     );
@@ -783,67 +770,37 @@ fn open_user_connections(
         UserDbOpenMode::PlaintextTest => (None, None, None),
     };
 
-    if is_test_mode() {
-        tracing::info!(
-            user_id = %user_id,
-            read_handles = READ_CONNECTION_POOL_SIZE,
-            encrypted_authority = ?encrypted_authority,
-            "user db: opening shared in-memory read/write databases (test mode)"
-        );
-    } else {
-        let db_path = get_user_database_path(user_id)?;
-        tracing::info!(
-            user_id = %user_id,
-            path = ?db_path,
-            read_handles = READ_CONNECTION_POOL_SIZE,
-            encrypted_authority = ?encrypted_authority,
-            "user db: opening read/write databases"
-        );
-    }
+    tracing::debug!(
+        read_handles = READ_CONNECTION_POOL_SIZE,
+        encrypted_authority = ?encrypted_authority,
+        "user db: opening read/write databases"
+    );
 
     let mut write_conn =
         open_user_write_connection(scoped_key, dek.as_ref(), sqlcipher_compatibility.as_ref())?;
     prepare_new_user_db_for_incremental_vacuum(&write_conn, user_id)?;
-    configure_connection(
-        &write_conn,
-        &format!("user db write handle for user {user_id}"),
-        !is_test_mode(),
-    );
+    configure_connection(&write_conn, "user db write handle", !is_test_mode());
 
     let runner = migrations_runner()?;
     let report = runner
         .run(&mut write_conn)
+        .inspect_err(|_| tracing::error!(database = "user db", "migration failed"))
         .map_err(|e| DbError::new(format!("Failed to run user migrations: {}", e)))?;
 
-    let applied_count = report.applied_migrations().len();
-    match runner
+    let last_migration = runner
         .get_last_applied_migration(&mut write_conn)
-        .map_err(|e| DbError::new(format!("Failed to query user schema version: {}", e)))?
-    {
-        Some(migration) => {
-            tracing::info!(
-                "user db: migrations completed for user {} — schema version V{}__{}, applied {} new migration(s)",
-                user_id,
-                migration.version(),
-                migration.name(),
-                applied_count,
-            );
-        }
-        None => {
-            tracing::info!(
-                "user db: migrations completed for user {} — no migrations applied (empty schema)",
-                user_id,
-            );
-        }
-    }
+        .map_err(|e| DbError::new(format!("Failed to query user schema version: {e}")))?;
+    super::sqlite_config::log_migration_result(
+        "user db",
+        last_migration,
+        report.applied_migrations().len(),
+    );
     ensure_required_user_schema(&write_conn)?;
-    crate::db::run_pending_user_data_repairs_conn(&mut write_conn, user_id, Utc::now())?;
+    crate::db::run_pending_user_data_repairs_conn(&mut write_conn, Utc::now())?;
     let repaired_legacy_mempool_heads =
         crate::db::raw_ingestion::repair_legacy_mempool_head_rebuild_contract(&mut write_conn)?;
     if repaired_legacy_mempool_heads > 0 {
         tracing::info!(
-            user_id = %user_id,
-            repaired_legacy_mempool_heads,
             "user db: repaired legacy mempool current-head lineage before opening read handles"
         );
     }
@@ -858,14 +815,10 @@ fn open_user_connections(
     for read_index in 0..READ_CONNECTION_POOL_SIZE {
         let read_conn =
             open_user_read_connection(scoped_key, dek.as_ref(), sqlcipher_compatibility.as_ref())?;
-        configure_connection(
-            &read_conn,
-            &format!("user db read handle {read_index} for user {user_id}"),
-            false,
-        );
+        configure_connection(&read_conn, "user db read handle", false);
         if let Err(err) = read_conn.pragma_update(None, "query_only", "ON") {
             tracing::warn!(
-                "user db read handle {read_index} for user {user_id}: failed to enable query_only: {err}"
+                read_index, sqlite_code = ?err.sqlite_error_code(), "user db read handle: failed to enable query_only"
             );
         }
         read_conns.push(Mutex::new(read_conn));
@@ -910,10 +863,7 @@ pub(crate) fn initialize_user_db(
         && let Some(initialized) = entry.get()
     {
         if is_compatible_with(&initialized.open_mode, &open_mode) {
-            tracing::debug!(
-                user_id = %user_id,
-                "user db: already initialized with compatible mode"
-            );
+            tracing::debug!("user db: already initialized with compatible mode");
             return Ok(());
         } else {
             return Err(DbError::new(format!(
@@ -934,7 +884,7 @@ pub(crate) fn close_user_db(user_id: UserId) -> Result<(), DbError> {
         .map_err(|err| DbError::new(format!("Failed to acquire user db write lock: {err}")))?;
 
     if guard.remove(&scoped_key).is_some() {
-        tracing::info!("user db: closed connection for user {}", user_id);
+        tracing::debug!("user db: closed connection");
     }
 
     Ok(())
@@ -947,15 +897,6 @@ pub(crate) fn close_user_dbs_for_current_runtime() -> Result<(), DbError> {
         .write()
         .map_err(|err| DbError::new(format!("Failed to acquire user db write lock: {err}")))?;
     guard.retain(|scoped_key, _| scoped_key.scope_id != scope_id);
-
-    #[cfg(any(test, debug_assertions))]
-    {
-        let mut lock_guard = match USER_DB_LOCK_STATES.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        lock_guard.retain(|scoped_key, _| scoped_key.scope_id != scope_id);
-    }
 
     Ok(())
 }
@@ -1103,11 +1044,7 @@ pub(crate) fn initialize_user_db_for_test_with_auto_vacuum_mode(
             err,
         )
     })?;
-    configure_connection(
-        &conn,
-        &format!("seeded test user db write handle for user {user_id}"),
-        false,
-    );
+    configure_connection(&conn, "seeded test user db write handle", false);
     conn.pragma_update(None, "auto_vacuum", auto_vacuum_mode.pragma_value())
         .map_err(|err| {
             DbError::from_rusqlite_error(
@@ -1340,6 +1277,7 @@ mod tests {
                 wrapped_dek: Some(vec![1, 2, 3]),
                 wrap_nonce: Some(vec![4_u8; 12]),
                 permission: ClientPermission::BalancesRead,
+                permission_cap: None,
                 created_at: now - chrono::Duration::minutes(2),
                 expires_at,
                 last_used_at: None,
@@ -2170,6 +2108,9 @@ mod tests {
 
         let writer = spawn_with_current_runtime_context(move || {
             let result: Result<(), DbError> = with_user_db_mut(user_id, |_| {
+                let own_locks = user_db_lock_state_for_test(user_id);
+                assert_eq!(own_locks.write_locks, 1);
+                assert_eq!(own_locks.read_locks, 0);
                 write_started_tx
                     .send(())
                     .expect("writer should notify that lock is held");
@@ -2196,9 +2137,7 @@ mod tests {
             result
         });
 
-        let lock_state = user_db_lock_state_for_test(user_id);
-        assert_eq!(lock_state.read_locks, 0);
-        assert_eq!(lock_state.write_locks, 1);
+        debug_assert_user_db_unlocked(user_id, "concurrent writer on another thread");
         read_entered_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("reader should not wait on the write connection mutex");
@@ -2231,6 +2170,9 @@ mod tests {
 
         let holding_reader = spawn_with_current_runtime_context(move || {
             let result: Result<(), DbError> = with_user_db(user_id, |_| {
+                let own_locks = user_db_lock_state_for_test(user_id);
+                assert_eq!(own_locks.read_locks, 1);
+                assert_eq!(own_locks.write_locks, 0);
                 read_started_tx
                     .send(())
                     .expect("reader should notify that one read handle is held");
@@ -2246,9 +2188,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("holding reader should start");
 
-        let lock_state = user_db_lock_state_for_test(user_id);
-        assert_eq!(lock_state.read_locks, 1);
-        assert_eq!(lock_state.write_locks, 0);
+        debug_assert_user_db_unlocked(user_id, "concurrent reader on another thread");
 
         let second_read_user_id = user_id;
         let second_reader = spawn_with_current_runtime_context(move || {

@@ -549,7 +549,7 @@ impl DateTimeFormat {
         match self {
             DateTimeFormat::YearMonthDay24 => "%Y-%m-%d %H:%M",
             DateTimeFormat::DayMonthYear24 => "%d/%m/%Y %H:%M",
-            DateTimeFormat::MonthDayYear12 => "%b %d, %Y %I:%M %p",
+            DateTimeFormat::MonthDayYear12 => "%b %d, %Y %-I:%M %p",
         }
     }
 
@@ -894,6 +894,17 @@ impl EtherscanBaseUrl {
 
     pub(crate) fn as_str(&self) -> &str {
         self.0.as_str()
+    }
+
+    #[cfg(all(
+        feature = "server",
+        any(
+            all(not(test), not(feature = "desktop")),
+            all(test, not(bitgarth_db_unit_only))
+        )
+    ))]
+    pub(crate) fn origin(&self) -> url::Origin {
+        self.0.origin()
     }
 
     /// Derive a web explorer root URL from the API base URL.

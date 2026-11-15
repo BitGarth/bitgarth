@@ -122,6 +122,19 @@ fn lookup_exact_on_connection(
     raw.map(catalog_raw_to_record).transpose()
 }
 
+/// Discovered assets and prices retained after removing their accounts belong to this user.
+pub(crate) fn has_personal_price_asset(user_id: UserId, asset_id: &str) -> Result<bool, DbError> {
+    with_user_db(user_id, |conn| {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM manual_asset_accounts WHERE asset_id = ?1)
+                 OR EXISTS(SELECT 1 FROM user_price_overrides WHERE asset_id = ?1)",
+            [asset_id],
+            |row| row.get(0),
+        )
+        .map_err(|err| DbError::from_rusqlite_error("check personal price asset", err))
+    })
+}
+
 pub(crate) fn upsert_price_override(
     user_id: UserId,
     input: NewPriceOverride,

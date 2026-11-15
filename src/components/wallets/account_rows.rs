@@ -227,6 +227,23 @@ fn NativeAccountRowSection(
         .read()
         .get(&native_account_id)
         .and_then(|state| state.snapshot.etherscan_history_status);
+    // §9.15: the row carries only its most important state; the account page
+    // shows the rest. Sync trouble outranks a paused history, which outranks
+    // a provisional balance (usually its consequence).
+    let sync_trouble = sync_state
+        .read()
+        .get(&native_account_id)
+        .is_some_and(|state| {
+            matches!(
+                super::sync_state::derive_sync_display_status(state),
+                super::sync_state::SyncDisplayStatus::Failing { .. }
+                    | super::sync_state::SyncDisplayStatus::Retrying
+                    | super::sync_state::SyncDisplayStatus::Blocked
+            )
+        });
+    let show_history_paused = history_paused_at_limit && !sync_trouble;
+    let show_provisional_label =
+        is_balance_provisional && !sync_trouble && !history_paused_at_limit;
 
     let title = scheme_view.label.clone();
     let current_account_label = scheme_view.label.clone();
@@ -248,7 +265,7 @@ fn NativeAccountRowSection(
 
     // Build kebab menu items
     let copy_label = if reference_kind == AccountReferenceKind::ExtendedPubkey {
-        "Copy Xpub"
+        "Copy xpub"
     } else {
         "Copy Address"
     };
@@ -264,7 +281,7 @@ fn NativeAccountRowSection(
     }];
     if show_change_wallet_action {
         kebab_items.push(KebabMenuItem {
-            label: "Change Wallet".to_string(),
+            label: "Change wallet".to_string(),
             test_id: None,
             on_click: EventHandler::new(move |_| show_change_wallet.set(true)),
             danger: false,
@@ -274,7 +291,7 @@ fn NativeAccountRowSection(
     }
     if supports_address_modal {
         kebab_items.push(KebabMenuItem {
-            label: "View Addresses".to_string(),
+            label: "View addresses".to_string(),
             test_id: None,
             on_click: EventHandler::new(move |_| {
                 show_addresses_modal.set(true);
@@ -286,7 +303,7 @@ fn NativeAccountRowSection(
         });
     }
     kebab_items.push(KebabMenuItem {
-        label: "View Transactions".to_string(),
+        label: "View transactions".to_string(),
         test_id: None,
         on_click: EventHandler::new(move |_| {
             navigator.push(Route::AccountTransactions {
@@ -304,7 +321,12 @@ fn NativeAccountRowSection(
             label: copy_label.to_string(),
             test_id: None,
             on_click: EventHandler::new(move |_| {
-                copy_to_clipboard(&copy_value);
+                let write = copy_to_clipboard(&copy_value);
+                spawn(async move {
+                    if !write.await {
+                        on_action_error.call("Couldn't copy to clipboard".to_string());
+                    }
+                });
             }),
             danger: false,
             disabled: false,
@@ -379,7 +401,7 @@ fn NativeAccountRowSection(
                                 "{subline}"
                             }
                         }
-                        if history_paused_at_limit {
+                        if show_history_paused {
                             Link {
                                 class: "account-row-subline",
                                 "data-testid": "account-mode",
@@ -465,7 +487,7 @@ fn NativeAccountRowSection(
                         }
                     }
                     div { class: "account-balance-group",
-                        if is_balance_provisional {
+                        if show_provisional_label {
                             span { class: "account-balance-provisional-label", "Provisional balance" }
                         }
                         div { class: "account-balance-amount-row",
@@ -614,7 +636,7 @@ fn CustomAccountRowSection(
     }];
     if show_change_wallet_action {
         kebab_items.push(KebabMenuItem {
-            label: "Change Wallet".to_string(),
+            label: "Change wallet".to_string(),
             test_id: None,
             on_click: EventHandler::new(move |_| show_change_wallet.set(true)),
             danger: false,
@@ -623,7 +645,7 @@ fn CustomAccountRowSection(
         });
     }
     kebab_items.push(KebabMenuItem {
-        label: "View Transactions".to_string(),
+        label: "View transactions".to_string(),
         test_id: None,
         on_click: EventHandler::new(move |_| {
             navigator.push(Route::AccountTransactions {

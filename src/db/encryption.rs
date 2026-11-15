@@ -316,11 +316,21 @@ impl DbEnvelope {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UnlockAuthority {
     PasswordLogin,
     SessionRestore { session_id: SessionId },
     ClientKey { capability_id: CapabilityId },
+}
+
+impl std::fmt::Debug for UnlockAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::PasswordLogin => "PasswordLogin",
+            Self::SessionRestore { .. } => "SessionRestore",
+            Self::ClientKey { .. } => "ClientKey",
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1666,11 +1676,15 @@ mod tests {
     }
 
     #[test]
-    fn unlock_authority_variants_exist() {
-        let _ = UnlockAuthority::PasswordLogin;
-        let _ = UnlockAuthority::SessionRestore {
+    fn unlock_authority_debug_contains_only_the_kind() {
+        let session = UnlockAuthority::SessionRestore {
             session_id: SessionId::new(),
         };
+        let client = UnlockAuthority::ClientKey {
+            capability_id: CapabilityId::from_bytes([0xab; 32]),
+        };
+        assert_eq!(format!("{session:?}"), "SessionRestore");
+        assert_eq!(format!("{client:?}"), "ClientKey");
     }
 
     #[test]

@@ -2142,6 +2142,173 @@ fn bitcoin_account_success_exposes_complete_canonical_zero() {
 }
 
 #[test]
+fn bitcoin_report_close_requires_complete_history_through_the_local_end_of_day() {
+    use super::wallet_report::{
+        BitcoinBalanceObservation, WalletReportBalanceState, load_wallet_report,
+    };
+    let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+    let user_id = UserId::new();
+    initialize_user_db_for_test(user_id).expect("user db should initialize");
+    let fixture = seed_empty_bitcoin_completion_without_account_success(user_id);
+    let started_at = dt("2026-07-24T21:59:00Z");
+    let completed_at = dt("2026-07-24T22:01:00Z");
+    mark_address_sync_completed_success(
+        user_id,
+        &AddressSyncSuccess {
+            address_id: fixture.address_id,
+            run_id: TransactionSyncRunId::new(),
+            started_at,
+            completed_at,
+            last_tip_height: ChainTipHeight::try_new(100).expect("tip"),
+            new_tx_count: TransactionCount::zero(),
+            updated_tx_count: TransactionCount::zero(),
+            api_confirmed_balance: Some(ApiConfirmedBalance::from_amount(UnsignedAmount::zero())),
+        },
+    )
+    .expect("address run should complete across local midnight");
+    refresh_account_integration_sync_state(
+        user_id,
+        fixture.account_id,
+        SyncIntegrationId::Mempool,
+        completed_at,
+    )
+    .expect("account sync should complete");
+
+    let report_row = |day| {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 7, day).expect("valid report date");
+        load_wallet_report(
+            user_id,
+            fixture.wallet_id,
+            Some(date),
+            Some(date),
+            crate::models::UserTimezone("Europe/Amsterdam".parse().expect("test timezone")),
+            TransactionCount::from_u32(u32::MAX),
+        )
+        .expect("report loads")
+        .accounts
+        .remove(0)
+    };
+    let covered = report_row(23);
+    assert_eq!(
+        covered.closing_balance_state,
+        WalletReportBalanceState::CanonicalZero
+    );
+    assert_eq!(covered.last_confirmed_bitcoin, None);
+    let uncovered = report_row(24);
+    assert!(matches!(
+        uncovered.bitcoin_history_coverage,
+        Some(BitcoinAccountHistoryCoverage::Complete { .. })
+    ));
+    assert_eq!(
+        uncovered.closing_balance_state,
+        WalletReportBalanceState::Unknown
+    );
+    assert_eq!(uncovered.closing_balance, None);
+    assert_eq!(
+        uncovered.last_confirmed_bitcoin,
+        Some(BitcoinBalanceObservation {
+            amount: UnsignedAmount::zero(),
+            observed_at: completed_at,
+            latest_observed_at: None,
+        })
+    );
+}
+
+#[test]
+fn bitcoin_report_observations_require_every_address_and_preserve_the_sync_window() {
+    use super::wallet_report::{
+        BitcoinBalanceObservation, WalletReportBalanceState, load_wallet_report,
+    };
+    let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+    let user_id = UserId::new();
+    initialize_user_db_for_test(user_id).expect("user db should initialize");
+    let (account_id, wallet_id, _, first_sync) =
+        seed_btc_partial_backfill_fixture_with_balance(user_id, 50_000);
+    let mut second = crate::db::get_sync_addresses_for_account(user_id, account_id)
+        .expect("first address should load")
+        .remove(0);
+    let first_address_id = second.address_id;
+    second.address_id = crate::wallets::DigitalAssetAddressId::new();
+    second.address =
+        TrackedAddress::parse("1BoatSLRHtKNngkdXEeobR76b53LETtpyT").expect("test address");
+    crate::db::persist_sync_address_fixture(user_id, &second, first_sync)
+        .expect("second address should insert");
+
+    let report_row = || {
+        let date = first_sync.date_naive();
+        load_wallet_report(
+            user_id,
+            wallet_id,
+            Some(date),
+            Some(date),
+            crate::models::UserTimezone("UTC".parse().expect("test timezone")),
+            TransactionCount::from_u32(u32::MAX),
+        )
+        .expect("report should load")
+        .accounts
+        .remove(0)
+    };
+    let partial = report_row();
+    assert_eq!(
+        partial.closing_balance_state,
+        WalletReportBalanceState::Unknown
+    );
+    assert_eq!(partial.last_confirmed_bitcoin, None);
+
+    let second_sync = first_sync + chrono::Duration::days(1);
+    mark_address_sync_completed_success(
+        user_id,
+        &AddressSyncSuccess {
+            address_id: second.address_id,
+            run_id: TransactionSyncRunId::new(),
+            started_at: second_sync,
+            completed_at: second_sync,
+            last_tip_height: ChainTipHeight::try_new(777).expect("tip"),
+            new_tx_count: TransactionCount::zero(),
+            updated_tx_count: TransactionCount::zero(),
+            api_confirmed_balance: Some(ApiConfirmedBalance::from_amount(UnsignedAmount::zero())),
+        },
+    )
+    .expect("second address sync should complete");
+    for (address_id, count) in [(first_address_id, 1), (second.address_id, 0)] {
+        publish_mempool_history_proof(
+            user_id,
+            address_id,
+            MempoolHistoryProof {
+                confirmed_tx_count: TransactionCount::from_u32(count),
+                complete_height: ChainTipHeight::try_new(777).expect("tip"),
+            },
+        )
+        .expect("history proof should persist");
+    }
+    refresh_account_integration_sync_state(
+        user_id,
+        account_id,
+        SyncIntegrationId::Mempool,
+        second_sync,
+    )
+    .expect("account sync should complete");
+    let observed = report_row();
+    assert!(matches!(
+        observed.bitcoin_history_coverage,
+        Some(BitcoinAccountHistoryCoverage::Complete { .. })
+    ));
+    assert_eq!(
+        observed.closing_balance_state,
+        WalletReportBalanceState::Unknown
+    );
+    assert_eq!(observed.closing_balance, None);
+    assert_eq!(
+        observed.last_confirmed_bitcoin,
+        Some(BitcoinBalanceObservation {
+            amount: UnsignedAmount::from_u128(50_000),
+            observed_at: first_sync,
+            latest_observed_at: Some(second_sync),
+        })
+    );
+}
+
+#[test]
 fn bitcoin_paused_history_keeps_proof_boundary_but_gates_newer_report_balance() {
     let _runtime = acquire_test_runtime().expect("test runtime should initialize");
     let user_id = UserId::new();
@@ -3392,4 +3559,68 @@ fn resolve_native_balance_at_boundary_preserves_account_model_zero_behavior() {
     assert_eq!(resolution.state, NativeBalanceState::CanonicalZero);
     assert_eq!(resolution.amount, None);
     assert_eq!(resolution.balance_date, Some(opening_boundary));
+}
+
+#[test]
+fn settled_flows_keep_confirmed_and_failed_rows_in_range_and_ignore_status_filter() {
+    let _runtime = acquire_test_runtime().expect("test runtime should initialize");
+    let user_id = UserId::new();
+    initialize_user_db_for_test(user_id).expect("user db should initialize");
+    let address = parse_eth_address("0x52908400098527886E0F7030069857D2E4169EE7");
+    let account = create_eth_wallet_account_fixture(
+        user_id,
+        &address,
+        "Settled flows",
+        dt("2025-12-30T00:00:00Z"),
+    );
+    for (hash, at, status, balance) in [
+        ("a", "2025-12-30T12:00:00Z", "confirmed", 10),
+        ("b", "2025-12-31T12:00:00Z", "confirmed", 20),
+        ("c", "2026-01-01T12:00:00Z", "failed", 19),
+        ("d", "2026-01-01T13:00:00Z", "pending", 99),
+        ("e", "2026-01-01T14:00:00Z", "dropped", 98),
+        ("f", "2026-01-03T12:00:00Z", "confirmed", 30),
+    ] {
+        seed_eth_ledger_row(
+            user_id,
+            account.account_id,
+            &address.checksummed(),
+            &hash.repeat(64),
+            &dt(at).to_rfc3339(),
+            UnsignedAmount::from_u128(1),
+            UnsignedAmount::from_u128(balance),
+        );
+        crate::db::with_user_db_mut(user_id, |conn| {
+            conn.execute("UPDATE account_transaction_ledger SET status = ?3 WHERE account_id = ?1 AND tx_hash = ?2", params![account.account_id.to_string(), hash.repeat(64), status])
+                .map(|_| ())
+                .map_err(|err| crate::db::DbError::new(format!("status fixture failed: {err}")))
+        }).expect("status should persist");
+    }
+
+    let flows = page_query::load_account_settled_transaction_flows(
+        user_id,
+        account.account_id,
+        &TransactionFilters {
+            status: vec![ChainTransactionStatus::Pending],
+            from_date: Some(dt("2025-12-31T00:00:00Z")),
+            to_date: Some(dt("2026-01-02T23:59:59Z")),
+        },
+    )
+    .expect("settled flows should load");
+
+    let mut seen: Vec<_> = flows
+        .iter()
+        .map(|row| (row.occurred_at, row.status))
+        .collect();
+    seen.sort_by_key(|(occurred_at, _)| *occurred_at);
+    assert_eq!(
+        seen,
+        vec![
+            (
+                dt("2025-12-31T12:00:00Z"),
+                ChainTransactionStatus::Confirmed
+            ),
+            (dt("2026-01-01T12:00:00Z"), ChainTransactionStatus::Failed),
+        ]
+    );
 }

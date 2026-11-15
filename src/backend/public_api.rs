@@ -6,7 +6,7 @@ use crate::pairing::PairingStore;
 use axum::Json;
 use axum::Router;
 use axum::extract::Request;
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -14,6 +14,8 @@ use chrono::{DateTime, Utc};
 use dioxus::server::FullstackState;
 use serde::Serialize;
 use std::sync::Arc;
+
+mod routes;
 
 use super::ApiErrorEnvelope;
 use super::wallets::{
@@ -32,6 +34,7 @@ pub(crate) fn router(
             post(super::pairing::claim_pairing),
         )
         .route("/wallet-balances", get(wallet_balances))
+        .merge(routes::routes())
         .fallback(super::pairing::unimplemented_public_endpoint)
         .layer(middleware::from_fn(no_store))
         .layer(axum::Extension(store))
@@ -64,12 +67,13 @@ fn ensure_permission(
     granted: Option<ClientPermission>,
     required: ClientPermission,
 ) -> Result<(), ApiErrorEnvelope> {
-    if granted == Some(required) {
+    if granted.is_some_and(|granted| granted.satisfies(required)) {
         Ok(())
     } else {
-        Err(ApiErrorEnvelope::forbidden(
-            "This paired client does not have balances_read permission.",
-        ))
+        Err(ApiErrorEnvelope::forbidden(format!(
+            "This paired client does not have {} permission.",
+            required.as_str()
+        )))
     }
 }
 
@@ -138,11 +142,10 @@ fn client_key_open_mode(
 }
 
 fn authorize_client_request(
-    request: &Request,
+    headers: &HeaderMap,
     required_permission: ClientPermission,
 ) -> Result<AuthorizedClientRequest, ApiErrorEnvelope> {
-    let raw_key =
-        super::pairing::parse_client_key(request.headers()).map_err(|_| unauthorized())?;
+    let raw_key = super::pairing::parse_client_key(headers).map_err(|_| unauthorized())?;
     let verifier = crate::client_capabilities::ClientKeyVerifier::from_raw_key(&raw_key);
     let Some(initial) =
         crate::db::find_capability_identity_by_verifier(verifier).map_err(|error| {
@@ -160,7 +163,7 @@ fn authorize_client_request(
         expire_record(&initial, now)?;
         return Err(unauthorized());
     }
-    ensure_permission(Some(initial.permission), required_permission)?;
+    ensure_permission(Some(initial.effective_permission()), required_permission)?;
 
     let lease =
         crate::auth::lifecycle::acquire_client_key_request(initial.user_id, initial.capability_id)
@@ -168,7 +171,11 @@ fn authorize_client_request(
                 tracing::error!(error = %error, "public API: Client Key lease failed");
                 ApiErrorEnvelope::internal()
             })?
-            .ok_or_else(unauthorized)?;
+            .ok_or_else(|| ApiErrorEnvelope {
+                code: super::api_error::ApiErrorCode::ServiceUnavailable,
+                message: "Access is being updated. Retry this request.".to_owned(),
+                field_errors: None,
+            })?;
     let Some(record) =
         crate::db::load_client_capability(initial.capability_id).map_err(|error| {
             tracing::error!(error = %error, "public API: Client Key recheck failed");
@@ -189,7 +196,7 @@ fn authorize_client_request(
         expire_record(&record, rechecked_at)?;
         return Err(unauthorized());
     }
-    ensure_permission(Some(record.permission), required_permission)?;
+    ensure_permission(Some(record.effective_permission()), required_permission)?;
 
     let envelope = crate::db::encryption::read_envelope(record.user_id).map_err(|error| {
         tracing::error!(
@@ -214,21 +221,28 @@ fn authorize_client_request(
         expire_record(&record, activity_at)?;
         return Err(unauthorized());
     }
-    crate::db::record_client_capability_activity(record.capability_id, record.user_id, activity_at)
-        .map_err(|error| {
-            tracing::warn!(
-                user_id = %record.user_id,
-                capability_id = %record.capability_id,
-                error = %error,
-                "public API: Client Key lost authority before activity update"
-            );
-            unauthorized()
-        })?;
+    let active = crate::db::record_client_capability_activity(
+        record.capability_id,
+        record.user_id,
+        activity_at,
+    )
+    .map_err(|error| {
+        tracing::warn!(
+            user_id = %record.user_id,
+            capability_id = %record.capability_id,
+            error = %error,
+            "public API: Client Key activity update failed"
+        );
+        ApiErrorEnvelope::internal()
+    })?;
+    if !active {
+        return Err(unauthorized());
+    }
 
     Ok(AuthorizedClientRequest {
         user_id: record.user_id,
         capability_id: record.capability_id,
-        permission: record.permission,
+        permission: record.effective_permission(),
         _lease: lease,
     })
 }
@@ -331,18 +345,18 @@ fn serialize_projection(mut projection: WalletBalanceProjection) -> WalletBalanc
 }
 
 async fn wallet_balances(request: Request) -> Response {
-    let authorized = match authorize_client_request(&request, ClientPermission::BalancesRead) {
-        Ok(authorized) => authorized,
-        Err(error) => {
-            tracing::warn!(
-                status = error.code.status_code().as_u16(),
-                error_code = ?error.code,
-                "public API: wallet balances failed"
-            );
-            return super::pairing::api_error(error);
-        }
-    };
-    debug_assert_eq!(authorized.permission, ClientPermission::BalancesRead);
+    let authorized =
+        match authorize_client_request(request.headers(), ClientPermission::BalancesRead) {
+            Ok(authorized) => authorized,
+            Err(error) => {
+                tracing::warn!(
+                    status = error.code.status_code().as_u16(),
+                    error_code = ?error.code,
+                    "public API: wallet balances failed"
+                );
+                return super::pairing::api_error(error);
+            }
+        };
     let projection = match load_wallet_balance_projection(authorized.user_id) {
         Ok(projection) => projection,
         Err(error) => {
@@ -385,6 +399,7 @@ pub(crate) async fn browser_pairing_no_store(
             | "/_app/pairings/deny"
             | "/_app/pairings/clients"
             | "/_app/pairings/revoke"
+            | "/_app/pairings/limit"
     );
     let mut response = next.run(request).await;
     if no_store {
@@ -415,6 +430,7 @@ mod tests {
             wrapped_dek,
             wrap_nonce,
             permission: ClientPermission::BalancesRead,
+            permission_cap: None,
             created_at: DateTime::from_str("2026-08-06T12:00:00Z").unwrap(),
             expires_at: None,
             last_used_at: None,

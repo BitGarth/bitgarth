@@ -6,8 +6,6 @@ const CANDIDATE_TABLE_NAME: &str = "temp_chain_tx_cleanup_candidates";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ChainCleanupStats {
-    pub(crate) candidate_chain_tx_count: u64,
-    pub(crate) deleted_unowned_transfers: u64,
     pub(crate) deleted_orphan_chain_transactions: u64,
 }
 
@@ -129,27 +127,18 @@ pub(crate) fn mark_chain_cleanup_candidates_for_wallet(
 pub(crate) fn execute_chain_cleanup_for_marked_candidates(
     tx: &rusqlite::Transaction<'_>,
 ) -> Result<ChainCleanupStats, DbError> {
-    let candidate_chain_tx_count: i64 = tx
-        .query_row(
-            &format!("SELECT COUNT(*) FROM {CANDIDATE_TABLE_NAME}"),
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|err| DbError::new(format!("Failed to count cleanup candidates: {err}")))?;
-
-    let deleted_unowned_transfers = tx
-        .execute(
-            &format!(
-                "DELETE FROM account_transfers
+    tx.execute(
+        &format!(
+            "DELETE FROM account_transfers
                  WHERE chain_transaction_id IN (
                      SELECT tx_id FROM {CANDIDATE_TABLE_NAME}
                  )
                    AND from_address_id IS NULL
                    AND to_address_id IS NULL"
-            ),
-            [],
-        )
-        .map_err(|err| DbError::new(format!("Failed to delete unowned transfer rows: {err}")))?;
+        ),
+        [],
+    )
+    .map_err(|err| DbError::new(format!("Failed to delete unowned transfer rows: {err}")))?;
 
     let deleted_orphan_chain_transactions = tx
         .execute(
@@ -176,8 +165,6 @@ pub(crate) fn execute_chain_cleanup_for_marked_candidates(
         })?;
 
     Ok(ChainCleanupStats {
-        candidate_chain_tx_count: u64::try_from(candidate_chain_tx_count).unwrap_or(0),
-        deleted_unowned_transfers: deleted_unowned_transfers as u64,
         deleted_orphan_chain_transactions: deleted_orphan_chain_transactions as u64,
     })
 }

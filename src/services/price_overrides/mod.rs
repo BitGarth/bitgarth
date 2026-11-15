@@ -58,29 +58,6 @@ pub(crate) enum OverrideLookup {
 }
 
 #[cfg(feature = "server")]
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ResolvedPrice {
-    pub(crate) price: Decimal,
-    pub(crate) source: PriceSource,
-}
-
-#[cfg(feature = "server")]
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum PriceSource {
-    UserOverride {
-        source_note: Option<String>,
-        updated_at: DateTime<Utc>,
-    },
-    ProviderPrice {
-        provider: String,
-        provider_asset_id: Option<String>,
-        provider_quote_id: Option<String>,
-        retrieved_at: DateTime<Utc>,
-        license_scope: String,
-    },
-}
-
-#[cfg(feature = "server")]
 pub(crate) const SOURCE_NOTE_MAX_CHARS: usize = 120;
 
 #[cfg(feature = "server")]
@@ -155,6 +132,14 @@ pub(crate) fn local_timestamp_to_utc(
     local_timestamp: &str,
     timezone: UserTimezone,
 ) -> Result<DateTime<Utc>, PriceOverrideValidationError> {
+    if let Ok(instant) = DateTime::parse_from_rfc3339(local_timestamp) {
+        if instant.timestamp_subsec_nanos() != 0 {
+            return Err(PriceOverrideValidationError::InvalidLocalTimestamp(
+                local_timestamp.to_owned(),
+            ));
+        }
+        return Ok(instant.with_timezone(&Utc));
+    }
     let naive =
         NaiveDateTime::parse_from_str(local_timestamp, "%Y-%m-%dT%H:%M:%S").map_err(|_| {
             PriceOverrideValidationError::InvalidLocalTimestamp(local_timestamp.to_string())

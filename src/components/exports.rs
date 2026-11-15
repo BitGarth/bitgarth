@@ -13,21 +13,14 @@ use crate::backend::{
 use crate::components::form_helpers::{
     begin_submit, finish_submit, is_form_field_error, primary_field_or_fallback,
 };
-use crate::{AuthState, AuthStatus, BannerMessage, BannerState, Route};
+use crate::hooks::handle_session_expired;
+use crate::{AuthState, AuthStatus, BannerState, Route};
 use dioxus::document::eval;
 use dioxus::prelude::*;
 
 const WALLET_DATA_SUBSCRIPTION_TRANSFER_NOTICE: &str = "This export will include a subscription transfer secret. Anyone with this file may move your subscription to another BitGarth user. Store it securely and delete old copies after migration.";
 const WALLET_DATA_IMPORT_FILE_ID: &str = "wallet-data-import-file";
 const MAX_IMPORT_PAYLOAD_BYTES: usize = 10 * 1024 * 1024;
-
-fn handle_session_expired(mut auth_state: AuthState, mut banner_state: BannerState) {
-    let was_authenticated = matches!(&*auth_state.read(), AuthStatus::Authenticated(_));
-    auth_state.set(AuthStatus::Unauthenticated);
-    if was_authenticated {
-        banner_state.set(Some(BannerMessage::SessionExpired));
-    }
-}
 
 async fn download_wallet_data_file(file_name: &str, zip_base64: &str) -> Result<(), String> {
     let encoded_file_name = serde_json::to_string(file_name)
@@ -199,15 +192,15 @@ fn wallet_data_count_parts(counts: &WalletDataExportCounts) -> Vec<String> {
     parts.extend(plural_count(counts.addresses, "address", "addresses"));
     parts.extend(plural_count(
         counts.custom_accounts,
-        "custom account",
-        "custom accounts",
+        "manual asset",
+        "manual assets",
     ));
     parts.extend(plural_count(
         counts.balance_assertions,
         "balance assertion",
         "balance assertions",
     ));
-    parts.extend(plural_count(counts.api_keys, "api key", "api keys"));
+    parts.extend(plural_count(counts.api_keys, "API key", "API keys"));
     parts
 }
 
@@ -347,7 +340,7 @@ fn start_import_description(
                 import_description.set(Some(description));
             }
             Err(ExportError::Unauthorized(message)) => {
-                handle_session_expired(ui.auth_state, ui.banner_state);
+                handle_session_expired(ui.auth_state, ui.banner_state, "exports");
                 import_error_message.set(Some(message));
             }
             Err(ExportError::PasswordRequired(message))
@@ -459,6 +452,7 @@ async fn download_hledger_zip(encrypted: bool, password: Option<&str>) -> Result
 
 #[component]
 pub fn HledgerExport() -> Element {
+    let settings_state = use_context::<crate::settings::SettingsState>();
     let auth_state = use_context::<AuthState>();
     let banner_state = use_context::<BannerState>();
 
@@ -478,7 +472,20 @@ pub fn HledgerExport() -> Element {
     let settings_resource =
         use_server_future(move || async move { get_hledger_export_settings().await })?;
     let settings_value = settings_resource.value();
-    match settings_value.read().clone() {
+    let settings = settings_value.read().clone();
+    let transaction_summary = settings
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|settings| {
+            let count = settings.transaction_count;
+            let noun = if count == 1 { "entry" } else { "entries" };
+            let formatted = super::format_number_for_display(
+                &count.to_string(),
+                (settings_state.number_format)(),
+            );
+            format!(" The account journals contain {formatted} transaction {noun}.")
+        });
+    match settings {
         Some(Ok(settings)) if !*prefix_settings_synced.peek() => {
             hledger_account_prefix_input.set(
                 settings
@@ -493,7 +500,7 @@ pub fn HledgerExport() -> Element {
             prefix_settings_synced.set(true);
         }
         Some(Err(err)) if err.is_unauthorized() && !*prefix_settings_synced.peek() => {
-            handle_session_expired(auth_state, banner_state);
+            handle_session_expired(auth_state, banner_state, "exports");
             hledger_account_prefix_error.set(Some(err.to_string()));
             prefix_settings_synced.set(true);
         }
@@ -539,7 +546,7 @@ pub fn HledgerExport() -> Element {
                     }
                 }
                 Err(err) if err.is_unauthorized() => {
-                    handle_session_expired(auth_state, banner_state);
+                    handle_session_expired(auth_state, banner_state, "exports");
                     hledger_account_prefix_error.set(Some(err.to_string()));
                 }
                 Err(err) if is_form_field_error(&err) => {
@@ -577,7 +584,7 @@ pub fn HledgerExport() -> Element {
                     let _ = saved;
                 }
                 Err(err) if err.is_unauthorized() => {
-                    handle_session_expired(auth_state, banner_state);
+                    handle_session_expired(auth_state, banner_state, "exports");
                     hledger_account_prefix_error.set(Some(err.to_string()));
                 }
                 Err(err) if is_form_field_error(&err) => {
@@ -623,7 +630,7 @@ pub fn HledgerExport() -> Element {
                 }
                 Err(err) => {
                     if let Some(rest) = err.strip_prefix("__unauthorized__:") {
-                        handle_session_expired(auth_state, banner_state);
+                        handle_session_expired(auth_state, banner_state, "exports");
                         error_message.set(Some(rest.to_string()));
                     } else {
                         error_message.set(Some(err));
@@ -646,51 +653,109 @@ pub fn HledgerExport() -> Element {
 
             SectionHead {
                 num: "01".to_string(),
-                title: "Plain text, kept plain".to_string(),
-                emphasis: Some("kept plain".to_string()),
+                title: "Download your journal".to_string(),
+                emphasis: Some("your journal".to_string()),
             }
             div { class: "card",
                 div { class: "card-body",
-                    p {
-                        "The "
-                        a {
-                            href: "https://hledger.org",
-                            target: "_blank",
-                            rel: "noopener noreferrer",
-                            "hledger"
+                    p { class: "form-hint",
+                        "The ZIP includes every wallet and account."
+                        if let Some(summary) = transaction_summary {
+                            "{summary}"
                         }
-                        " and "
-                        a {
-                            href: "https://ledger-cli.org",
-                            target: "_blank",
-                            rel: "noopener noreferrer",
-                            "ledger-cli"
+                    }
+                    div { class: "form-group mt-md",
+                        label { class: "checkbox",
+                            input {
+                                "data-testid": "hledger-export-encrypted-checkbox",
+                                r#type: "checkbox",
+                                checked: encrypted_download(),
+                                disabled: is_downloading(),
+                                onchange: move |_| {
+                                    encrypted_download.set(!encrypted_download());
+                                },
+                            }
+                            " Encrypted"
                         }
-                        " tools use a plain-text, double-entry bookkeeping format. "
-                        "Each transaction records both sides of a money movement, so balances stay auditable and errors are easy to spot."
+                        if encrypted_download() {
+                            p { class: "form-hint mt-sm",
+                                "Format: AES-256 encrypted ZIP. Decrypt outside BitGarth with 7-Zip, Keka, or 7z x file.zip."
+                            }
+                            div { class: "form-group mt-md",
+                                label { class: "form-label", r#for: "hledger-export-password", "Password" }
+                                PasswordInput {
+                                    id: "hledger-export-password".to_string(),
+                                    value: export_password,
+                                    placeholder: "Enter encryption password".to_string(),
+                                    autocomplete: "new-password",
+                                }
+                                if export_password_is_weak {
+                                    p {
+                                        class: "form-hint",
+                                        "data-testid": "hledger-export-password-guidance",
+                                        "Use a long random password or passphrase. Short, common passwords are easier to crack if the file leaks."
+                                    }
+                                }
+                            }
+                            div { class: "form-group mt-md",
+                                label { class: "form-label", r#for: "hledger-export-confirm-password", "Confirm password" }
+                                PasswordInput {
+                                    id: "hledger-export-confirm-password".to_string(),
+                                    value: export_password_confirm,
+                                    placeholder: "Confirm encryption password".to_string(),
+                                    autocomplete: "new-password",
+                                }
+                                if !export_password_confirm().is_empty() && export_password() != export_password_confirm() {
+                                    p { class: "form-error", "Passwords do not match." }
+                                }
+                            }
+                            p { class: "form-hint mt-sm",
+                                "The server uses this password for this download only and does not store it. If you forget it, the encrypted file cannot be recovered — and that is the point."
+                            }
+                        } else {
+                            p {
+                                class: "form-hint mt-sm",
+                                "data-testid": "hledger-export-unencrypted-warning",
+                                "This ZIP is not encrypted. It holds your journals as plain text — store it somewhere only you can reach."
+                            }
+                        }
                     }
-                    p { class: "mt-sm",
-                        "The files are human-readable — open and edit them in any text editor. "
-                        "The format works well for tracking capital gains, cost basis, and preparing data for tax reporting."
+
+                    if is_authenticated {
+                        button {
+                            class: "btn btn-primary mt-md",
+                            "data-testid": "hledger-export-button",
+                            disabled: download_button_disabled,
+                            onclick: start_download,
+                            if is_downloading() {
+                                "Downloading..."
+                            } else {
+                                "Download journal"
+                            }
+                        }
+                    } else {
+                        p { class: "mt-md",
+                            "You need to be logged in to run exports."
+                            " "
+                            Link { to: Route::Login, "Go to login" }
+                        }
                     }
-                    div { class: "code-card", "data-label": "journal",
-                        pre {
-                            "2026-04-18 * Received BTC\n"
-                            "    assets:MyUser:MyWallet:BitcoinAccount1     "
-                            span { class: "tok-img", "0.3 BTC = 0.3 BTC" }
-                            "\n    income:unknown                            "
-                            span { class: "tok-img", "-0.3 BTC" }
-                            "\n\n"
-                            "2026-04-21 * Sent BTC\n"
-                            "    assets:MyUser:MyWallet:BitcoinAccount1    "
-                            span { class: "tok-img", "-0.1 BTC = 0.2 BTC" }
-                            "\n    expenses:unknown                           "
-                            span { class: "tok-img", "0.1 BTC" }
+
+                    if let Some(message) = error_message() {
+                        p { class: "mt-md", style: "color: var(--color-error);", "{message}" }
+                    }
+
+                    if let Some(file_name) = last_downloaded_file() {
+                        p { class: "mt-md",
+                            "Downloaded "
+                            code { "{file_name}" }
+                            " ("
+                            if encrypted_download() { "encrypted" } else { "unencrypted" }
+                            ")."
                         }
                     }
                 }
             }
-
             SectionHead {
                 num: "02".to_string(),
                 title: "Account names".to_string(),
@@ -760,106 +825,51 @@ pub fn HledgerExport() -> Element {
 
             SectionHead {
                 num: "03".to_string(),
-                title: "Download your journal".to_string(),
-                emphasis: Some("your journal".to_string()),
+                title: "Plain text, kept plain".to_string(),
+                emphasis: Some("kept plain".to_string()),
             }
             div { class: "card",
                 div { class: "card-body",
-                    div { class: "form-group",
-                        label { class: "checkbox",
-                            input {
-                                "data-testid": "hledger-export-encrypted-checkbox",
-                                r#type: "checkbox",
-                                checked: encrypted_download(),
-                                disabled: is_downloading(),
-                                onchange: move |_| {
-                                    encrypted_download.set(!encrypted_download());
-                                },
-                            }
-                            " Encrypted"
+                    p {
+                        "The "
+                        a {
+                            href: "https://hledger.org",
+                            target: "_blank",
+                            rel: "noopener noreferrer",
+                            "hledger"
                         }
-                        if encrypted_download() {
-                            p { class: "form-hint mt-sm",
-                                "Format: AES-256 encrypted ZIP. Decrypt outside BitGarth with 7-Zip, Keka, or 7z x file.zip."
-                            }
-                            div { class: "form-group mt-md",
-                                label { class: "form-label", r#for: "hledger-export-password", "Password" }
-                                PasswordInput {
-                                    id: "hledger-export-password".to_string(),
-                                    value: export_password,
-                                    placeholder: "Enter encryption password".to_string(),
-                                    autocomplete: "new-password",
-                                }
-                                if export_password_is_weak {
-                                    p {
-                                        class: "form-hint",
-                                        "data-testid": "hledger-export-password-guidance",
-                                        "Use a long random password or passphrase. Short, common passwords are easier to crack if the file leaks."
-                                    }
-                                }
-                            }
-                            div { class: "form-group mt-md",
-                                label { class: "form-label", r#for: "hledger-export-confirm-password", "Confirm password" }
-                                PasswordInput {
-                                    id: "hledger-export-confirm-password".to_string(),
-                                    value: export_password_confirm,
-                                    placeholder: "Confirm encryption password".to_string(),
-                                    autocomplete: "new-password",
-                                }
-                                if !export_password_confirm().is_empty() && export_password() != export_password_confirm() {
-                                    p { class: "form-error", "Passwords do not match." }
-                                }
-                            }
-                            p { class: "form-hint mt-sm",
-                                "The server uses this password for this download only and does not store it. If you forget it, the encrypted file cannot be recovered — and that is the point."
-                            }
-                        } else {
-                            p {
-                                class: "form-hint mt-sm",
-                                "data-testid": "hledger-export-unencrypted-warning",
-                                "This ZIP is not encrypted. It holds your journals as plain text — store it somewhere only you can reach."
-                            }
+                        " and "
+                        a {
+                            href: "https://ledger-cli.org",
+                            target: "_blank",
+                            rel: "noopener noreferrer",
+                            "ledger-cli"
                         }
+                        " tools use a plain-text, double-entry bookkeeping format. "
+                        "Each transaction records both sides of a money movement, so balances stay auditable and errors are easy to spot."
                     }
-
-                    if is_authenticated {
-                        button {
-                            class: "btn btn-primary mt-md",
-                            "data-testid": "hledger-export-button",
-                            disabled: download_button_disabled,
-                            onmounted: move |e| async move {
-                                let _ = e.set_focus(true).await;
-                            },
-                            onclick: start_download,
-                            if is_downloading() {
-                                "Downloading..."
-                            } else {
-                                "Download journal"
-                            }
-                        }
-                    } else {
-                        p { class: "mt-md",
-                            "You need to be logged in to run exports."
-                            " "
-                            Link { to: Route::Login, "Go to login" }
-                        }
+                    p { class: "mt-sm",
+                        "The files are human-readable — open and edit them in any text editor. "
+                        "The format works well for tracking capital gains, cost basis, and preparing data for tax reporting."
                     }
-
-                    if let Some(message) = error_message() {
-                        p { class: "mt-md", style: "color: var(--color-error);", "{message}" }
-                    }
-
-                    if let Some(file_name) = last_downloaded_file() {
-                        p { class: "mt-md",
-                            "Downloaded "
-                            code { "{file_name}" }
-                            " ("
-                            if encrypted_download() { "encrypted" } else { "unencrypted" }
-                            ")."
+                    div { class: "code-card", "data-label": "journal",
+                        pre {
+                            "2026-04-18 * Received BTC\n"
+                            "    assets:MyUser:MyWallet:BitcoinAccount1     "
+                            span { class: "tok-img", "0.3 BTC = 0.3 BTC" }
+                            "\n    income:unknown                            "
+                            span { class: "tok-img", "-0.3 BTC" }
+                            "\n\n"
+                            "2026-04-21 * Sent BTC\n"
+                            "    assets:MyUser:MyWallet:BitcoinAccount1    "
+                            span { class: "tok-img", "-0.1 BTC = 0.2 BTC" }
+                            "\n    expenses:unknown                           "
+                            span { class: "tok-img", "0.1 BTC" }
                         }
                     }
                 }
             }
+
         }
     }
 }
@@ -952,7 +962,7 @@ pub fn WalletDataExport() -> Element {
                     export_success.set(Some(summary));
                 }
                 Err(ExportError::Unauthorized(message)) => {
-                    handle_session_expired(auth_state, banner_state);
+                    handle_session_expired(auth_state, banner_state, "exports");
                     export_error_message.set(Some(message));
                 }
                 Err(err) => {
@@ -999,7 +1009,7 @@ pub fn WalletDataExport() -> Element {
                     import_success.set(Some(result));
                 }
                 Err(ExportError::Unauthorized(message)) => {
-                    handle_session_expired(auth_state, banner_state);
+                    handle_session_expired(auth_state, banner_state, "exports");
                     import_error_message.set(Some(message));
                 }
                 Err(ExportError::PasswordRequired(message))
@@ -1058,7 +1068,7 @@ pub fn WalletDataExport() -> Element {
                     premium_transfer_result.set(Some(result));
                 }
                 Err(ExportError::Unauthorized(message)) => {
-                    handle_session_expired(auth_state, banner_state);
+                    handle_session_expired(auth_state, banner_state, "exports");
                     premium_transfer_error_message.set(Some(message));
                 }
                 Err(err) => {
@@ -1111,10 +1121,12 @@ pub fn WalletDataExport() -> Element {
                             " Include subscription transfer data"
                         }
                         if premium_transfer_available {
-                            p {
-                                class: "mt-sm",
-                                "data-testid": "wallet-data-subscription-transfer-warning",
-                                "{WALLET_DATA_SUBSCRIPTION_TRANSFER_NOTICE}"
+                            if include_premium_transfer() {
+                                p {
+                                    class: "mt-sm",
+                                    "data-testid": "wallet-data-subscription-transfer-warning",
+                                    "{WALLET_DATA_SUBSCRIPTION_TRANSFER_NOTICE}"
+                                }
                             }
                         } else {
                             p { class: "mt-sm",
@@ -1187,9 +1199,6 @@ pub fn WalletDataExport() -> Element {
                             class: "btn btn-primary mt-md",
                             "data-testid": "wallet-data-export-button",
                             disabled: export_button_disabled,
-                            onmounted: move |e| async move {
-                                let _ = e.set_focus(true).await;
-                            },
                             onclick: start_export,
                             if is_exporting() {
                                 "Creating backup..."
@@ -1463,7 +1472,7 @@ mod tests {
 
         let text = wallet_data_summary_text(&summary);
 
-        assert!(text.contains("1 api key"));
+        assert!(text.contains("1 API key"));
         assert!(text.contains("Subscription transfer data was included."));
         assert!(!text.contains("Premium transfer data was included."));
     }

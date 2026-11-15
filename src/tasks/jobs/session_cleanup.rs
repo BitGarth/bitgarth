@@ -197,6 +197,7 @@ mod tests {
             wrapped_dek: Some(vec![1_u8; 48]),
             wrap_nonce: Some(vec![2_u8; 12]),
             permission: ClientPermission::BalancesRead,
+            permission_cap: None,
             created_at: now - chrono::Duration::minutes(2),
             expires_at: Some(now - chrono::Duration::minutes(1)),
             last_used_at: None,

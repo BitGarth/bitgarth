@@ -31,6 +31,7 @@ test("unavailable Bitcoin history does not invent report price requirements", as
     "Not available",
   ]);
   await expect(row.locator(".wr-fiat-value")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /§ Prices/ })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Set price" })).toHaveCount(0);
 
   assertNoBrowserDiagnostics(diagnostics);
@@ -127,6 +128,26 @@ test("wallet report Prices section saves a boundary price and persists across re
   await expect(pricesStrip).toHaveAttribute("aria-expanded", "true");
   await expect(pricesStrip).toContainText("missing");
 
+  const toggle = reportPage.getByTestId("nav-price-fetching-toggle");
+  const ownPricesNotice = reportPage.getByText("Only your own prices are used.", { exact: false });
+  await expect(toggle).not.toBeChecked();
+  await expect(ownPricesNotice).toBeVisible();
+  for (const enabled of [true, false]) {
+    const refreshed = reportPage.waitForResponse((response) =>
+      new URL(response.url()).pathname === `/_app/user/wallets/${walletId}/report/resolved-prices`,
+    );
+    await reportPage.locator(".nav-price-switch").click();
+    expect((await refreshed).ok()).toBeTruthy();
+    await expect(toggle).toBeChecked({ checked: enabled });
+    await expect(ownPricesNotice).toBeVisible({ visible: !enabled });
+  }
+
+  // Each asset name links to its saved price history for the report's range.
+  await expect(reportPage.locator("a.wr-prices-asset-cell").first()).toHaveAttribute(
+    "href",
+    /\/prices\?asset=monero&start=\d{4}-\d{2}-\d{2}&end=\d{4}-\d{2}-\d{2}/,
+  );
+
   // Click the first "Set price" button (opening boundary for the ETH subject).
   const setPriceButtons = reportPage.getByRole("button", { name: "Set price" });
   await expect(setPriceButtons.first()).toBeVisible();
@@ -140,7 +161,7 @@ test("wallet report Prices section saves a boundary price and persists across re
 
   // After save, the Prices section should display the saved value as a button.
   await expect(reportPage.locator(".wr-prices-price-display").first()).toContainText(
-    "2500",
+    "2,500.00",
     { timeout: 10_000 },
   );
 
@@ -157,7 +178,7 @@ test("wallet report Prices section saves a boundary price and persists across re
     await pricesStripAfterReload.click();
   }
   await expect(reportPage.locator(".wr-prices-price-display").first()).toContainText(
-    "2500",
+    "2,500.00",
     { timeout: 10_000 },
   );
 

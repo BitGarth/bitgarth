@@ -15,6 +15,7 @@ use url::Url;
 const PUBLIC_BASE_URL: &str = "https://api.coingecko.com/api/v3/";
 const PRO_BASE_URL: &str = "https://pro-api.coingecko.com/api/v3/";
 const PRO_HEADER_NAME: &str = "x-cg-pro-api-key";
+const MAX_HISTORY_RETRY_SECS: i64 = 24 * 60 * 60;
 
 #[cfg(feature = "dev-config")]
 const COINGECKO_BASE_URL_ENV: &str = "BITGARTH_COINGECKO_BASE_URL";
@@ -95,6 +96,81 @@ impl std::fmt::Display for CoingeckoError {
 impl std::error::Error for CoingeckoError {}
 
 impl CoingeckoError {
+    pub(crate) fn from_http_response(
+        status_code: u16,
+        headers: reqwest::header::HeaderMap,
+        body: String,
+    ) -> Self {
+        use super::CoingeckoApiErrorEnvelope::{Direct, Nested};
+
+        if let Ok(Direct(api_error) | Nested { error: api_error }) = serde_json::from_str(&body) {
+            Self::Api {
+                status_code,
+                error_code: api_error.status.error_code,
+                error_message: api_error.status.error_message,
+                retry_after: headers
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned),
+            }
+        } else {
+            Self::UnexpectedResponse {
+                status_code,
+                headers: headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<non-utf8>").to_owned()))
+                    .collect(),
+                body,
+            }
+        }
+    }
+
+    pub(crate) fn history_retry_at(&self, now: chrono::DateTime<chrono::Utc>) -> Option<i64> {
+        // Keyless callers share a 15-minute backoff for a 429 without a usable header.
+        self.explicit_history_retry_at(now)
+            .or_else(|| self.is_rate_limited().then(|| now.timestamp() + 900))
+    }
+
+    pub(crate) fn explicit_history_retry_at(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<i64> {
+        let (status, header) = match self {
+            Self::Api {
+                status_code,
+                retry_after,
+                ..
+            } => (*status_code, retry_after.as_deref()),
+            Self::UnexpectedResponse {
+                status_code,
+                headers,
+                ..
+            } => (
+                *status_code,
+                headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("retry-after"))
+                    .map(|(_, v)| v.as_str()),
+            ),
+            _ => return None,
+        };
+        if !matches!(status, 429 | 503) {
+            return None;
+        }
+        let value = header?.trim();
+        let earliest = now.timestamp() + 1;
+        if let Ok(seconds) = value.parse::<u64>() {
+            // Round the relative deadline up when persisting whole seconds.
+            let receipt_ceiling = now.timestamp() + i64::from(now.timestamp_subsec_nanos() != 0);
+            let delay = seconds.min(MAX_HISTORY_RETRY_SECS as u64) as i64;
+            return Some((receipt_ceiling + delay).max(earliest));
+        }
+        let absolute = chrono::DateTime::parse_from_rfc2822(value)
+            .ok()?
+            .timestamp();
+        Some(absolute.clamp(earliest, now.timestamp() + MAX_HISTORY_RETRY_SECS))
+    }
+
     pub(crate) fn is_history_limit(&self) -> bool {
         matches!(
             self,
@@ -103,6 +179,26 @@ impl CoingeckoError {
                 ..
             }
         )
+    }
+
+    /// A daily sample starts at midnight UTC. Keep the exact cutoff instant eligible.
+    pub(crate) fn public_history_unavailable_through(
+        &self,
+        requested_at: chrono::DateTime<chrono::Utc>,
+    ) -> Option<chrono::NaiveDate> {
+        const PUBLIC_WINDOW: &str =
+            "Public API users are limited to querying historical data within the past 365 days.";
+        match self {
+            Self::Api {
+                error_code: 10012,
+                error_message,
+                ..
+            } if error_message.contains(PUBLIC_WINDOW) => {
+                let cutoff = requested_at - chrono::Duration::days(365);
+                Some((cutoff - chrono::Duration::seconds(1)).date_naive())
+            }
+            _ => None,
+        }
     }
 
     pub(crate) fn is_rate_limited(&self) -> bool {
@@ -253,8 +349,6 @@ impl CoingeckoClient {
     }
 
     fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, CoingeckoError> {
-        use super::CoingeckoApiErrorBody;
-
         let url = self
             .base_url
             .join(path)
@@ -270,22 +364,8 @@ impl CoingeckoClient {
                 &err,
             ))
         })?;
-        let status_code = response.status().as_u16();
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let headers: Vec<(String, String)> = response
-            .headers()
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.to_string(),
-                    v.to_str().unwrap_or("<non-utf8>").to_string(),
-                )
-            })
-            .collect();
+        let status = response.status();
+        let error_headers = (!status.is_success()).then(|| response.headers().clone());
         let body = response.text().map_err(|err| {
             CoingeckoError::Transport(TransportFailure::new(
                 TransportFailureStage::ResponseBodyReadFailed,
@@ -294,20 +374,12 @@ impl CoingeckoClient {
             ))
         })?;
 
-        if !(200..300).contains(&(status_code as usize)) {
-            if let Ok(api_error) = serde_json::from_str::<CoingeckoApiErrorBody>(&body) {
-                return Err(CoingeckoError::Api {
-                    status_code,
-                    error_code: api_error.status.error_code,
-                    error_message: api_error.status.error_message,
-                    retry_after,
-                });
-            }
-            return Err(CoingeckoError::UnexpectedResponse {
-                status_code,
+        if let Some(headers) = error_headers {
+            return Err(CoingeckoError::from_http_response(
+                status.as_u16(),
                 headers,
                 body,
-            });
+            ));
         }
 
         serde_json::from_str(&body).map_err(|err| CoingeckoError::Decode(err.to_string()))
@@ -361,6 +433,69 @@ mod tests {
     use crate::traces::client::IntegrationLabel;
     use rust_decimal::Decimal;
     use std::str::FromStr;
+
+    #[test]
+    fn both_history_limit_envelopes_preserve_the_provider_error() {
+        let message = concat!(
+            "Your request exceeds the allowed time range. Public API users are limited to ",
+            "querying historical data within the past 365 days. Upgrade to a paid plan to ",
+            "enjoy full historical data access: https://www.coingecko.com/en/api/pricing. ",
+        );
+        let direct = serde_json::json!({"status": {"error_code": 10012, "error_message": message}});
+        for body in [serde_json::json!({"error": direct}), direct] {
+            let err = CoingeckoError::from_http_response(401, Default::default(), body.to_string());
+            assert!(err.is_history_limit(), "{err:?}");
+            let midnight = chrono::NaiveDate::from_ymd_opt(2026, 11, 10)
+                .unwrap()
+                .and_time(chrono::NaiveTime::MIN)
+                .and_utc();
+            assert_eq!(
+                err.public_history_unavailable_through(midnight),
+                chrono::NaiveDate::from_ymd_opt(2025, 11, 9)
+            );
+            assert_eq!(
+                err.public_history_unavailable_through(midnight + chrono::Duration::hours(1)),
+                chrono::NaiveDate::from_ymd_opt(2025, 11, 10)
+            );
+            assert!(
+                matches!(err, CoingeckoError::Api { status_code: 401, error_message, .. }
+                if error_message == message)
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_retry_after_rounds_fractional_receipt_up_to_the_next_dispatch_second() {
+        let now = chrono::DateTime::from_timestamp(1_800_000_000, 836_658_000).expect("time");
+        let limited = CoingeckoError::UnexpectedResponse {
+            status_code: 429,
+            headers: vec![("Retry-After".into(), "60".into())],
+            body: String::new(),
+        };
+        assert_eq!(limited.history_retry_at(now), Some(1_800_000_061));
+    }
+
+    #[test]
+    fn history_retry_after_is_capped_at_one_day() {
+        let now = chrono::DateTime::from_timestamp(1_800_000_000, 0).expect("time");
+        let limited = |value: &str| CoingeckoError::UnexpectedResponse {
+            status_code: 429,
+            headers: vec![("Retry-After".into(), value.into())],
+            body: String::new(),
+        };
+        assert_eq!(
+            limited("31536000").history_retry_at(now),
+            Some(now.timestamp() + MAX_HISTORY_RETRY_SECS)
+        );
+        assert_eq!(
+            limited("Fri, 01 Jan 2100 00:00:00 GMT").history_retry_at(now),
+            Some(now.timestamp() + MAX_HISTORY_RETRY_SECS)
+        );
+        assert_eq!(
+            limited("120").history_retry_at(now),
+            Some(now.timestamp() + 120)
+        );
+    }
 
     #[test]
     fn credential_mode_selects_public_request_config() {

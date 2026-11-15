@@ -81,7 +81,7 @@ test("Free account modes follow the first three and first fifty admissions", asy
   }
 
   await page.goto("/wallets");
-  for (const [label, mode] of [["ETH 001", "Transaction syncing"], ["ETH 004", "Balance only"], ["ETH 051", "Inactive"]]) {
+  for (const [label, mode] of [["ETH 001", "Full history"], ["ETH 004", "Balance only"], ["ETH 051", "Inactive"]]) {
     await expect(page.locator(".account-row").filter({ hasText: label }).getByTestId("account-mode"))
       .toHaveText(mode);
   }

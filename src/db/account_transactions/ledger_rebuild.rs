@@ -995,23 +995,20 @@ pub(super) fn compute_utxo_opening_balance_for_read_path(
 
     let entries = collect_entries_for_account(conn, account_id, meta.asset_id, meta.network)?;
     let api_balances = load_api_confirmed_balances_for_account_conn(conn, account_id)?;
-    compute_utxo_opening_balance_from_inputs(account_id, &api_balances, &entries)
+    compute_utxo_opening_balance_from_inputs(&api_balances, &entries)
 }
 
 pub(super) fn compute_utxo_opening_balance_from_inputs(
-    account_id: DigitalAssetAccountId,
     api_balances: &[crate::db::transaction_sync::AddressApiConfirmedBalanceRow],
     entries: &[LedgerBuildEntry],
 ) -> Result<Option<OpeningBalance>, DbError> {
     let basis = compute_incomplete_bitcoin_basis_from_inputs(api_balances, entries)?;
     let NativeBalanceState::KnownAmount(amount) = basis else {
-        if let Some(row) = api_balances
+        if api_balances
             .iter()
-            .find(|row| row.api_confirmed_balance.is_none())
+            .any(|row| row.api_confirmed_balance.is_none())
         {
             tracing::debug!(
-                account_id = %account_id,
-                address_id = %row.address_id,
                 "opening balance correction skipped: address with sync state has no api_confirmed_balance"
             );
         }

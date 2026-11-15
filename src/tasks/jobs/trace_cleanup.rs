@@ -110,10 +110,7 @@ fn is_real_directory_entry(entry: &std::fs::DirEntry, summary: &mut TraceCleanup
         Ok(file_type) => {
             if file_type.is_symlink() {
                 summary.skipped_symlink_entries += 1;
-                tracing::warn!(
-                    path = ?entry.path(),
-                    "tasks: trace cleanup skipping symlink entry"
-                );
+                tracing::warn!("tasks: trace cleanup skipping symlink entry");
                 return false;
             }
             file_type.is_dir()
@@ -121,8 +118,7 @@ fn is_real_directory_entry(entry: &std::fs::DirEntry, summary: &mut TraceCleanup
         Err(err) => {
             summary.io_errors += 1;
             tracing::warn!(
-                path = ?entry.path(),
-                error = %err,
+                io_kind = ?err.kind(),
                 "tasks: trace cleanup could not read file type"
             );
             false
@@ -141,8 +137,7 @@ fn cleanup_user_trace_tree(
         Err(err) => {
             summary.io_errors += 1;
             tracing::warn!(
-                path = ?traces_dir,
-                error = %err,
+                io_kind = ?err.kind(),
                 "tasks: trace cleanup failed to read traces directory"
             );
             return;
@@ -165,8 +160,7 @@ fn cleanup_user_trace_tree(
             Err(err) => {
                 summary.io_errors += 1;
                 tracing::warn!(
-                    path = ?year_entry.path(),
-                    error = %err,
+                    io_kind = ?err.kind(),
                     "tasks: trace cleanup failed to read year directory"
                 );
                 continue;
@@ -186,8 +180,7 @@ fn cleanup_user_trace_tree(
                 Err(err) => {
                     summary.io_errors += 1;
                     tracing::warn!(
-                        path = ?month_entry.path(),
-                        error = %err,
+                        io_kind = ?err.kind(),
                         "tasks: trace cleanup failed to read month directory"
                     );
                     continue;
@@ -207,8 +200,7 @@ fn cleanup_user_trace_tree(
                     Err(err) => {
                         summary.io_errors += 1;
                         tracing::warn!(
-                            path = ?day_entry.path(),
-                            error = %err,
+                            io_kind = ?err.kind(),
                             "tasks: trace cleanup failed to read day directory"
                         );
                         continue;
@@ -240,8 +232,7 @@ fn cleanup_user_trace_tree(
                         Err(err) => {
                             summary.io_errors += 1;
                             tracing::warn!(
-                                path = ?hour_path,
-                                error = %err,
+                                io_kind = ?err.kind(),
                                 "tasks: trace cleanup failed to remove old hour directory"
                             );
                         }
@@ -260,6 +251,15 @@ pub(crate) fn run_for_project_dir_with_now(
     let users_dir = project_dir.join("users");
     let mut summary = TraceCleanupSummary::default();
     let cutoff = now - params.retention.as_duration();
+
+    let traces = project_dir.join("traces");
+    let instance = traces.join("instance");
+    if [traces.as_path(), instance.as_path()]
+        .iter()
+        .all(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_dir()))
+    {
+        cleanup_user_trace_tree(&instance, cutoff, &mut summary);
+    }
 
     let user_entries = match std::fs::read_dir(&users_dir) {
         Ok(entries) => entries,
@@ -289,10 +289,7 @@ pub(crate) fn run_for_project_dir_with_now(
         match is_path_symlink(&traces_dir) {
             Ok(true) => {
                 summary.skipped_symlink_entries += 1;
-                tracing::warn!(
-                    path = ?traces_dir,
-                    "tasks: trace cleanup skipping symlink traces directory"
-                );
+                tracing::warn!("tasks: trace cleanup skipping symlink traces directory");
                 continue;
             }
             Ok(false) => {}
@@ -300,8 +297,7 @@ pub(crate) fn run_for_project_dir_with_now(
             Err(err) => {
                 summary.io_errors += 1;
                 tracing::warn!(
-                    path = ?traces_dir,
-                    error = %err,
+                    io_kind = ?err.kind(),
                     "tasks: trace cleanup failed to read traces directory metadata"
                 );
                 continue;

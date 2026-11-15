@@ -732,7 +732,7 @@ test("unsupported signing key blocks ATLOS launch", async ({
   await markTestBoundary(testInfo, "END");
 });
 
-test("missing product options disable checkout without changing local status", async ({
+test("catalog outage keeps saved plan descriptions and retry restores live checkout", async ({
   page,
   request,
 }, testInfo) => {
@@ -740,19 +740,27 @@ test("missing product options disable checkout without changing local status", a
   await attachBrowserDiagnostics(page, testInfo);
 
   await registerViaUiAndExpectAuthenticated(page);
-  await setMockCentralScenario(request, { productOptionsUnavailable: true });
-
   await page.goto("/payments");
+  const premium = page.getByTestId("payments-tier-card-premium");
+  await expect(page.getByTestId("payments-buy-btn-premium")).toBeEnabled();
+  const bullets = await premium.locator(".payments-tier-bullets").innerText();
 
-  const card = page.getByTestId("payments-card");
-  await expect(card).toHaveAttribute("data-status", "not_active");
-  await expect(page.getByTestId("payments-catalog-error")).toContainText(
-    "Price unavailable",
-  );
-  await expect(page.getByTestId("payments-tier-grid")).toHaveCount(0);
+  await setMockCentralScenario(request, { productOptionsUnavailable: true });
+  await page.reload();
 
-  const calls = await page.evaluate(() => window.__atlosCalls ?? []);
-  expect(calls).toEqual([]);
+  await expect(page.getByTestId("payments-card")).toHaveAttribute("data-status", "not_active");
+  await expect(page.getByTestId("payments-catalog-error")).toContainText("Showing saved plan descriptions");
+  await expect(premium.locator(".payments-tier-name")).toHaveText("Premium");
+  await expect(premium.locator(".payments-tier-bullets")).toHaveText(bullets, { useInnerText: true });
+  await expect(page.getByTestId("payments-tier-price-premium")).toHaveText("—");
+  await expect(page.getByTestId("payments-buy-btn-premium")).toHaveCount(0);
+  expect(await page.evaluate(() => window.__atlosCalls ?? [])).toEqual([]);
+
+  await setMockCentralScenario(request, { productOptionsUnavailable: false });
+  await page.getByTestId("payments-catalog-retry").click();
+  await expect(page.getByTestId("payments-buy-btn-premium")).toBeEnabled();
+  await expect(page.getByTestId("payments-tier-price-premium")).toContainText("$500");
+  await expect(page.getByTestId("payments-catalog-error")).toHaveCount(0);
 
   await markTestBoundary(testInfo, "END");
 });

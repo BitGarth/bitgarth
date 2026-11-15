@@ -9,8 +9,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  HLEDGER_VERSION: "1.99.3"
-  HLEDGER_LINUX_X64_SHA256: "7a296cbf550a60fc6caf868dcd10d1df0c163c58597b4c40417415d6bd9b5deb"
+  HLEDGER_VERSION: "1.99.6"
+  HLEDGER_LINUX_X64_SHA256: "c71ee88571ef2595ba11b84ba3e38f50fa930c85956a805155790f24ad318e15"
 
 jobs:
   release-tools:
@@ -23,6 +23,7 @@ jobs:
       - name: Test release automation without publishing
         run: |
           python3 -m unittest discover -s tests -p 'test_release_*.py' -q
+          python3 -m unittest discover -s tests -p 'test_snap_packaging.py' -q
           bash tests/test_docker_build.sh
 
   verify:
@@ -41,10 +42,10 @@ jobs:
           rustup default stable
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Install Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           cache: npm
@@ -60,7 +61,7 @@ jobs:
           archive="${RUNNER_TEMP}/hledger-linux-x64.tar.gz"
           curl --fail --location --retry 3 --silent --show-error \
             --output "$archive" \
-            "https://github.com/simonmichael/hledger/releases/download/${HLEDGER_VERSION}/hledger-linux-x64.tar.gz"
+            "https://github.com/hledgerorg/hledger/releases/download/${HLEDGER_VERSION}/hledger-linux-x64.tar.gz"
           echo "${HLEDGER_LINUX_X64_SHA256}  ${archive}" | sha256sum --check -
           sudo tar -xzf "$archive" -C /usr/local/bin hledger
           installed_version="$(hledger --version | awk 'NR == 1 { gsub(/,$/, "", $2); print $2 }')"
@@ -69,26 +70,15 @@ jobs:
       - name: Install verification tools
         run: |
           cargo install cargo-deny --version 0.20.2 --locked
+          # RTK v1.2.0
           cargo install \
             --git https://github.com/rtk-ai/rtk \
-            --rev b34be37caf3796b69a50952a28e60e32b5daad43 \
+            --rev e288a18c04452fd26192f59132e5324a8bb6924d \
             --locked \
             rtk
 
       - name: Install matching Dioxus CLI
-        run: |
-          dioxus_version="$(
-            cargo metadata --format-version 1 --locked |
-              jq -er '
-                [.packages[] | select(.name == "dioxus") | .version]
-                | unique
-                | if length == 1
-                  then .[0]
-                  else error("expected exactly one Dioxus version")
-                  end
-              '
-          )"
-          cargo install dioxus-cli --version "$dioxus_version" --locked
+        run: bash scripts/release/install-dioxus.sh x86_64-unknown-linux-gnu
 
       - name: Check migrations against previous public main
         if: github.event.before != '0000000000000000000000000000000000000000'

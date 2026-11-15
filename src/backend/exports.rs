@@ -1704,6 +1704,7 @@ async fn enqueue_automatic_add_sync(
         TriggerParams::SessionCleanup(_)
         | TriggerParams::TraceCleanup(_)
         | TriggerParams::InactiveUserCleanup(_)
+        | TriggerParams::SharedPriceHistory
         | TriggerParams::PriceHistoryReconciliation(_) => TransactionSyncScope::User,
     };
 
@@ -1943,6 +1944,47 @@ pub(crate) async fn download_hledger(
 pub(crate) async fn export_wallet_data(
     request: ExportWalletDataRequest,
 ) -> Result<WalletDataExportDownloadView, ExportError> {
+    let session_token = session_token_from_cookie(&cookies)?;
+    let initialized_session = require_initialized_session(
+        "exports",
+        &session_token,
+        ExportError::Unauthorized,
+        ExportError::Internal,
+    )?;
+    let user_id = initialized_session.session.user_id;
+
+    export_wallet_archive(user_id, WalletArchiveScope::Browser, request)
+}
+
+#[cfg(feature = "server")]
+#[derive(PartialEq, Eq)]
+enum WalletArchiveScope {
+    Browser,
+    PairedWallets,
+}
+
+#[cfg(all(feature = "server", any(test, not(feature = "desktop"))))]
+pub(super) fn export_paired_wallet_data(
+    user_id: crate::models::UserId,
+    password: String,
+) -> Result<WalletDataExportDownloadView, ExportError> {
+    export_wallet_archive(
+        user_id,
+        WalletArchiveScope::PairedWallets,
+        ExportWalletDataRequest {
+            encrypted: true,
+            include_premium_transfer: false,
+            password: Some(password),
+        },
+    )
+}
+
+#[cfg(feature = "server")]
+fn export_wallet_archive(
+    user_id: crate::models::UserId,
+    scope: WalletArchiveScope,
+    request: ExportWalletDataRequest,
+) -> Result<WalletDataExportDownloadView, ExportError> {
     let ExportWalletDataRequest {
         include_premium_transfer,
         encrypted,
@@ -1953,15 +1995,6 @@ pub(crate) async fn export_wallet_data(
         encrypted,
         "exports: wallet-data export requested"
     );
-    let session_token = session_token_from_cookie(&cookies)?;
-    let initialized_session = require_initialized_session(
-        "exports",
-        &session_token,
-        ExportError::Unauthorized,
-        ExportError::Internal,
-    )?;
-    let user_id = initialized_session.session.user_id;
-
     let wallets = list_wallets(user_id).map_err(|err| {
         tracing::error!(user_id = %user_id, error = %err, "exports: failed to load wallets for wallet-data export");
         ExportError::Internal(format!("Failed to load wallets for wallet-data export: {err}"))
@@ -1985,14 +2018,20 @@ pub(crate) async fn export_wallet_data(
         tracing::error!(user_id = %user_id, error = %err, "exports: failed to load sync slots for wallet-data export");
         ExportError::Internal(format!("Failed to load sync slots for wallet-data export: {err}"))
     })?;
-    let user_settings = load_settings(user_id).map_err(|err| {
-        tracing::error!(user_id = %user_id, error = %err, "exports: failed to load settings for wallet-data export");
-        ExportError::Internal(format!("Failed to load settings for wallet-data export: {err}"))
-    })?;
-    let api_keys = list_all_api_keys(user_id).map_err(|err| {
-        tracing::error!(user_id = %user_id, error = %err, "exports: failed to load API key metadata for wallet-data export");
-        ExportError::Internal("Failed to load API keys for wallet-data export".to_string())
-    })?;
+    let (user_settings, api_keys) = match scope {
+        WalletArchiveScope::Browser => {
+            let user_settings = load_settings(user_id).map_err(|err| {
+                tracing::error!(%user_id, error = %err, "exports: failed to load wallet-data settings");
+                ExportError::Internal(format!("Failed to load settings for wallet-data export: {err}"))
+            })?;
+            let api_keys = list_all_api_keys(user_id).map_err(|err| {
+                tracing::error!(%user_id, error = %err, "exports: failed to load wallet-data API keys");
+                ExportError::Internal("Failed to load API keys for wallet-data export".to_string())
+            })?;
+            (Some(user_settings), api_keys)
+        }
+        WalletArchiveScope::PairedWallets => (None, Vec::new()),
+    };
 
     let username: String = with_db(|conn| {
         conn.query_row(
@@ -2036,7 +2075,7 @@ pub(crate) async fn export_wallet_data(
         manual_asset_accounts,
         manual_assertions,
         sync_slots,
-        user_settings: Some(user_settings),
+        user_settings,
         api_keys,
         premium_transfer,
     })?;
@@ -2044,8 +2083,18 @@ pub(crate) async fn export_wallet_data(
         tracing::error!(user_id = %user_id, error = %err, "exports: failed to serialize wallet-data payload");
         ExportError::Internal(format!("Failed to serialize wallet-data export payload: {err}"))
     })?;
+    if scope == WalletArchiveScope::PairedWallets && payload_json.len() > MAX_IMPORT_PAYLOAD_BYTES {
+        return Err(ExportError::Validation(
+            "Wallet data exceeds the 10 MiB import limit.".to_owned(),
+        ));
+    }
     let zip_bytes =
         wrap_in_wallet_data_zip(&payload_json, password.as_deref().map(String::as_str))?;
+    if scope == WalletArchiveScope::PairedWallets && zip_bytes.len() > MAX_IMPORT_PAYLOAD_BYTES {
+        return Err(ExportError::Validation(
+            "Wallet archive exceeds the 10 MiB import limit.".to_owned(),
+        ));
+    }
     let zip_base64 = BASE64.encode(zip_bytes);
     let mut summary = export_payload.summary;
     summary.encrypted = encrypted;
@@ -2162,7 +2211,7 @@ fn apply_import_settings(user_id: crate::models::UserId, settings: &WalletDataIm
             match MempoolBaseUrl::parse(url_str) {
                 Ok(url) => Some(url),
                 Err(_) => {
-                    tracing::warn!(user_id = %user_id, url = %url_str, "imports: skipping invalid imported mempool_base_url");
+                    tracing::warn!(user_id = %user_id, "imports: skipping invalid imported mempool_base_url");
                     None
                 }
             }
@@ -2177,13 +2226,13 @@ fn apply_import_settings(user_id: crate::models::UserId, settings: &WalletDataIm
             match EtherscanBaseUrl::parse(url_str) {
                 Ok(url) => Some(url),
                 Err(_) => {
-                    tracing::warn!(user_id = %user_id, url = %url_str, "imports: skipping invalid imported etherscan_base_url");
+                    tracing::warn!(user_id = %user_id, "imports: skipping invalid imported etherscan_base_url");
                     None
                 }
             }
         });
         if let Some(ref url) = etherscan_url_opt
-            && let Err(err) = save_etherscan_base_url(user_id, Some(url))
+            && let Err(err) = save_etherscan_base_url(user_id, Some(url), |_| true)
         {
             tracing::warn!(user_id = %user_id, error = %err, "imports: failed to apply imported etherscan_base_url");
         }
@@ -2237,6 +2286,48 @@ pub(crate) async fn describe_wallet_data_import(
     describe_wallet_data_value(&payload_value)
 }
 
+#[cfg(feature = "server")]
+fn import_wallet_records(
+    user_id: crate::models::UserId,
+    payload_json: &str,
+) -> Result<WalletDataImportResult, ExportError> {
+    let import_started_at = Utc::now();
+    let entitlements =
+        crate::payments::entitlements::load_feature_entitlements(user_id, import_started_at)
+            .map_err(|err| ExportError::Internal(format!("Failed to load entitlements: {err}")))?;
+    import_wallet_data_db(user_id, payload_json, &entitlements, import_started_at)
+        .map_err(map_import_error)
+}
+
+#[cfg(all(feature = "server", any(test, not(feature = "desktop"))))]
+pub(super) async fn import_paired_wallet_data(
+    user_id: crate::models::UserId,
+    payload_base64: &str,
+    password: String,
+) -> Result<ImportResultView, ExportError> {
+    let password = Zeroizing::new(password);
+    let bytes = decode_wallet_data_zip_base64(payload_base64)?;
+    let archive = unwrap_wallet_data_zip(&bytes, Some(&password))?;
+    if !archive.encrypted {
+        return Err(ExportError::Validation(
+            "Choose a password-encrypted wallet-data ZIP.".to_owned(),
+        ));
+    }
+    let json = translated_wallet_data_json(&archive.payload_json)?;
+    let result = import_wallet_records(user_id, &json)?;
+    let sync_triggered = !result.native_accounts_created.is_empty()
+        && enqueue_automatic_add_sync(user_id, AutomaticSyncAddTarget::MultiAccountImport).await;
+    Ok(import_result_view(
+        result,
+        sync_triggered,
+        false,
+        0,
+        0,
+        PremiumTransferImportStatusView::NotPresent,
+        None,
+    ))
+}
+
 #[post("/_app/user/imports/wallet-data", cookies: CookieJar)]
 pub(crate) async fn import_wallet_data(
     request: ImportWalletDataRequest,
@@ -2266,17 +2357,7 @@ pub(crate) async fn import_wallet_data(
     let import_settings =
         extract_import_settings(&translated_payload_json).map_err(map_import_error)?;
 
-    let import_started_at = Utc::now();
-    let entitlements =
-        crate::payments::entitlements::load_feature_entitlements(user_id, import_started_at)
-            .map_err(|err| ExportError::Internal(format!("Failed to load entitlements: {err}")))?;
-    let import_result = import_wallet_data_db(
-        user_id,
-        &translated_payload_json,
-        &entitlements,
-        import_started_at,
-    )
-    .map_err(map_import_error)?;
+    let import_result = import_wallet_records(user_id, &translated_payload_json)?;
 
     let (premium_transfer_status, pending_premium_transfer_id) =
         match extract_pending_premium_transfer(
@@ -2434,7 +2515,7 @@ pub(crate) async fn confirm_premium_transfer(
             let retryable = retryable_central_transfer_error(&error);
             let error_code = central_transfer_error_code(&error);
             let message = if retryable {
-                "Premium transfer is pending. BitGarth could not reach the payment service reliably; retry later."
+                "Premium transfer is pending. BitGarth's servers could not be reached reliably; retry later."
             } else if error.is_upgrade_required() {
                 "BitGarth needs an update before this Premium transfer can be completed."
             } else {

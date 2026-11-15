@@ -3,9 +3,9 @@ use super::super::{
     format_balance_for_asset,
 };
 use super::helpers::{
-    TxCountDisplay, WalletMoveOption, address_explorer_url, addresses_total_pages,
-    copy_to_clipboard, format_sync_relative_time, logical_account_count_label,
-    move_wallet_error_message, sync_status_error_message, transaction_count_display,
+    CopyFeedback, TxCountDisplay, WalletMoveOption, address_explorer_url, addresses_total_pages,
+    format_sync_relative_time, logical_account_count_label, move_wallet_error_message,
+    sync_status_error_message, transaction_count_display, use_copy_feedback,
 };
 use super::sync_state::AccountSyncNowSignal;
 use crate::backend::AccountTransactionCountsView;
@@ -589,25 +589,18 @@ pub(super) fn HdKeyRow(extended_pubkey: String, derivation_path: String) -> Elem
 
 #[component]
 pub(super) fn CopyIconButton(value: String, aria_label: String) -> Element {
-    let mut copied = use_signal(|| false);
+    let (feedback, copy) = use_copy_feedback(1500);
+    let copied = feedback == CopyFeedback::Copied;
+    let label = feedback.label(&aria_label, "Copied!");
 
     rsx! {
         button {
-            class: if copied() { "inline-copy-btn copied" } else { "inline-copy-btn" },
+            class: if copied { "inline-copy-btn copied" } else { "inline-copy-btn" },
             r#type: "button",
-            "aria-label": if copied() { "Copied!" } else { aria_label.as_str() },
-            title: if copied() { "Copied!" } else { aria_label.as_str() },
-            onclick: move |_| {
-                copy_to_clipboard(&value);
-                copied.set(true);
-                spawn(async move {
-                    let mut timer =
-                        dioxus::document::eval(r#"setTimeout(() => { dioxus.send(null); }, 1500);"#);
-                    let _ = timer.recv::<serde_json::Value>().await;
-                    copied.set(false);
-                });
-            },
-            if copied() {
+            "aria-label": label,
+            title: label,
+            onclick: move |_| copy.call(value.clone()),
+            if copied {
                 CheckIcon {}
             } else {
                 CopyIcon {}

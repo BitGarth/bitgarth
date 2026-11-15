@@ -13,14 +13,16 @@ description: |
    - your own self-hosted BitGarth (Docker, Homebrew or a release download)
    - the hosted service at https://my.bitgarth.app
 
-  Link the client to your account once, then read your balances:
+  Link the client to your account once, then manage your portfolio:
 
-    bitgarth-cli pair https://my.bitgarth.app/
-    bitgarth-cli balancesheet
+    bitgarth-cli auth login https://my.bitgarth.app/
+    bitgarth-cli balance
+    bitgarth-cli account add bitcoin <ADDRESS_OR_XPUB>
 
-  For the local bitgarth-web snap, pair with http://127.0.0.1:8080/ and
-  add --allow-insecure-http. "login" works as another name for "pair".
-  Revoke access any time in the web app under Settings > Paired Clients.
+  For the local bitgarth-web snap, log in with http://127.0.0.1:8080/ and
+  add --allow-insecure-http. Run bitgarth-cli --help for every command.
+  Revoke access any time with bitgarth-cli auth logout or in the web app
+  under Settings > Paired Clients.
 
   Website and documentation: https://bitgarth.app
 

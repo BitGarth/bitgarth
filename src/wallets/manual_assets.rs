@@ -452,6 +452,7 @@ pub(crate) struct ManualAssetAccountTransactionsResponse {
     pub symbol: Option<String>,
     pub asset_name: Option<String>,
     pub network_name: Option<String>,
+    pub catalog_asset_key: crate::asset_views::CatalogAssetKey,
     pub opening_balance_state: crate::backend::AccountBalanceStateView,
     pub opening_balance_date: Option<String>,
     pub closing_balance_state: crate::backend::AccountBalanceStateView,

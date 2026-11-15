@@ -1,0 +1,275 @@
+/* ============================================================
+   Prices page: saved daily prices for the user's own assets.
+   Design system: §9.11 ledger table, §9.20 gap row, §9.21 copyable figure.
+   ============================================================ */
+
+/* Asset switcher pills are links here, not buttons. */
+a.tx-filter-pill {
+  text-decoration: none;
+  background-image: none;
+}
+
+.prices-table-wrap {
+  padding: 0 var(--app-space-4);
+}
+
+.prices-scope-note {
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+  margin: 0 0 var(--app-space-3);
+}
+
+/* ── Ledger table (§9.11) ── */
+
+.prices-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.prices-table th {
+  padding: var(--app-space-2) var(--app-space-3);
+  text-align: left;
+  font-weight: var(--weight-medium);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  border-top: 1px solid var(--ink);
+  border-bottom: 1px solid var(--ink);
+  white-space: nowrap;
+}
+
+.prices-table td {
+  padding: var(--app-space-2) var(--app-space-3);
+  border-bottom: 1px solid var(--paper-edge);
+  vertical-align: baseline;
+  color: var(--ink);
+}
+
+.prices-table tbody tr:not(.prices-gap):hover td {
+  background: var(--paper-deep);
+}
+
+.prices-table .prices-num {
+  text-align: right;
+}
+
+.prices-date {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.prices-time,
+.prices-note {
+  display: block;
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+}
+
+.prices-source {
+  color: var(--ink-soft);
+}
+
+.prices-source-own {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+/* ── Gap row (§9.20) ── */
+
+.prices-table .prices-gap td {
+  border-top: 1px dashed color-mix(in srgb, var(--ink) 22%, transparent);
+  border-bottom: 1px dashed color-mix(in srgb, var(--ink) 22%, transparent);
+  padding: var(--app-space-3);
+  text-align: center;
+  color: var(--ink-soft);
+}
+
+.prices-gap-count {
+  font-family: var(--display);
+  font-style: italic;
+}
+
+.prices-gap-range {
+  font-size: var(--fs-caption);
+  margin-left: 0.5em;
+}
+
+/* ── Copyable figure (§9.21) ── */
+
+.prices-copy {
+  position: relative;
+  display: inline-flex;
+  align-items: baseline;
+  border: 0;
+  background: transparent;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  font-family: var(--mono);
+  font-size: inherit;
+  font-variant-numeric: tabular-nums;
+  color: inherit;
+  white-space: nowrap;
+  cursor: copy;
+  border-radius: var(--radius-tag);
+}
+
+.prices-copy:hover {
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+}
+
+.prices-copy:focus-visible {
+  outline: 2px solid var(--moss);
+  outline-offset: 2px;
+}
+
+.prices-int {
+  text-align: right;
+}
+
+.prices-frac {
+  display: inline-block;
+  text-align: left;
+}
+
+.prices-unit {
+  color: var(--sage);
+  margin-left: 0.35em;
+}
+
+/* Exact value above the figure; "Copied …" after a click or tap. */
+.prices-copy::after {
+  content: attr(data-full);
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  padding: 4px 8px;
+  white-space: nowrap;
+  background: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-tag);
+  box-shadow: var(--shadow-card);
+  font-family: var(--mono);
+  font-size: var(--fs-caption);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(2px);
+  transition:
+    opacity var(--dur-quick) var(--ease-default),
+    transform var(--dur-quick) var(--ease-default);
+  z-index: 2;
+}
+
+.prices-copy:hover::after,
+.prices-copy:focus-visible::after,
+.prices-copy.copied::after {
+  opacity: 1;
+  transform: none;
+}
+
+.prices-copy.copied::after {
+  color: var(--moss);
+}
+
+/* Copy glyph to the left of the number; absolutely placed, no layout shift. */
+.prices-copy-state {
+  position: absolute;
+  right: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  color: var(--sage);
+  opacity: 0;
+  transition: opacity var(--dur-quick) var(--ease-default);
+}
+
+.prices-copy:hover .prices-copy-state,
+.prices-copy:focus-visible .prices-copy-state,
+.prices-copy.copied .prices-copy-state {
+  opacity: 1;
+}
+
+.prices-copy.copied .prices-copy-state {
+  color: var(--moss);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ── CoinGecko off / just switched on: §9.18 info notice ── */
+
+.prices-source-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-2) var(--app-space-4);
+}
+
+.prices-source-notice-body,
+.prices-source-help {
+  margin: 0;
+}
+
+.prices-source-help {
+  flex-basis: 100%;
+  font-size: var(--fs-caption);
+  max-width: var(--measure);
+}
+
+.prices-source-switch {
+  gap: var(--app-space-2);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+/* ── Narrow screens: date and price on one line, source beneath ── */
+
+@media (max-width: 560px) {
+  .prices-table-wrap {
+    padding: 0 var(--app-space-2);
+  }
+
+  .prices-table thead {
+    display: none;
+  }
+
+  .prices-table tr:not(.prices-gap) {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-areas: "date price" "source source";
+    border-bottom: 1px solid var(--paper-edge);
+    padding: var(--app-space-2) 0;
+  }
+
+  .prices-table tr:not(.prices-gap) td {
+    border: 0;
+    padding: 2px var(--app-space-2);
+  }
+
+  .prices-table td.prices-date {
+    grid-area: date;
+  }
+
+  .prices-table td.prices-num {
+    grid-area: price;
+  }
+
+  .prices-table td.prices-source {
+    grid-area: source;
+    font-size: var(--fs-caption);
+  }
+
+  .prices-table .prices-gap,
+  .prices-table .prices-gap td {
+    display: block;
+  }
+}

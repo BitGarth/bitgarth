@@ -7,6 +7,8 @@ use crate::settings::{SettingsState, common_currencies};
 
 use super::{ToastLevel, ToastState, push_toast};
 
+pub(super) const SYNC_HELP: &str = "While anyone here has CoinGecko syncing on, BitGarth updates daily prices for known assets and currencies even when everyone is signed out.";
+
 /// Navbar control for CoinGecko price fetching. It shares SettingsState with
 /// the Settings page so both surfaces stay in sync.
 #[component]
@@ -84,7 +86,7 @@ pub(crate) fn CoinGeckoPriceControl() -> Element {
         div {
             class: "nav-price-control",
             "data-testid": "nav-price-control",
-            title: "When enabled, BitGarth requests prices for your assets and selected currency.",
+            title: SYNC_HELP,
             label { class: "nav-price-switch",
                 input {
                     "data-testid": "nav-price-fetching-toggle",
@@ -92,10 +94,10 @@ pub(crate) fn CoinGeckoPriceControl() -> Element {
                     checked: enabled(),
                     disabled: saving(),
                     onchange: toggle,
-                    "aria-label": "Show CoinGecko prices",
+                    "aria-label": "Enable CoinGecko price syncing",
                 }
-                span { class: "nav-price-glyph", "$" }
-                span { class: "nav-price-label", "CoinGecko Prices" }
+                span { class: "nav-price-glyph", "{currency.read().symbol()}" }
+                span { class: "nav-price-label", "CoinGecko prices" }
                 span { class: "nav-price-track",
                     span { class: "nav-price-knob" }
                 }

@@ -303,6 +303,37 @@ pub(crate) struct AccountTransactionRowResponse {
     pub fee: Option<crate::backend::BalanceAmountView>,
     pub closing_balance: Option<crate::backend::BalanceAmountView>,
     pub balance_reliability: BalanceReliability,
+    /// Value in the user's currency on the day the transaction happened, priced
+    /// the same way as the reports. `None` when no price is saved for that day.
+    #[serde(default)]
+    pub fiat: Option<TransactionFiatView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct TransactionFiatView {
+    pub price: rust_decimal::Decimal,
+    pub value: rust_decimal::Decimal,
+    pub fee: Option<rust_decimal::Decimal>,
+}
+
+/// Settled money flows (confirmed and failed transactions) in the selected
+/// date range. The status filter does not apply.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct AccountFlowSummaryView {
+    pub received: crate::backend::BalanceAmountView,
+    pub sent: crate::backend::BalanceAmountView,
+    pub fees: crate::backend::BalanceAmountView,
+    /// `None` when the asset has no price (test networks) or any settled
+    /// transaction in the range has no price for its day.
+    pub fiat: Option<AccountFlowFiatView>,
+    pub unpriced_transactions: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct AccountFlowFiatView {
+    pub received: rust_decimal::Decimal,
+    pub sent: rust_decimal::Decimal,
+    pub fees: rust_decimal::Decimal,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -376,6 +407,13 @@ pub(crate) struct GetAccountTransactionsResponse {
     pub active_from_date: Option<String>,
     pub active_to_date: Option<String>,
     pub confirmed_empty_hint: Option<TransactionsEmptyHint>,
+    /// The currency of every `fiat` value in this response. `None` when the
+    /// asset is not priced (test networks).
+    #[serde(default)]
+    pub fiat_currency: Option<crate::models::CurrencyCode>,
+    /// `None` when the range has no settled transactions.
+    #[serde(default)]
+    pub flow_summary: Option<Box<AccountFlowSummaryView>>,
     pub pending: AccountTransactionTableResponse,
     pub confirmed: AccountTransactionTableResponse,
 }

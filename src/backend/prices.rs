@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -9,23 +9,32 @@ use super::session_context::{
 };
 #[cfg(feature = "server")]
 use crate::asset_capabilities::AssetId;
+use crate::asset_views::CatalogAssetKey;
 #[cfg(feature = "server")]
 use crate::db::{self, PriceOverrideRecord};
 use crate::models::CurrencyCode;
 #[cfg(feature = "server")]
 use crate::models::{FieldErrors, SessionToken, UserTimezone};
 #[cfg(feature = "server")]
+use crate::report_dates::LocalReportDateRange;
+#[cfg(feature = "server")]
+use crate::services::price_history_view::{
+    DailyInView, OwnPrice, PriceHistoryPage, build_price_history_page,
+};
+use crate::services::price_history_view::{PriceHistoryEntry, PriceHistorySort, PriceSourceFilter};
+#[cfg(feature = "server")]
 use crate::services::price_overrides::price_subject_sort_key;
 use crate::services::price_overrides::{BoundaryKind, PriceSubject};
 #[cfg(feature = "server")]
 use crate::services::price_overrides::{
-    NewPriceOverride, OverrideLookup, PriceOverride, PriceOverrideValidationError, PriceSource,
-    ResolvedPrice, local_timestamp_to_utc, report_boundary_utc, validate_price_decimal,
-    validate_source_note,
+    NewPriceOverride, OverrideLookup, PriceOverride, PriceOverrideValidationError,
+    local_timestamp_to_utc, report_boundary_utc, validate_price_decimal, validate_source_note,
 };
 #[cfg(feature = "server")]
 use crate::wallets::SyncedAssetId;
 use crate::wallets::{ReportDateParam, ReportTimezoneParam, WalletId};
+#[cfg(feature = "server")]
+use chrono::Datelike;
 
 #[cfg(feature = "server")]
 use axum_extra::extract::cookie::CookieJar;
@@ -110,10 +119,6 @@ pub(crate) enum PriceSourceView {
     },
     ProviderPrice {
         provider: String,
-        provider_asset_id: Option<String>,
-        provider_quote_id: Option<String>,
-        retrieved_at: DateTime<Utc>,
-        license_scope: String,
     },
 }
 
@@ -178,8 +183,8 @@ fn invalid_price_subject_type_error() -> PriceOverrideError {
 }
 
 #[cfg(feature = "server")]
-fn internal_error(context: &str, detail: impl std::fmt::Display) -> PriceOverrideError {
-    tracing::error!(context, error = %detail, "prices: internal failure");
+fn internal_error(context: &'static str, _detail: impl std::fmt::Display) -> PriceOverrideError {
+    tracing::error!(context, "prices: internal failure");
     PriceOverrideError::internal()
 }
 
@@ -243,20 +248,39 @@ pub(crate) fn parse_price_subject(
                 .map_err(|_| {
                     validation_error("subject_id", "Invalid native asset id".to_string())
                 })?;
-            let is_known = matches!(
-                key.as_str(),
-                "bitcoin" | "ethereum" | "usd-coin" | "cardano"
-            );
-            if !is_known {
-                return Err(validation_error(
-                    "subject_id",
-                    "Invalid native asset id".to_string(),
-                ));
-            }
             Ok(PriceSubject::CatalogAsset(key))
         }
         _ => Err(invalid_price_subject_type_error()),
     }
+}
+
+#[cfg(feature = "server")]
+fn validate_override_subject(
+    user_id: crate::models::UserId,
+    subject: &PriceSubject,
+) -> Result<(), PriceOverrideError> {
+    let PriceSubject::CatalogAsset(key) = subject;
+    let id = key.as_str();
+    let synced = AssetId::owned(id.to_owned())
+        .ok()
+        .is_some_and(|id| crate::asset_capabilities::asset(&id).is_some());
+    if synced
+        || crate::asset_capabilities::load_unsynced_catalog()
+            .map_err(|err| internal_error("price_asset_catalog", err))?
+            .coingecko_id_for_asset_id(id)
+            .is_some()
+    {
+        return Ok(());
+    }
+    if db::has_personal_price_asset(user_id, id)
+        .map_err(|err| internal_error("personal_price_asset", err))?
+    {
+        return Ok(());
+    }
+    Err(validation_error(
+        "subject_id",
+        "Unknown price asset".to_owned(),
+    ))
 }
 
 #[get("/_app/user/prices/overrides?subject_type&subject_id&quote_currency&from&to", cookies: CookieJar)]
@@ -268,8 +292,28 @@ pub(crate) async fn list_price_overrides(
     to: DateTime<Utc>,
 ) -> Result<Vec<PriceOverrideView>, PriceOverrideError> {
     let initialized_session = current_session(&cookies)?;
-    let user_id = initialized_session.session.user_id;
+    list_price_overrides_for_user(
+        initialized_session.session.user_id,
+        subject_type,
+        subject_id,
+        quote_currency,
+        from,
+        to,
+    )
+    .await
+}
+
+#[cfg(feature = "server")]
+pub(crate) async fn list_price_overrides_for_user(
+    user_id: crate::models::UserId,
+    subject_type: String,
+    subject_id: String,
+    quote_currency: CurrencyCode,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<PriceOverrideView>, PriceOverrideError> {
     let subject = parse_price_subject(&subject_type, &subject_id)?;
+    validate_override_subject(user_id, &subject)?;
     let records = db::list_price_overrides_in_range(user_id, subject, quote_currency, from, to)
         .map_err(|err| internal_error("list_price_overrides_in_range", err))?;
     Ok(records.into_iter().map(PriceOverrideView::from).collect())
@@ -280,11 +324,19 @@ pub(crate) async fn upsert_price_override(
     input: UpsertPriceOverrideInput,
 ) -> Result<PriceOverrideView, PriceOverrideError> {
     let initialized_session = current_session(&cookies)?;
-    let user_id = initialized_session.session.user_id;
+    upsert_price_override_for_user(initialized_session.session.user_id, input).await
+}
+
+#[cfg(feature = "server")]
+pub(crate) async fn upsert_price_override_for_user(
+    user_id: crate::models::UserId,
+    input: UpsertPriceOverrideInput,
+) -> Result<PriceOverrideView, PriceOverrideError> {
     let entitlements =
         crate::payments::entitlements::load_feature_entitlements(user_id, Utc::now())
             .map_err(|err| internal_error("load_feature_entitlements", err))?;
     ensure_price_override_mutation_allowed(&entitlements)?;
+    validate_override_subject(user_id, &input.subject)?;
     let timezone = load_user_timezone(user_id)?;
     let price_time_utc = local_timestamp_to_utc(&input.price_time_local, timezone)
         .map_err(|err| validation_to_error("price_time_local", err))?;
@@ -312,42 +364,24 @@ pub(crate) async fn delete_price_override(
     input: DeletePriceOverrideInput,
 ) -> Result<(), PriceOverrideError> {
     let initialized_session = current_session(&cookies)?;
-    let user_id = initialized_session.session.user_id;
+    delete_price_override_for_user(initialized_session.session.user_id, input).await
+}
+
+#[cfg(feature = "server")]
+pub(crate) async fn delete_price_override_for_user(
+    user_id: crate::models::UserId,
+    input: DeletePriceOverrideInput,
+) -> Result<(), PriceOverrideError> {
     let entitlements =
         crate::payments::entitlements::load_feature_entitlements(user_id, Utc::now())
             .map_err(|err| internal_error("load_feature_entitlements", err))?;
     ensure_price_override_mutation_allowed(&entitlements)?;
+    validate_override_subject(user_id, &input.subject)?;
     let timezone = load_user_timezone(user_id)?;
     let price_time_utc = local_timestamp_to_utc(&input.price_time_local, timezone)
         .map_err(|err| validation_to_error("price_time_local", err))?;
     db::delete_price_override(user_id, input.subject, input.quote_currency, price_time_utc)
         .map_err(|err| internal_error("delete_price_override", err))
-}
-
-#[cfg(feature = "server")]
-fn source_view_from_domain(source: PriceSource) -> PriceSourceView {
-    match source {
-        PriceSource::UserOverride {
-            source_note,
-            updated_at,
-        } => PriceSourceView::UserOverride {
-            source_note,
-            updated_at,
-        },
-        PriceSource::ProviderPrice {
-            provider,
-            provider_asset_id,
-            provider_quote_id,
-            retrieved_at,
-            license_scope,
-        } => PriceSourceView::ProviderPrice {
-            provider,
-            provider_asset_id,
-            provider_quote_id,
-            retrieved_at,
-            license_scope,
-        },
-    }
 }
 
 #[cfg(feature = "server")]
@@ -357,17 +391,17 @@ fn provider_price_query_for_subject(
     boundary: BoundaryKind,
     from: ReportDateParam,
     to: ReportDateParam,
-) -> Option<db::DailyPricePointQuery> {
+) -> db::DailyPricePointQuery {
     let PriceSubject::CatalogAsset(asset_id) = subject;
     let date_utc = match boundary {
         BoundaryKind::Opening => from.into_naive_date(),
         BoundaryKind::Closing => to.into_naive_date(),
     };
-    Some(db::DailyPricePointQuery {
+    db::DailyPricePointQuery {
         asset_id: asset_id.as_str().to_string(),
         quote_currency: quote,
         date_utc,
-    })
+    }
 }
 
 #[cfg(feature = "server")]
@@ -378,37 +412,25 @@ fn resolve_report_price_from_sources(
     provider: Option<db::DailyPricePointRecord>,
 ) -> ResolvedPriceView {
     if let Some(manual) = manual {
-        let resolved = ResolvedPrice {
-            price: manual.price,
-            source: PriceSource::UserOverride {
-                source_note: manual.source_note,
-                updated_at: manual.updated_at,
-            },
-        };
         return ResolvedPriceView {
             subject,
             boundary,
-            price: Some(resolved.price.to_string()),
-            source: Some(source_view_from_domain(resolved.source)),
+            price: Some(manual.price.to_string()),
+            source: Some(PriceSourceView::UserOverride {
+                source_note: manual.source_note,
+                updated_at: manual.updated_at,
+            }),
         };
     }
 
     if let Some(provider) = provider {
-        let resolved = ResolvedPrice {
-            price: provider.price,
-            source: PriceSource::ProviderPrice {
-                provider: provider.provider,
-                provider_asset_id: provider.provider_asset_id,
-                provider_quote_id: provider.provider_quote_id,
-                retrieved_at: provider.retrieved_at,
-                license_scope: provider.license_scope,
-            },
-        };
         return ResolvedPriceView {
             subject,
             boundary,
-            price: Some(resolved.price.to_string()),
-            source: Some(source_view_from_domain(resolved.source)),
+            price: Some(provider.price.to_string()),
+            source: Some(PriceSourceView::ProviderPrice {
+                provider: provider.provider,
+            }),
         };
     }
 
@@ -421,17 +443,58 @@ fn resolve_report_price_from_sources(
 }
 
 #[cfg(feature = "server")]
-struct BoundaryResolutionContext<'a> {
+struct BoundaryResolutionContext {
     user_id: crate::models::UserId,
-    prices_conn: &'a rusqlite::Connection,
+    coingecko: Option<rusqlite::Connection>,
     quote: CurrencyCode,
     from: ReportDateParam,
     to: ReportDateParam,
 }
 
 #[cfg(feature = "server")]
+impl BoundaryResolutionContext {
+    fn load(
+        user_id: crate::models::UserId,
+        from: ReportDateParam,
+        to: ReportDateParam,
+    ) -> Result<Self, PriceOverrideError> {
+        let settings = db::load_settings(user_id)
+            .map_err(|err| internal_error("load_settings_for_report_prices", err))?;
+        let quote = settings.currency.unwrap_or_else(|| {
+            crate::settings::default_currency(settings.language.unwrap_or_default())
+        });
+        let coingecko = settings
+            .price_fetching_enabled
+            .then(db::open_migrated_prices_db)
+            .transpose()
+            .map_err(|err| internal_error("open_prices_db_for_report_prices", err))?;
+        Ok(Self {
+            user_id,
+            from,
+            to,
+            quote,
+            coingecko,
+        })
+    }
+
+    fn provider_price(
+        &self,
+        subject: &PriceSubject,
+        boundary: BoundaryKind,
+    ) -> Result<Option<db::DailyPricePointRecord>, PriceOverrideError> {
+        let Some(conn) = &self.coingecko else {
+            return Ok(None);
+        };
+        let query =
+            provider_price_query_for_subject(subject, self.quote, boundary, self.from, self.to);
+        db::lookup_daily_price_point(conn, &query)
+            .map_err(|err| internal_error("lookup_daily_price_point", err))
+    }
+}
+
+#[cfg(feature = "server")]
 fn resolve_boundary_view(
-    context: &BoundaryResolutionContext<'_>,
+    context: &BoundaryResolutionContext,
     subject: PriceSubject,
     boundary: BoundaryKind,
     lookup: OverrideLookup,
@@ -441,17 +504,7 @@ fn resolve_boundary_view(
 
     let manual = manual.map(PriceOverride::from);
     let provider = if manual.is_none() {
-        match provider_price_query_for_subject(
-            &subject,
-            context.quote,
-            boundary,
-            context.from,
-            context.to,
-        ) {
-            Some(query) => db::lookup_daily_price_point(context.prices_conn, &query)
-                .map_err(|err| internal_error("lookup_daily_price_point", err))?,
-            None => None,
-        }
+        context.provider_price(&subject, boundary)?
     } else {
         None
     };
@@ -476,7 +529,7 @@ fn catalog_asset_price_subject(asset_id: &AssetId) -> PriceSubject {
 }
 
 #[cfg(feature = "server")]
-fn native_asset_price_subject(asset_id: SyncedAssetId) -> PriceSubject {
+pub(super) fn native_asset_price_subject(asset_id: SyncedAssetId) -> PriceSubject {
     catalog_asset_price_subject(&crate::asset_capabilities::asset_id_for_synced_asset(
         asset_id,
     ))
@@ -623,7 +676,7 @@ pub(crate) fn holdings_report_price_rows(
 
 #[cfg(feature = "server")]
 fn resolve_boundary_views_for_subjects(
-    context: &BoundaryResolutionContext<'_>,
+    context: &BoundaryResolutionContext,
     subjects: Vec<PriceSubject>,
     user_timezone: UserTimezone,
 ) -> Result<Vec<ResolvedPriceView>, PriceOverrideError> {
@@ -740,20 +793,7 @@ pub(crate) async fn list_resolved_prices_for_report(
     );
     sort_and_dedupe_subjects(&mut subjects);
 
-    let settings = db::load_settings(user_id)
-        .map_err(|err| internal_error("load_settings_for_prices", err))?;
-    let quote = settings.currency.unwrap_or_else(|| {
-        crate::settings::default_currency(settings.language.unwrap_or_default())
-    });
-    let prices_conn = db::initialize_prices_db()
-        .map_err(|err| internal_error("initialize_prices_db_for_report_prices", err))?;
-    let boundary_context = BoundaryResolutionContext {
-        user_id,
-        prices_conn: &prices_conn,
-        quote,
-        from: effective_from,
-        to: effective_to,
-    };
+    let boundary_context = BoundaryResolutionContext::load(user_id, effective_from, effective_to)?;
     resolve_boundary_views_for_subjects(&boundary_context, subjects, user_timezone)
 }
 
@@ -816,22 +856,415 @@ pub(crate) fn resolved_prices_for_holdings_report_price_rows(
         .collect::<Vec<_>>();
     sort_and_dedupe_subjects(&mut subjects);
 
-    let settings = db::load_settings(user_id)
-        .map_err(|err| internal_error("load_settings_for_holdings_prices", err))?;
-    let quote = settings.currency.unwrap_or_else(|| {
+    let boundary_context = BoundaryResolutionContext::load(
+        user_id,
+        ReportDateParam::from_naive_date(report.resolved_from),
+        ReportDateParam::from_naive_date(report.resolved_to),
+    )?;
+    resolve_boundary_views_for_subjects(&boundary_context, subjects, user_timezone)
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub(crate) struct HeldAssetView {
+    pub(crate) key: CatalogAssetKey,
+    pub(crate) name: String,
+}
+
+/// Saved prices for one asset the user holds. The user's own prices are always
+/// included. CoinGecko prices (and their gap rows) are included only while the
+/// user's own CoinGecko toggle is on, so the shared prices database can't be
+/// read by someone who has not opted in to that source.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub(crate) struct PriceHistoryView {
+    pub(crate) prices_enabled: bool,
+    pub(crate) assets: Vec<HeldAssetView>,
+    pub(crate) selected: Option<CatalogAssetKey>,
+    pub(crate) currency: CurrencyCode,
+    pub(crate) resolved_from: NaiveDate,
+    pub(crate) resolved_to: NaiveDate,
+    pub(crate) access: crate::report_access::ReportAccessView,
+    pub(crate) default_this_year_from: NaiveDate,
+    pub(crate) default_this_year_to: NaiveDate,
+    pub(crate) entries: Vec<PriceHistoryEntry>,
+    pub(crate) page: u32,
+    pub(crate) total_entries: u32,
+    pub(crate) sort: PriceHistorySort,
+    /// The source filter applied to the returned entries.
+    pub(crate) source: PriceSourceFilter,
+}
+
+#[get("/_app/user/prices/history?asset&from&to&page&sort&source", cookies: CookieJar)]
+pub(crate) async fn get_price_history(
+    asset: Option<String>,
+    from: Option<ReportDateParam>,
+    to: Option<ReportDateParam>,
+    page: Option<u32>,
+    sort: Option<PriceHistorySort>,
+    source: Option<PriceSourceFilter>,
+) -> Result<PriceHistoryView, PriceOverrideError> {
+    let initialized_session = current_session(&cookies)?;
+    get_price_history_for_user(
+        initialized_session.session.user_id,
+        PriceHistoryQuery {
+            asset,
+            from,
+            to,
+            page,
+            sort,
+            source,
+        },
+        PriceSelection::Fallback,
+    )
+    .await
+}
+
+#[cfg(feature = "server")]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PriceHistoryQuery {
+    asset: Option<String>,
+    from: Option<ReportDateParam>,
+    to: Option<ReportDateParam>,
+    page: Option<u32>,
+    sort: Option<PriceHistorySort>,
+    source: Option<PriceSourceFilter>,
+}
+
+/// The web picker recovers from a stale selection after the user changes wallets or sources.
+#[cfg(feature = "server")]
+#[derive(PartialEq, Eq)]
+pub(crate) enum PriceSelection {
+    Exact,
+    Fallback,
+}
+
+#[cfg(feature = "server")]
+pub(crate) async fn get_price_history_for_user(
+    user_id: crate::models::UserId,
+    request: PriceHistoryQuery,
+    selection: PriceSelection,
+) -> Result<PriceHistoryView, PriceOverrideError> {
+    let PriceHistoryQuery {
+        asset,
+        from,
+        to,
+        page,
+        sort,
+        source,
+    } = request;
+    let timezone = load_user_timezone(user_id)?;
+    let settings =
+        db::load_settings(user_id).map_err(|err| internal_error("load_settings", err))?;
+    let currency = settings.currency.unwrap_or_else(|| {
         crate::settings::default_currency(settings.language.unwrap_or_default())
     });
-    let prices_conn = db::initialize_prices_db()
-        .map_err(|err| internal_error("initialize_prices_db_for_holdings_prices", err))?;
-    let boundary_context = BoundaryResolutionContext {
-        user_id,
-        prices_conn: &prices_conn,
-        quote,
-        from: ReportDateParam::from_naive_date(report.resolved_from),
-        to: ReportDateParam::from_naive_date(report.resolved_to),
+    let now = Utc::now();
+    let tz: chrono_tz::Tz = timezone.into();
+    let default_range = year_to_date(now.with_timezone(&tz).date_naive())
+        .ok_or_else(|| internal_error("price_history_default_range", now))?;
+    let requested = LocalReportDateRange::new(
+        from.map_or(default_range.from(), ReportDateParam::into_naive_date),
+        to.map_or(default_range.to(), ReportDateParam::into_naive_date),
+    )
+    .map_err(|err| validation_error("to", err.to_string()))?;
+    // Same Free window as the reports, so shared prices can't be read further
+    // back. The user's own prices are never limited.
+    let entitlements = crate::payments::entitlements::load_feature_entitlements(user_id, now)
+        .map_err(|err| internal_error("load_feature_entitlements", err))?;
+    let access = crate::report_access::decide_report_access(
+        requested,
+        default_range.to(),
+        report_access_entitlements(&entitlements),
+    )
+    .access;
+
+    let held = db::load_held_asset_names(user_id)
+        .map_err(|err| internal_error("load_held_asset_names", err))?;
+    let assets = sort_held_assets(
+        held.into_iter()
+            .map(|(id, name)| HeldAssetView {
+                key: CatalogAssetKey::from_trusted(id.as_str()),
+                name: name.unwrap_or_else(|| {
+                    crate::asset_capabilities::asset(&id)
+                        .map(|asset| asset.canonical_name.to_string())
+                        .unwrap_or_else(|| id.as_str().to_owned())
+                }),
+            })
+            .collect(),
+    );
+    let selected = select_held_asset(&assets, asset.as_deref());
+    let prices_enabled = settings.price_fetching_enabled;
+    let source = source.unwrap_or_default();
+    let mut in_view = sources_in_view(prices_enabled, source);
+    if selection == PriceSelection::Exact {
+        if asset.is_some() && selected.as_ref().map(CatalogAssetKey::as_str) != asset.as_deref() {
+            return Err(ApiErrorEnvelope::not_found("Asset not found".to_owned()));
+        }
+        if source == PriceSourceFilter::CoinGecko && !prices_enabled {
+            return Err(validation_error(
+                "source",
+                "CoinGecko prices are disabled".to_owned(),
+            ));
+        }
+        if page == Some(0) {
+            return Err(validation_error(
+                "page",
+                "Page must be greater than zero".to_owned(),
+            ));
+        }
+        in_view.filter = source;
+    }
+    let page = page.unwrap_or(1).max(1);
+    let sort = sort.unwrap_or_default();
+
+    let history = match selected.as_ref() {
+        Some(key) => load_price_history_page(PriceHistoryRequest {
+            user_id,
+            key,
+            currency,
+            timezone,
+            own_range: in_view.own.then_some(requested),
+            shared_range: if in_view.coingecko {
+                access.requested_overlap()
+            } else {
+                None
+            },
+            now,
+            sort,
+            page,
+        })?,
+        None => PriceHistoryPage {
+            entries: Vec::new(),
+            total_entries: 0,
+        },
     };
 
-    resolve_boundary_views_for_subjects(&boundary_context, subjects, user_timezone)
+    Ok(PriceHistoryView {
+        prices_enabled,
+        assets,
+        selected,
+        currency,
+        resolved_from: requested.from(),
+        resolved_to: requested.to(),
+        access,
+        default_this_year_from: default_range.from(),
+        default_this_year_to: default_range.to(),
+        entries: history.entries,
+        page,
+        total_entries: u32::try_from(history.total_entries).unwrap_or(u32::MAX),
+        sort,
+        source: in_view.filter,
+    })
+}
+
+#[cfg(feature = "server")]
+fn year_to_date(today: NaiveDate) -> Option<LocalReportDateRange> {
+    LocalReportDateRange::new(NaiveDate::from_ymd_opt(today.year(), 1, 1)?, today).ok()
+}
+
+#[cfg(feature = "server")]
+fn sort_held_assets(mut assets: Vec<HeldAssetView>) -> Vec<HeldAssetView> {
+    assets.sort_by(|left, right| left.key.as_str().cmp(right.key.as_str()));
+    assets.dedup_by(|later, first| later.key == first.key);
+    assets.sort_by(|left, right| left.name.cmp(&right.name));
+    assets
+}
+
+/// The requested asset when the user holds it, otherwise the first held one.
+/// An asset nobody holds and an asset only other users hold behave the same.
+#[cfg(feature = "server")]
+fn select_held_asset(assets: &[HeldAssetView], requested: Option<&str>) -> Option<CatalogAssetKey> {
+    assets
+        .iter()
+        .find(|asset| Some(asset.key.as_str()) == requested)
+        .or_else(|| assets.first())
+        .map(|asset| asset.key.clone())
+}
+
+#[cfg(feature = "server")]
+#[derive(Debug, PartialEq, Eq)]
+struct SourcesInView {
+    filter: PriceSourceFilter,
+    own: bool,
+    coingecko: bool,
+}
+
+/// Own prices are always available; CoinGecko only while the user's own
+/// toggle is on. A CoinGecko filter with the toggle off falls back to `All`.
+#[cfg(feature = "server")]
+fn sources_in_view(coingecko_enabled: bool, requested: PriceSourceFilter) -> SourcesInView {
+    let filter = if coingecko_enabled {
+        requested
+    } else {
+        PriceSourceFilter::All
+    };
+    SourcesInView {
+        filter,
+        own: filter != PriceSourceFilter::CoinGecko,
+        coingecko: coingecko_enabled && filter != PriceSourceFilter::YourPrices,
+    }
+}
+
+#[cfg(feature = "server")]
+struct PriceHistoryRequest<'a> {
+    user_id: crate::models::UserId,
+    key: &'a CatalogAssetKey,
+    currency: CurrencyCode,
+    timezone: UserTimezone,
+    /// `None` leaves the user's own prices out (CoinGecko filter).
+    own_range: Option<LocalReportDateRange>,
+    /// `None` keeps the shared prices database closed.
+    shared_range: Option<LocalReportDateRange>,
+    now: DateTime<Utc>,
+    sort: PriceHistorySort,
+    page: u32,
+}
+
+#[cfg(feature = "server")]
+fn load_price_history_page(
+    request: PriceHistoryRequest<'_>,
+) -> Result<PriceHistoryPage, PriceOverrideError> {
+    use crate::report_dates::{DateBoundaryKind, local_report_date_to_utc_boundary};
+
+    let daily = match request.shared_range {
+        Some(range) => {
+            let prices_conn = db::open_migrated_prices_db()
+                .map_err(|err| internal_error("open_prices_db_for_history", err))?;
+            let points = db::load_daily_price_history(
+                &prices_conn,
+                request.key.as_str(),
+                request.currency,
+                range.from(),
+                range.to(),
+            )
+            .map_err(|err| internal_error("load_daily_price_history", err))?
+            .into_iter()
+            .map(|record| (record.price_time_utc, record.price))
+            .collect();
+            Some(DailyInView {
+                points,
+                from: range.from(),
+                to: range.to(),
+            })
+        }
+        None => None,
+    };
+
+    let own = match request.own_range {
+        Some(range) => {
+            let tz: chrono_tz::Tz = request.timezone.into();
+            db::list_price_overrides_in_range(
+                request.user_id,
+                PriceSubject::CatalogAsset(request.key.clone()),
+                request.currency,
+                local_report_date_to_utc_boundary(
+                    range.from(),
+                    request.timezone,
+                    DateBoundaryKind::StartOfDay,
+                ),
+                local_report_date_to_utc_boundary(
+                    range.to(),
+                    request.timezone,
+                    DateBoundaryKind::EndOfDay,
+                ),
+            )
+            .map_err(|err| internal_error("list_price_overrides_for_history", err))?
+            .into_iter()
+            .map(|record| OwnPrice {
+                local_date: record.price_time_utc.with_timezone(&tz).date_naive(),
+                at: record.price_time_utc,
+                price: record.price,
+                note: record.source_note,
+            })
+            .collect()
+        }
+        None => Vec::new(),
+    };
+
+    Ok(build_price_history_page(
+        daily,
+        own,
+        request.now.date_naive(),
+        request.sort,
+        usize::try_from(request.page).unwrap_or(usize::MAX),
+    ))
+}
+
+#[cfg(all(test, feature = "server", not(bitgarth_db_unit_only)))]
+mod price_history_tests {
+    use super::*;
+
+    fn held(key: &str, name: &str) -> HeldAssetView {
+        HeldAssetView {
+            key: CatalogAssetKey::from_trusted(key),
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn held_assets_dedupe_by_key_and_sort_by_name() {
+        let assets = sort_held_assets(vec![
+            held("ethereum", "Ethereum"),
+            held("bitcoin", "Bitcoin"),
+            held("ethereum", "Ether (manual)"),
+        ]);
+
+        let keys = assets
+            .iter()
+            .map(|asset| asset.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["bitcoin", "ethereum"]);
+    }
+
+    #[test]
+    fn unheld_and_unknown_assets_select_the_same_held_asset() {
+        let assets = vec![held("bitcoin", "Bitcoin"), held("cardano", "Cardano")];
+
+        let held_choice = select_held_asset(&assets, Some("cardano"));
+        let not_held = select_held_asset(&assets, Some("ethereum"));
+        let unknown = select_held_asset(&assets, Some("no-such-asset"));
+        let missing = select_held_asset(&assets, None);
+
+        assert_eq!(held_choice, Some(CatalogAssetKey::from_trusted("cardano")));
+        assert_eq!(not_held, Some(CatalogAssetKey::from_trusted("bitcoin")));
+        assert_eq!(unknown, not_held);
+        assert_eq!(missing, not_held);
+        assert_eq!(select_held_asset(&[], Some("bitcoin")), None);
+    }
+
+    #[test]
+    fn own_prices_always_show_and_coingecko_needs_the_toggle() {
+        use PriceSourceFilter::{All, CoinGecko, YourPrices};
+        let view = |filter, own, coingecko| SourcesInView {
+            filter,
+            own,
+            coingecko,
+        };
+
+        assert_eq!(sources_in_view(false, All), view(All, true, false));
+        assert_eq!(sources_in_view(false, YourPrices), view(All, true, false));
+        assert_eq!(sources_in_view(false, CoinGecko), view(All, true, false));
+        assert_eq!(sources_in_view(true, All), view(All, true, true));
+        assert_eq!(
+            sources_in_view(true, YourPrices),
+            view(YourPrices, true, false)
+        );
+        assert_eq!(
+            sources_in_view(true, CoinGecko),
+            view(CoinGecko, false, true)
+        );
+    }
+
+    #[test]
+    fn default_range_is_year_to_date() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 9).expect("date");
+        let range = year_to_date(today).expect("range");
+        assert_eq!(
+            range.from(),
+            NaiveDate::from_ymd_opt(2026, 1, 1).expect("date")
+        );
+        assert_eq!(range.to(), today);
+    }
 }
 
 #[cfg(all(test, feature = "server", not(bitgarth_db_unit_only)))]
@@ -962,12 +1395,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_price_subject_rejects_unknown_catalog_key() {
-        let err = parse_price_subject("native_asset", "not-a-real-asset").expect_err("unknown key");
-        assert!(err.to_string().contains("Validation error"));
-    }
-
-    #[test]
     fn parse_price_subject_accepts_catalog_and_native_alias() {
         let catalog = parse_price_subject("catalog_asset", "bitcoin")
             .expect("catalog subject remains supported");
@@ -1055,10 +1482,6 @@ mod tests {
             resolved.source,
             Some(PriceSourceView::ProviderPrice {
                 provider: "coingecko".to_string(),
-                provider_asset_id: Some("ethereum".to_string()),
-                provider_quote_id: Some("usd".to_string()),
-                retrieved_at: fixed_time("2025-01-02T00:00:00Z"),
-                license_scope: "public_keyless".to_string(),
             })
         );
     }
@@ -1072,6 +1495,25 @@ mod tests {
 
         assert_eq!(resolved.price, None);
         assert_eq!(resolved.source, None);
+    }
+
+    #[test]
+    fn report_price_resolver_skips_shared_lookup_when_source_is_off() {
+        let date =
+            ReportDateParam::from_naive_date(fixed_time("2025-01-01T00:00:00Z").date_naive());
+        let context = BoundaryResolutionContext {
+            user_id: crate::models::UserId::new(),
+            coingecko: None,
+            quote: CurrencyCode::from_code("USD").expect("USD"),
+            from: date,
+            to: date,
+        };
+        assert_eq!(
+            context
+                .provider_price(&catalog_subject("ethereum"), BoundaryKind::Opening)
+                .expect("source disabled"),
+            None
+        );
     }
 
     #[test]
@@ -1090,16 +1532,14 @@ mod tests {
             BoundaryKind::Opening,
             from,
             to,
-        )
-        .expect("opening query");
+        );
         let closing = provider_price_query_for_subject(
             &catalog_subject("ethereum"),
             quote,
             BoundaryKind::Closing,
             from,
             to,
-        )
-        .expect("closing query");
+        );
         assert_eq!(opening.asset_id, "ethereum");
         assert_eq!(opening.quote_currency, quote);
         assert_eq!(

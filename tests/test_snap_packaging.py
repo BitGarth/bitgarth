@@ -151,6 +151,15 @@ class RecipeTests(unittest.TestCase):
 
 
 class BuildContractTests(unittest.TestCase):
+    def test_installed_commands_match_the_actual_cli(self):
+        installed = load_installed()
+        legacy = installed.cli_commands("Commands:\n  pair  Link CLI\n  balancesheet  Show balances\n  profile  Profiles")
+        modern = installed.cli_commands("Commands:\n  auth  Manage logins\n  balance  Show balances")
+        self.assertEqual(legacy, (("pair",), ("profile", "list"), "balancesheet", "balances_read"))
+        self.assertEqual(modern, (("auth", "login"), ("auth", "status"), "balance", "full"))
+        with self.assertRaises(AssertionError):
+            installed.cli_commands("Commands:\n  help  Help")
+
     def test_pairing_review_sends_code_in_get_json_body(self):
         installed = load_installed()
         observed = {}

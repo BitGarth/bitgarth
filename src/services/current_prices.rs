@@ -111,7 +111,7 @@ where
     let now = Utc::now();
     let mut prices_by_provider_id = HashMap::new();
     let mut hit_requests = HashSet::new();
-    let conn = match crate::db::initialize_prices_db() {
+    let conn = match crate::db::open_migrated_prices_db() {
         Ok(conn) => match crate::db::load_fresh_current_price_cache(
             &conn,
             &db_requests,
@@ -128,7 +128,7 @@ where
             }
             Err(err) => {
                 tracing::warn!(
-                    error = %err,
+                    sqlite_code = err.sqlite_failure().map(|failure| failure.extended_code),
                     "current prices: failed to read prices db cache"
                 );
                 None
@@ -136,7 +136,7 @@ where
         },
         Err(err) => {
             tracing::warn!(
-                error = %err,
+                sqlite_code = err.sqlite_failure().map(|failure| failure.extended_code),
                 "current prices: failed to open prices db cache"
             );
             None
@@ -158,7 +158,7 @@ where
         Ok(mode) => mode,
         Err(err) => {
             tracing::warn!(
-                error = %err,
+                sqlite_code = err.sqlite_failure().map(|failure| failure.extended_code),
                 "current prices: failed to load CoinGecko API key; skipping provider request"
             );
             return prices_by_provider_id;
@@ -167,11 +167,8 @@ where
 
     let license_scope = match credential_mode.request_config() {
         Ok(config) => config.license_scope.to_string(),
-        Err(err) => {
-            tracing::warn!(
-                error = %err,
-                "current prices: invalid CoinGecko credential mode"
-            );
+        Err(_) => {
+            tracing::warn!("current prices: invalid CoinGecko credential mode");
             return prices_by_provider_id;
         }
     };
@@ -213,9 +210,7 @@ where
                     )
                 {
                     tracing::warn!(
-                        asset_id = %request.asset_id,
-                        provider_asset_id = %request.provider_asset_id,
-                        error = %err,
+                        sqlite_code = err.sqlite_failure().map(|failure| failure.extended_code),
                         "current prices: failed to persist current price"
                     );
                 }
@@ -250,7 +245,7 @@ pub(crate) async fn selected_manual_asset_current_price(
     };
     let now = Utc::now();
 
-    match crate::db::initialize_prices_db() {
+    match crate::db::open_migrated_prices_db() {
         Ok(conn) => match crate::db::load_fresh_current_price_cache(
             &conn,
             &[db_request],
@@ -265,14 +260,14 @@ pub(crate) async fn selected_manual_asset_current_price(
             }
             Err(err) => {
                 tracing::warn!(
-                    error = %err,
+                    sqlite_code = err.sqlite_failure().map(|failure| failure.extended_code),
                     "current prices: failed to read selected manual asset price cache"
                 );
             }
         },
         Err(err) => {
             tracing::warn!(
-                error = %err,
+                sqlite_code = err.sqlite_failure().map(|failure| failure.extended_code),
                 "current prices: failed to open selected manual asset price cache"
             );
         }
@@ -282,7 +277,7 @@ pub(crate) async fn selected_manual_asset_current_price(
         Ok(enabled) => enabled,
         Err(err) => {
             tracing::warn!(
-                error = %err,
+                sqlite_code = err.sqlite_failure().map(|failure| failure.extended_code),
                 "current prices: failed to load price-fetching setting for selected manual asset"
             );
             false

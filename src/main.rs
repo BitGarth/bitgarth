@@ -105,8 +105,8 @@ mod test;
 
 use components::{
     AccountTransactions, HledgerExport, HoldingsReport, HomeView, InstanceNoticeState, Login,
-    NavBar, NotFound, PairingApproval, PairingLogin, Payments, Register, RequireAuth, Settings,
-    StyleGuide, WalletDataExport, WalletReport, Wallets,
+    NavBar, NotFound, PairingApproval, PairingLogin, Payments, Prices, Register, RequireAuth,
+    Settings, StyleGuide, WalletDataExport, WalletReport, Wallets,
 };
 use dioxus::logger::tracing;
 use dioxus::prelude::*;
@@ -361,6 +361,13 @@ enum Route {
         end: Option<String>,
     },
 
+    #[route("/prices?:asset&:start&:end")]
+    Prices {
+        asset: Option<String>,
+        start: Option<String>,
+        end: Option<String>,
+    },
+
     #[route("/wallets/account/:account_id/transactions?:start&:end")]
     AccountTransactions {
         account_id: crate::wallets::WalletAccountId,
@@ -373,7 +380,6 @@ enum Route {
 
     #[route("/exports/wallet-data")]
     WalletDataExport,
-    #[end_layout]
     #[end_layout]
     #[route("/:..segments")]
     NotFound { segments: Vec<String> },
@@ -484,7 +490,10 @@ fn main() {
 
         #[cfg(feature = "server")]
         if let Err(err) = db::initialize_prices_db() {
-            eprintln!("failed to initialize prices database: {err}");
+            tracing::error!(
+                sqlite_code = err.sqlite_failure().map(|failure| failure.extended_code),
+                "failed to initialize prices database"
+            );
             std::process::exit(1);
         }
 
@@ -539,7 +548,10 @@ fn main() {
         }
 
         if let Err(err) = db::initialize_prices_db() {
-            eprintln!("failed to initialize prices database: {err}");
+            tracing::error!(
+                sqlite_code = err.sqlite_failure().map(|failure| failure.extended_code),
+                "failed to initialize prices database"
+            );
             std::process::exit(1);
         }
 

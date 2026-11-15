@@ -108,7 +108,7 @@ test("added Bitcoin xpub account syncs its transactions without a manual sync", 
     .toBe(2);
 
   await page.goto(`/wallets/account/${accountId}/transactions`);
-  await expect(page.getByTestId("account-mode")).toHaveText("Transaction syncing");
+  await expect(page.getByTestId("account-mode")).toHaveText("Full history");
   await expect(page.locator(".transactions-list .tx-card")).toHaveCount(2);
 
   assertNoBrowserDiagnostics(diagnostics);

@@ -35,8 +35,9 @@ pub(crate) use dialogs::{
     AddDropdownButton, AddressSchemeDeleteConfirmDialog, KebabMenu, KebabMenuItem,
 };
 pub(crate) use helpers::{
-    AccountAddressesLoader, WalletMoveOption, address_scheme_label, build_wallet_move_options,
-    copy_to_clipboard, parse_label_for_editor, truncate_reference, truncate_reference_with_lengths,
+    AccountAddressesLoader, CopyFeedback, WalletMoveOption, address_scheme_label,
+    build_wallet_move_options, copy_to_clipboard, parse_label_for_editor, truncate_reference,
+    truncate_reference_with_lengths, use_copy_feedback,
 };
 
 const WALLETS_CSS: Asset = asset!("/assets/wallets.css");

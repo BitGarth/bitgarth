@@ -1,5 +1,7 @@
 use dioxus::prelude::*;
 
+use crate::Route;
+use crate::asset_views::CatalogAssetKey;
 use crate::backend::AccountReferenceKind;
 use crate::wallets::{AddressScheme, Network, SyncedAssetId};
 
@@ -76,6 +78,7 @@ pub(super) enum AccountIdentity {
         decimal_precision: u8,
         asset_name: Option<String>,
         network_name: Option<String>,
+        catalog_asset_key: CatalogAssetKey,
     },
 }
 
@@ -166,6 +169,14 @@ pub(super) fn AccountIdentitySection(
                                             "View addresses \u{2192}"
                                         }
                                     }
+                                    dt { "Prices" }
+                                    dd {
+                                        Link {
+                                            class: "account-identity-addresses-btn",
+                                            to: Route::Prices { asset: Some(asset.as_str().to_string()), start: None, end: None },
+                                            "{asset.display_name()} price history \u{2192}"
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -175,6 +186,7 @@ pub(super) fn AccountIdentitySection(
                             decimal_precision,
                             asset_name,
                             network_name,
+                            catalog_asset_key,
                         } => {
                             let type_label = manual_type_label();
                             let unit_label = manual_unit_display(unit_code, symbol.as_deref());
@@ -194,6 +206,14 @@ pub(super) fn AccountIdentitySection(
                                     if let Some(network_name) = network_name {
                                         dt { "Network" }
                                         dd { "{network_name}" }
+                                    }
+                                    dt { "Prices" }
+                                    dd {
+                                        Link {
+                                            class: "account-identity-addresses-btn",
+                                            to: Route::Prices { asset: Some(catalog_asset_key.as_str().to_string()), start: None, end: None },
+                                            "{asset_name.as_deref().unwrap_or(unit_code.as_str())} price history \u{2192}"
+                                        }
                                     }
                                 }
                             }

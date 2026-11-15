@@ -1,4 +1,4 @@
-use super::helpers::{ActiveFilters, status_label};
+use super::helpers::{ActiveFilters, status_display_label, status_label};
 use crate::transactions::ChainTransactionStatus;
 use dioxus::prelude::*;
 
@@ -34,11 +34,12 @@ pub(super) fn TransactionStatusFilterRow(
                     for status in ALL_STATUSES {
                         {
                             let active = filters.is_status_selected(status);
-                            let label = status_label(status);
+                            let key = status_label(status);
+                            let label = status_display_label(status);
                             let filters_clone = filters.clone();
                             rsx! {
                                 button {
-                                    key: "{label}",
+                                    key: "{key}",
                                     class: if active { "tx-filter-pill active" } else { "tx-filter-pill" },
                                     r#type: "button",
                                     disabled: loading,

@@ -252,7 +252,8 @@ async fn test_get_hledger_export_settings_returns_saved_and_default_account_pref
         response.json::<Value>(),
         json!({
             "hledger_account_prefix": null,
-            "hledger_default_account_prefix": "assets:WindRunner"
+            "hledger_default_account_prefix": "assets:WindRunner",
+            "transaction_count": 0
         })
     );
 
@@ -268,7 +269,8 @@ async fn test_get_hledger_export_settings_returns_saved_and_default_account_pref
         response.json::<Value>(),
         json!({
             "hledger_account_prefix": "assets:My Wallet",
-            "hledger_default_account_prefix": "assets:WindRunner"
+            "hledger_default_account_prefix": "assets:WindRunner",
+            "transaction_count": 0
         })
     );
 }

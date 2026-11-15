@@ -82,13 +82,7 @@ fn estimate_first_sync_tx_count(
     }) {
         Ok(estimate) => estimate,
         Err(error) => {
-            tracing::warn!(
-                user_id = %run.user_id,
-                run_id = %run.run_id,
-                address_id = %address.address_id,
-                error = %error,
-                "transactions sync: failed to load preflight estimate"
-            );
+            tracing::warn!(target: "wallet_sync", run_id = %run.run_id, failure_kind = error.log_category(), "transactions sync: preflight failed");
             None
         }
     }

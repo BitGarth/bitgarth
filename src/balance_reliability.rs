@@ -26,7 +26,7 @@ pub(crate) enum BitcoinHistoryCoverageView {
 impl BitcoinHistoryCoverageView {
     pub(crate) fn label(self) -> String {
         match self {
-            Self::Unscanned => "Unscanned".to_string(),
+            Self::Unscanned => "Not scanned yet".to_string(),
             Self::Syncing => "Syncing".to_string(),
             Self::Limited => "Coverage limited".to_string(),
             Self::Complete => "Coverage boundary unknown".to_string(),

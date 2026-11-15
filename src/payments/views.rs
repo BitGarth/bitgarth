@@ -80,6 +80,7 @@ pub(crate) struct PaymentOrderHistoryView {
     pub(crate) display_amount: String,
     pub(crate) currency: String,
     pub(crate) status: PaymentOrderStatusView,
+    pub(crate) created_at: Option<String>,
     pub(crate) paid_at: Option<String>,
 }
 
@@ -113,11 +114,21 @@ pub(crate) struct PaymentOptionView {
     pub(crate) is_default: bool,
 }
 
+/// Public display data retained by the instance when a catalog fetch succeeds.
+#[cfg(feature = "server")]
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct PlanDescriptions {
+    pub(crate) tiers: Vec<PaymentTierView>,
+    pub(crate) pricing_summary: Option<TierBulletView>,
+}
+
 /// Central-dependent portion of the payments page: the purchasable tier
 /// catalog plus locally-stored order history. Fetched separately from the
 /// user's plan state so a slow or unreachable Central never blocks the page.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PaymentCatalogView {
+    #[serde(default)]
+    pub(crate) showing_saved_descriptions: bool,
     pub(crate) tiers: Vec<PaymentTierView>,
     pub(crate) options: Vec<PaymentOptionView>,
     pub(crate) app_compatibility: Option<AppCompatibilityView>,
@@ -277,6 +288,7 @@ mod tests {
     #[test]
     fn payment_catalog_view_is_ui_safe_shape() {
         let catalog = PaymentCatalogView {
+            showing_saved_descriptions: false,
             tiers: vec![sample_tier()],
             options: vec![PaymentOptionView {
                 id: "premium_12_months_usd".to_string(),
@@ -304,6 +316,7 @@ mod tests {
                 display_amount: "1.23".to_string(),
                 currency: "USD".to_string(),
                 status: PaymentOrderStatusView::Paid,
+                created_at: None,
                 paid_at: Some("2026-04-16T12:00:00Z".to_string()),
             }],
             pricing_summary: Some(parse_bullet(

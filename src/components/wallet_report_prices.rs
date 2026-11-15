@@ -1,3 +1,4 @@
+use chrono::NaiveDate;
 use dioxus::prelude::*;
 
 use crate::Route;
@@ -19,6 +20,8 @@ pub(crate) struct PricesSectionProps {
     pub(crate) resolved_views: Vec<ResolvedPriceView>,
     pub(crate) can_edit_prices: bool,
     pub(crate) on_prices_changed: EventHandler<()>,
+    /// Report range, carried into each asset's link to the Prices page.
+    pub(crate) report_range: (NaiveDate, NaiveDate),
 }
 
 fn subject_display_label(subject: &PriceSubject, labels: &[(PriceSubject, String)]) -> String {
@@ -28,6 +31,15 @@ fn subject_display_label(subject: &PriceSubject, labels: &[(PriceSubject, String
             .find(|(s, _)| s == subject)
             .map(|(_, l)| l.clone())
             .unwrap_or_else(|| "Unknown asset".to_string()),
+    }
+}
+
+fn prices_route(subject: &PriceSubject, (from, to): (NaiveDate, NaiveDate)) -> Route {
+    let PriceSubject::CatalogAsset(key) = subject;
+    Route::Prices {
+        asset: Some(key.as_str().to_string()),
+        start: Some(from.to_string()),
+        end: Some(to.to_string()),
     }
 }
 
@@ -138,6 +150,7 @@ fn count_text(resolved: usize, missing: usize) -> String {
 
 #[component]
 pub(crate) fn PricesSection(props: PricesSectionProps) -> Element {
+    let prices_enabled = (use_context::<crate::settings::SettingsState>().price_fetching_enabled)();
     let requirements = ordered_price_requirements(&props.price_requirements);
     let total_boundaries = requirements.len();
     let resolved_count: usize = requirements
@@ -182,6 +195,9 @@ pub(crate) fn PricesSection(props: PricesSectionProps) -> Element {
                     p { class: "wr-prices-timezone",
                         "Timezone: {props.user_timezone.name()}"
                     }
+                    if missing_count > 0 && !prices_enabled {
+                        p { class: "wr-prices-timezone", "Only your own prices are used. Turn on CoinGecko prices in the top bar to include its saved prices." }
+                    }
                     PricesTable {
                         requirements,
                         subject_labels: props.subject_labels.clone(),
@@ -191,6 +207,7 @@ pub(crate) fn PricesSection(props: PricesSectionProps) -> Element {
                         resolved_views: props.resolved_views.clone(),
                         can_edit_prices: props.can_edit_prices,
                         on_prices_changed: props.on_prices_changed,
+                        report_range: props.report_range,
                         editing,
                         draft_price,
                         draft_note,
@@ -212,6 +229,7 @@ struct PricesTableProps {
     resolved_views: Vec<ResolvedPriceView>,
     can_edit_prices: bool,
     on_prices_changed: EventHandler<()>,
+    report_range: (NaiveDate, NaiveDate),
     editing: Signal<Option<(PriceSubject, BoundaryKind)>>,
     draft_price: Signal<String>,
     draft_note: Signal<String>,
@@ -247,6 +265,7 @@ fn PricesTable(props: PricesTableProps) -> Element {
                         view: find_view(&props.resolved_views, subject, *boundary).cloned(),
                         can_edit_prices: props.can_edit_prices,
                         on_prices_changed: props.on_prices_changed,
+                        report_range: props.report_range,
                         editing: props.editing,
                         draft_price: props.draft_price,
                         draft_note: props.draft_note,
@@ -268,6 +287,7 @@ struct PricesRowProps {
     view: Option<ResolvedPriceView>,
     can_edit_prices: bool,
     on_prices_changed: EventHandler<()>,
+    report_range: (NaiveDate, NaiveDate),
     editing: Signal<Option<(PriceSubject, BoundaryKind)>>,
     draft_price: Signal<String>,
     draft_note: Signal<String>,
@@ -280,7 +300,14 @@ fn PricesRow(props: PricesRowProps) -> Element {
     let action_mode = price_action_mode(props.can_edit_prices, props.view.as_ref());
     let can_edit_prices = props.can_edit_prices;
     let is_editing = can_edit_prices && props.editing.read().as_ref() == Some(&key);
+    let number_format = (use_context::<crate::settings::SettingsState>().number_format)();
     let current_price = props.view.as_ref().and_then(|v| v.price.clone());
+    let current_price_display = current_price.as_ref().map(|price| {
+        price.parse::<rust_decimal::Decimal>().map_or_else(
+            |_| price.clone(),
+            |value| super::format_price_figure(value, number_format),
+        )
+    });
     let current_source_display = source_display_from_view(props.view.as_ref());
     let current_note_for_editing = source_note_for_editing(props.view.as_ref());
     let can_clear_current_price = can_edit_prices && action_mode == "edit_clear";
@@ -424,7 +451,12 @@ fn PricesRow(props: PricesRowProps) -> Element {
     rsx! {
         tr {
             td {
-                span { class: "wr-prices-asset-cell", "{asset_label}" }
+                Link {
+                    class: "wr-prices-asset-cell",
+                    title: "{asset_label} price history",
+                    to: prices_route(&props.subject, props.report_range),
+                    "{asset_label}"
+                }
             }
             td {
                 span { class: "wr-prices-boundary-eyebrow", "{boundary_label}" }
@@ -453,7 +485,7 @@ fn PricesRow(props: PricesRowProps) -> Element {
                             div { class: "wr-prices-error", "{message}" }
                         }
                     }
-                } else if let Some(price) = current_price.as_ref() {
+                } else if let Some(price) = current_price_display.as_ref() {
                     if can_edit_prices {
                         button {
                             r#type: "button",
@@ -575,10 +607,6 @@ mod tests {
             price: Some("51000".to_string()),
             source: Some(PriceSourceView::ProviderPrice {
                 provider: "coingecko".to_string(),
-                provider_asset_id: Some("bitcoin".to_string()),
-                provider_quote_id: Some("usd".to_string()),
-                retrieved_at: chrono::Utc::now(),
-                license_scope: "public_keyless".to_string(),
             }),
         };
         let unknown = ResolvedPriceView {
@@ -587,10 +615,6 @@ mod tests {
             price: Some("51000".to_string()),
             source: Some(PriceSourceView::ProviderPrice {
                 provider: "coin_market_cap".to_string(),
-                provider_asset_id: None,
-                provider_quote_id: None,
-                retrieved_at: chrono::Utc::now(),
-                license_scope: "public_keyless".to_string(),
             }),
         };
 
@@ -626,10 +650,6 @@ mod tests {
             price: Some("51000".to_string()),
             source: Some(PriceSourceView::ProviderPrice {
                 provider: "coingecko".to_string(),
-                provider_asset_id: Some("bitcoin".to_string()),
-                provider_quote_id: Some("usd".to_string()),
-                retrieved_at: chrono::Utc::now(),
-                license_scope: "public_keyless".to_string(),
             }),
         };
 
@@ -657,10 +677,6 @@ mod tests {
             price: Some("51000".to_string()),
             source: Some(PriceSourceView::ProviderPrice {
                 provider: "coingecko".to_string(),
-                provider_asset_id: Some("bitcoin".to_string()),
-                provider_quote_id: Some("usd".to_string()),
-                retrieved_at: chrono::Utc::now(),
-                license_scope: "public_keyless".to_string(),
             }),
         };
 

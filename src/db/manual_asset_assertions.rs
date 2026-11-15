@@ -41,6 +41,7 @@ pub(crate) struct ManualAssetBalanceAssertionPage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ManualAssetAccountHistoryData {
     pub(crate) account_id: WalletAccountId,
+    pub(crate) asset_id: crate::asset_capabilities::AssetId,
     pub(crate) wallet_id: WalletId,
     pub(crate) wallet_label: Label,
     pub(crate) account_label: Label,
@@ -107,6 +108,7 @@ impl From<DbError> for ManualAssetAssertionDbError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ManualAssetAccountMeta {
     wallet_id: WalletId,
+    asset_id: crate::asset_capabilities::AssetId,
     wallet_label: Label,
     account_label: Label,
     unit_code: ValidatedManualAssetUnitCode,
@@ -432,6 +434,7 @@ fn load_manual_table_account_meta(
 
     Ok(Some(ManualAssetAccountMeta {
         wallet_id,
+        asset_id: snapshot.asset_id,
         wallet_label,
         account_label,
         unit_code: snapshot.unit_code,
@@ -1168,6 +1171,9 @@ pub(crate) fn update_manual_asset_balance_assertion(
             DbError::new(format!("Failed to start manual assertion update: {err}"))
         })?;
         let context = load_update_assertion_write_context_in_tx(&tx, request.assertion_id)?;
+        if context.account_id != request.account_id {
+            return Err(ManualAssetAssertionDbError::AssertionNotFound);
+        }
         ensure_manual_account_assertions_writable_in_tx(&tx, context.account_id, policy)?;
 
         let balance = request
@@ -1229,6 +1235,7 @@ pub(crate) fn update_manual_asset_balance_assertion(
 
 pub(crate) fn delete_manual_asset_balance_assertion(
     user_id: crate::models::UserId,
+    expected_account: Option<WalletAccountId>,
     assertion_id: ManualAssetBalanceAssertionId,
 ) -> Result<(), ManualAssetAssertionDbError> {
     let policy = load_manual_asset_assertion_policy(user_id, Utc::now())?;
@@ -1237,6 +1244,9 @@ pub(crate) fn delete_manual_asset_balance_assertion(
             DbError::new(format!("Failed to start manual assertion delete: {err}"))
         })?;
         let account_id = load_manual_assertion_account_id_for_write_in_tx(&tx, assertion_id)?;
+        if expected_account.is_some_and(|expected| expected != account_id) {
+            return Err(ManualAssetAssertionDbError::AssertionNotFound);
+        }
         ensure_manual_account_assertions_writable_in_tx(&tx, account_id, policy)?;
 
         let deleted = tx
@@ -1288,6 +1298,7 @@ pub(crate) fn load_manual_asset_account_history(
 
         Ok(ManualAssetAccountHistoryData {
             account_id,
+            asset_id: meta.asset_id,
             wallet_id: meta.wallet_id,
             wallet_label: meta.wallet_label,
             account_label: meta.account_label,
@@ -1829,10 +1840,34 @@ mod inactive_account_tests {
     }
 
     #[test]
+    fn manual_assertion_writes_require_the_requested_parent_account() {
+        let fixture = inactive_manual_account_fixture();
+        let other = WalletAccountId::new();
+        let update =
+            validated_update_request(fixture.assertion_id, other, assertion_date(19), "456");
+        assert!(matches!(
+            update_manual_asset_balance_assertion(fixture.user_id, update, timestamp(12)),
+            Err(ManualAssetAssertionDbError::AssertionNotFound)
+        ));
+        assert!(matches!(
+            delete_manual_asset_balance_assertion(
+                fixture.user_id,
+                Some(other),
+                fixture.assertion_id
+            ),
+            Err(ManualAssetAssertionDbError::AssertionNotFound)
+        ));
+    }
+
+    #[test]
     fn manual_asset_assertion_inactive_account_delete_is_rejected() {
         let fixture = inactive_manual_account_fixture();
 
-        let result = delete_manual_asset_balance_assertion(fixture.user_id, fixture.assertion_id);
+        let result = delete_manual_asset_balance_assertion(
+            fixture.user_id,
+            Some(fixture.inactive_account_id),
+            fixture.assertion_id,
+        );
 
         assert!(matches!(
             result,

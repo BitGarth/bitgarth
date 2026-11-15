@@ -884,11 +884,7 @@ fn run_sql(conn: &rusqlite::Connection, sql: &QuerySql) -> Result<SqlRunResult, 
         return Ok(SqlRunResult::StatementComplete);
     }
 
-    let column_names = stmt
-        .column_names()
-        .iter()
-        .map(|name| name.to_string())
-        .collect::<Vec<_>>();
+    let column_names = stmt.column_names().map(str::to_owned).collect::<Vec<_>>();
 
     let mut rows = stmt
         .query([])

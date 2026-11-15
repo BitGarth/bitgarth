@@ -240,7 +240,7 @@ fn asset_instance_id_for_unit_code(unit_code: &str) -> Value {
     }
 }
 
-async fn add_manual_asset_account(
+pub(super) async fn add_manual_asset_account(
     server: &super::IntegrationTestServer,
     wallet_id: &str,
     unit_code: &str,
@@ -258,7 +258,7 @@ async fn add_manual_asset_account(
     response.json()
 }
 
-async fn add_custom_balance_assertion(
+pub(super) async fn add_custom_balance_assertion(
     server: &super::IntegrationTestServer,
     account_id: &str,
     asserted_on: &str,
@@ -299,7 +299,7 @@ fn zip_base64_for_payload_json(payload_json: &str, password: Option<&str>) -> St
     BASE64.encode(cursor.into_inner())
 }
 
-fn wallet_data_payload_from_zip(zip_base64: &str, password: Option<&str>) -> Value {
+pub(super) fn wallet_data_payload_from_zip(zip_base64: &str, password: Option<&str>) -> Value {
     let zip_bytes = BASE64.decode(zip_base64).expect("zip base64 should decode");
     let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).expect("zip should open");
     let mut entry = if let Some(password) = password {
@@ -350,7 +350,7 @@ fn import_raw_json_request_body(file_name: &str, payload_json: &str) -> Value {
     })
 }
 
-fn wallet_data_export_request(
+pub(super) fn wallet_data_export_request(
     include_premium_transfer: bool,
     encrypted: bool,
     password: Option<&str>,

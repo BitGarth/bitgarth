@@ -9,7 +9,7 @@ pub(crate) enum NativeAccountMode {
 impl NativeAccountMode {
     pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::Transactions => "Transaction syncing",
+            Self::Transactions => "Full history",
             Self::BalanceOnly => "Balance only",
             Self::Inactive => "Inactive",
         }
@@ -104,7 +104,7 @@ mod tests {
     fn status_label_reports_paused_history_only_for_transaction_mode() {
         assert_eq!(
             NativeAccountMode::Transactions.status_label(false),
-            "Transaction syncing"
+            "Full history"
         );
         assert_eq!(
             NativeAccountMode::Transactions.status_label(true),

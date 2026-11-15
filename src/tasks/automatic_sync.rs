@@ -70,10 +70,6 @@ pub(crate) struct AutomaticSyncFreshnessSummary {
 }
 
 impl AutomaticSyncFreshnessSummary {
-    pub(crate) fn empty() -> Self {
-        Self::default()
-    }
-
     /// Adds integrations with runnable unfinished history (e.g. discovered but
     /// unfetched Bitcoin history), which account freshness alone cannot see.
     pub(crate) fn add_unfinished_work(&mut self, integrations: &HashSet<SyncIntegrationId>) {

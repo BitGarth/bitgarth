@@ -221,6 +221,15 @@ pub(crate) fn begin_capability_shutdown(
     })
 }
 
+pub(crate) async fn begin_capability_shutdown_async(
+    user_id: UserId,
+    capability_id: CapabilityId,
+) -> Result<CapabilityShutdownGuard, UserLifecycleLockError> {
+    tokio::task::spawn_blocking(move || begin_capability_shutdown(user_id, capability_id))
+        .await
+        .map_err(|_| UserLifecycleLockError)?
+}
+
 pub(crate) fn shutdown_expired_client_capability(
     user_id: UserId,
     capability_id: CapabilityId,
@@ -237,6 +246,12 @@ pub(crate) fn shutdown_expired_client_capability(
 }
 
 impl CapabilityShutdownGuard {
+    pub(crate) async fn drain(self) -> Result<(), UserLifecycleLockError> {
+        tokio::task::spawn_blocking(move || self.wait_for_requests())
+            .await
+            .map_err(|_| UserLifecycleLockError)?
+    }
+
     pub(crate) fn wait_for_requests(&self) -> Result<(), UserLifecycleLockError> {
         let registry = user_lifecycle_registry();
         let mut users = registry.users.lock().map_err(|_| UserLifecycleLockError)?;
@@ -299,8 +314,7 @@ impl Drop for UserRequestLease {
             }
             if let Err(error) = crate::db::close_user_db(self.user_id) {
                 tracing::error!(
-                    user_id = %self.user_id,
-                    error = %error,
+                    sqlite_code = error.sqlite_failure().map(|failure| failure.extended_code),
                     "user lifecycle: failed to close unpinned user database after request"
                 );
             }

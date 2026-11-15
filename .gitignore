@@ -30,3 +30,5 @@ data-prod.tgz
 .superpowers
 
 .superpowers/
+.claude/launch.json
+reports/**/*.png

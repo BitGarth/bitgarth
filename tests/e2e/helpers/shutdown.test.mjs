@@ -3,6 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
+import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -42,10 +43,10 @@ async function within(promise, milliseconds) {
   }
 }
 
-async function startServer(projectDir = mkdtempSync(path.join(os.tmpdir(), "bitgarth-shutdown-"))) {
+async function startServer(projectDir = mkdtempSync(path.join(os.tmpdir(), "bitgarth-shutdown-")), env = {}) {
   const port = await freePort();
   const child = spawn(serverBinary, [], {
-    env: { ...process.env, BITGARTH_PROJECT_DIR: projectDir, IP: "127.0.0.1", PORT: String(port), RUST_LOG: "info" },
+    env: { ...process.env, RUST_LOG: "info", ...env, BITGARTH_PROJECT_DIR: projectDir, IP: "127.0.0.1", PORT: String(port) },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const exited = new Promise((resolve, reject) => {
@@ -153,6 +154,100 @@ test("SIGTERM lets an in-flight database write finish and survive restart", { ti
     cleanupServer(server);
   }
 });
+
+test("restart collects shared prices with both household users signed out", { timeout: 40_000 },
+  () => checkSignedOutPriceCollection("docker"));
+test("hosted restart collects every priced pair with everyone signed out", { timeout: 40_000 },
+  () => checkSignedOutPriceCollection("hosted"));
+
+async function checkSignedOutPriceCollection(channel) {
+  const project = mkdtempSync(path.join(os.tmpdir(), "bitgarth-price-restart-"));
+  const seen = new Set();
+  let requestCount = 0;
+  const provider = http.createServer((req, res) => {
+    requestCount++;
+    const url = new URL(req.url, "http://127.0.0.1");
+    const asset = url.pathname.match(/\/coins\/([^/]+)\/market_chart\/range$/)?.[1];
+    const currency = url.searchParams.get("vs_currency");
+    seen.add(`${asset}/${currency}`);
+    const from = Number(url.searchParams.get("from"));
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ prices: [[from * 1000, 20]] }));
+  });
+  await new Promise((resolve) => provider.listen(0, "127.0.0.1", resolve));
+  const env = {
+    BITGARTH_CHANNEL: channel,
+    BITGARTH_COINGECKO_BASE_URL: `http://127.0.0.1:${provider.address().port}/api/v3/`,
+    RUST_LOG: "info,bitgarth_app::tasks=debug",
+  };
+  let app;
+  let prices;
+  try {
+    app = await startServer(project, env);
+    for (let i = 0; i < 100 && !app.output().includes("shared price history run"); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const idle = app.output().split("\n").find((line) => line.includes("shared price history run"));
+    const registration = app.output().split("\n").find((line) =>
+      line.includes("registered background job") && line.includes("job_id=SharedPriceHistory"));
+    const firstRun = registration?.match(/next_run_at_utc=Some\(([^)]+)\)/)?.[1];
+    assert.match(idle ?? "", /reason="?no_opt_in/);
+    assert.ok(firstRun && Date.parse(firstRun) <= Date.parse(idle.split(" ")[0]),
+      `Incorrect first run reported at startup: ${registration}`);
+    assert.match(idle, /requests_attempted=0/);
+    assert.match(idle, /rows_written=0/);
+    assert.equal(requestCount, 0);
+    assert.match(app.output(), /INFO[^\n]*migrations applied/);
+    app.child.kill("SIGTERM");
+    await within(app.exited, 10_000);
+    const db = new DatabaseSync(path.join(project, "app/data/app.db"));
+    try {
+      for (const [id, name, consent] of [
+        ["01K2EZ4N4G0W0EPF9YXRJZD9WQ", "alice", 0],
+        ["01K2EZ4N4G0W0EPF9YXRJZD9WR", "bob", 1],
+      ]) {
+        db.prepare("INSERT INTO users(user_id,username,created_at,updated_at) VALUES(?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)").run(id, name);
+        db.prepare("INSERT INTO app_user_preferences VALUES(?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)").run(id, consent);
+      }
+    } finally {
+      db.close();
+    }
+    prices = new DatabaseSync(path.join(project, "app/data/prices/prices.db"));
+    for (const [asset, currency] of [["bitcoin", "USD"], ["solana", "EUR"], ["ethereum", "EUR"]]) {
+      prices.prepare(`INSERT INTO current_price_cache
+        (asset_id, quote_currency, provider, provider_asset_id, price, license_scope, retrieved_at, created_at, updated_at)
+        VALUES (?, ?, 'coingecko', ?, '10', 'public_keyless', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`).run(asset, currency, asset);
+    }
+    const expectedPairs = ["bitcoin/usd", "ethereum/eur", "solana/eur"];
+    app = await startServer(project, env);
+    for (let i = 0; i < 100; i++) {
+      const rows = prices.prepare("SELECT DISTINCT asset_id FROM price_points").all();
+      if (rows.length === expectedPairs.length) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.deepEqual([...seen].sort(), expectedPairs);
+    assert.equal(prices.prepare("SELECT COUNT(DISTINCT asset_id) AS n FROM price_points").get().n, expectedPairs.length);
+    app.child.kill("SIGTERM");
+    await within(app.exited, 10_000);
+    const summaries = app.output().split("\n").filter((line) => line.includes("shared price history run"));
+    assert.equal(summaries.length, 1, app.output());
+    const [summary] = summaries;
+    assert.doesNotMatch(app.output(), /INFO[^\n]*(?:WAL mode enabled|db: opening database|no migrations applied)/);
+    const rows = prices.prepare("SELECT COUNT(*) AS n FROM price_points").get().n;
+    assert.equal(Number(summary.match(/rows_written=(\d+)/)?.[1]), rows);
+    assert.equal(Number(summary.match(/requests_attempted=(\d+)/)?.[1]), requestCount);
+    assert.equal(Number(summary.match(/requests_succeeded=(\d+)/)?.[1]), requestCount);
+    assert.doesNotMatch(summary, /bitcoin|solana|alice|bob|user_id|account_id|provider_asset_id/i);
+  } finally {
+    if (app?.child.exitCode === null) {
+      app.child.kill("SIGTERM");
+      await within(app.exited, 10_000);
+    }
+    prices?.close();
+    await new Promise((resolve) => provider.close(resolve));
+    rmSync(project, { recursive: true, force: true });
+  }
+}
 
 test("Docker PID 1 handles SIGTERM", {
   skip: !process.env.BITGARTH_SHUTDOWN_DOCKER_IMAGE,

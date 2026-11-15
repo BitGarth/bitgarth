@@ -263,23 +263,10 @@ fn run_at(
 
     let mut summary = InactiveUserCleanupSummary::default();
     for candidate in candidates {
-        match delete_candidate_user(&project_dir, candidate, now)? {
-            Some(deleted) => {
-                summary.deleted_users += 1;
-                tracing::info!(
-                    user_id = %deleted.user_id,
-                    activity_at = %deleted.activity_at,
-                    "inactive user cleanup: deleted inactive hosted user"
-                );
-            }
-            None => {
-                summary.skipped_after_recheck += 1;
-                tracing::debug!(
-                    user_id = %candidate.user_id,
-                    activity_at = %candidate.activity_at,
-                    "inactive user cleanup: skipped candidate after locked recheck"
-                );
-            }
+        if delete_candidate_user(&project_dir, candidate, now)?.is_some() {
+            summary.deleted_users += 1;
+        } else {
+            summary.skipped_after_recheck += 1;
         }
     }
 
@@ -787,6 +774,7 @@ mod tests {
             wrapped_dek: Some(vec![1_u8; 48]),
             wrap_nonce: Some(vec![2_u8; 12]),
             permission: ClientPermission::BalancesRead,
+            permission_cap: None,
             created_at: now - ChronoDuration::days(1),
             expires_at: None,
             last_used_at: None,

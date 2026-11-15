@@ -93,7 +93,8 @@ pub(crate) use app_updates::{
 #[cfg(test)]
 pub(crate) use app_user_preferences::set_price_fetching_enabled;
 pub(crate) use app_user_preferences::{
-    get_price_fetching_enabled, set_price_fetching_enabled_with_transition,
+    any_price_fetching_enabled, get_price_fetching_enabled,
+    set_price_fetching_enabled_with_transition,
 };
 pub(crate) use raw_ingestion::cleanup_raw_sync_history_with_compaction;
 pub(crate) use settings::{
@@ -107,7 +108,7 @@ pub(crate) use sync_slots::{
 
 pub(crate) use client_capabilities::{
     RevokeClientCapabilityResult, capability_ids_for_user, clear_expired_client_capability_wrap,
-    find_capability_identity_by_verifier, insert_active_client_capability,
+    find_capability_identity_by_verifier, insert_active_client_capability, limit_client_capability,
     list_expired_client_capabilities, load_active_client_capability,
     load_client_capabilities_for_user, load_client_capability, record_client_capability_activity,
     revoke_client_capability,
@@ -118,8 +119,8 @@ pub(crate) use paired_client_names::{
 };
 
 pub(crate) use price_overrides::{
-    PriceOverrideRecord, delete_price_override, list_price_overrides_in_range,
-    lookup_price_override, upsert_price_override,
+    PriceOverrideRecord, delete_price_override, has_personal_price_asset,
+    list_price_overrides_in_range, lookup_price_override, upsert_price_override,
 };
 pub(crate) use prices_db::{
     CURRENT_PRICE_CACHE_TTL, CoinGeckoCatalogSearchRow, CoinGeckoCatalogUpsert,
@@ -127,9 +128,10 @@ pub(crate) use prices_db::{
     DailyPriceDateQuery, DailyPricePointQuery, DailyPricePointRecord, DailyPricePointUpsert,
     HistoricalPriceAttemptCooldownQuery, HistoricalPriceAttemptQuery, HistoricalPriceAttemptRecord,
     HistoricalPriceAttemptStatus, HistoricalPriceAttemptUpsert, count_active_coingecko_catalog,
-    count_active_coingecko_in_set, initialize_prices_db, latest_coingecko_catalog_retrieved_at,
-    latest_historical_price_attempt, latest_historical_price_cooldown_attempt,
-    load_daily_price_dates, load_fresh_current_price_cache, lookup_daily_price_point,
+    count_active_coingecko_in_set, history_view::load_daily_price_history, initialize_prices_db,
+    latest_coingecko_catalog_retrieved_at, latest_historical_price_attempt,
+    latest_historical_price_cooldown_attempt, load_daily_price_dates,
+    load_fresh_current_price_cache, lookup_daily_price_point, open_migrated_prices_db,
     replace_or_upsert_coingecko_catalog_rows, search_coingecko_asset_catalog,
     select_daily_price_point, upsert_current_price_cache, upsert_daily_price_points,
     upsert_historical_price_attempt,
@@ -190,17 +192,18 @@ const _: () = {
 };
 
 pub(crate) use account_transactions::{
-    AccountTransactionLedgerPage, BitcoinAccountCompletionPublication,
-    BitcoinAddressProofPublication, BitcoinHdDiscoveryPublication, HoldingsReportData,
-    HoldingsReportWalletData, WalletReportBalanceState, WalletReportLoadError,
-    load_account_transactions_pages, load_holdings_report, load_holdings_report_range_plan,
-    load_wallet_report, load_wallet_report_range_plan, publish_bitcoin_account_completion,
-    rebuild_account_transaction_ledger,
+    AccountTransactionFlowRow, AccountTransactionLedgerPage, BitcoinAccountCompletionPublication,
+    BitcoinAddressProofPublication, BitcoinBalanceObservation, BitcoinHdDiscoveryPublication,
+    HoldingsReportData, HoldingsReportWalletData, WalletReportBalanceState, WalletReportLoadError,
+    load_account_settled_transaction_flows, load_account_transactions_pages, load_holdings_report,
+    load_holdings_report_range_plan, load_wallet_report, load_wallet_report_range_plan,
+    publish_bitcoin_account_completion, rebuild_account_transaction_ledger,
     rebuild_account_transaction_ledger_with_unknown_bitcoin_basis,
 };
 pub(crate) use exports::{
     ExportAccountBoundaryMode, ExportAccountRow, ExportManualAssetBalanceAssertionRow,
-    load_all_accounts_for_export, load_all_manual_asset_balance_assertion_rows_for_export,
+    count_transactions_for_export, load_all_accounts_for_export,
+    load_all_manual_asset_balance_assertion_rows_for_export,
 };
 #[cfg(any(
     test,
@@ -280,9 +283,9 @@ pub(crate) use wallets::{
     create_wallet_and_move_account, delete_account as delete_wallet_account, delete_wallet,
     derive_address_from_extended_pubkey, derive_next_derived_addresses_for_account,
     find_extended_pubkey_scheme_link, find_wallet_for_extended_pubkey, get_wallet_by_fingerprint,
-    link_trezor_wallet, list_wallets, load_account_addresses_page, load_wallet_summary_bundle,
-    move_account_to_wallet, update_account_label as update_wallet_account_label,
-    update_wallet_label,
+    link_trezor_wallet, list_wallets, load_account_addresses_page, load_held_asset_names,
+    load_wallet_summary_bundle, move_account_to_wallet,
+    update_account_label as update_wallet_account_label, update_wallet_label,
 };
 #[cfg(any(feature = "dev-config", feature = "db-tests"))]
 pub(crate) use wallets::{add_bitcoin_address, add_ethereum_address};

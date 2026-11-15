@@ -752,6 +752,7 @@ async fn wallet_balances_supports_an_unencrypted_dev_pairing_until_revoked() {
             wrapped_dek: None,
             wrap_nonce: None,
             permission: crate::client_capabilities::ClientPermission::BalancesRead,
+            permission_cap: None,
             created_at: chrono::Utc::now(),
             expires_at: None,
             last_used_at: None,

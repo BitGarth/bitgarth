@@ -1,25 +1,25 @@
 use super::date_range_filter::{
-    DateRangeFilterEffect, DateRangeFilterEvent, DateRangeFilterPolicy, DateRangeFilterState,
-    DateRangeRouteParams, DateRangeSelection, initialize_date_range_filter,
-    transition_date_range_filter,
+    DateRangeFilterEffect, DateRangeFilterEvent, DateRangeFilterPolicy, DateRangeRouteParams,
+    DateRangeSelection, initialize_date_range_filter,
 };
 use super::date_range_toolbar::DateRangeToolbar;
 use super::report_common::{
-    HoldingsReportFreeNotice, fiat_decimal, format_change_percent, format_fiat_view,
-    free_window_aria_label, free_window_badge_label, free_window_tooltip, show_free_report_notice,
+    HoldingsReportFreeNotice, LastConfirmedBitcoin, dispatch_report_date_event, fiat_decimal,
+    format_change_percent, format_fiat_view, free_window_aria_label, free_window_badge_label,
+    free_window_tooltip, show_free_report_notice,
 };
 use super::wallet_report_prices::PricesSection;
 use crate::backend::{
-    HoldingsReportResponse, ResolvedPriceView, get_holdings_report,
-    list_resolved_prices_for_holdings_report,
+    BitcoinBalanceObservationView, HoldingsReportResponse, HoldingsValueGapView, ResolvedPriceView,
+    get_holdings_report, list_resolved_prices_for_holdings_report,
 };
+use crate::hooks::handle_session_expired;
 use crate::models::{CurrencyCode, NumberFormat};
 use crate::report_dates::{dial_year_range, displayed_calendar_year};
 use crate::settings::SettingsState;
 use crate::wallets::{ReportTimezoneParam, WalletReportDateRange};
-use crate::{AuthState, AuthStatus, BannerMessage, BannerState, Route};
+use crate::{AuthState, BannerState, Route};
 use chrono::Datelike;
-use dioxus::logger::tracing;
 use dioxus::prelude::*;
 use rust_decimal::Decimal;
 
@@ -34,54 +34,10 @@ struct HoldingsTotals {
     change_percent: Option<Decimal>,
 }
 
-fn handle_session_expired(
-    mut auth_state: AuthState,
-    mut banner_state: BannerState,
-    context: &'static str,
-) {
-    let user_id = {
-        let auth_snapshot = auth_state.read();
-        match &*auth_snapshot {
-            AuthStatus::Authenticated(auth) => Some(auth.user.user_id),
-            _ => None,
-        }
-    };
-    tracing::debug!(user_id = ?user_id, context, "holdings report ui: session expired");
-    auth_state.set(AuthStatus::Unauthenticated);
-    if user_id.is_some() {
-        banner_state.set(Some(BannerMessage::SessionExpired));
-    }
-}
-
 fn route_for_holdings_report(selection: DateRangeSelection) -> Route {
     Route::HoldingsReport {
         start: selection.start_query_value(),
         end: selection.end_query_value(),
-    }
-}
-
-fn dispatch_date_range_filter_event(
-    policy: DateRangeFilterPolicy,
-    mut filter_state: Signal<DateRangeFilterState>,
-    mut active_selection: Signal<DateRangeSelection>,
-    mut pending_route_selection: Signal<Option<DateRangeSelection>>,
-    event: DateRangeFilterEvent,
-) {
-    let current_state = filter_state.peek().clone();
-    let outcome = transition_date_range_filter(policy, &current_state, event);
-
-    if current_state != outcome.state {
-        let next_selection = outcome.state.selection();
-        if *active_selection.peek() != next_selection {
-            active_selection.set(next_selection);
-        }
-        filter_state.set(outcome.state);
-    }
-
-    if let DateRangeFilterEffect::ReplaceRoute(selection) = outcome.effect
-        && pending_route_selection.peek().as_ref() != Some(&selection)
-    {
-        pending_route_selection.set(Some(selection));
     }
 }
 
@@ -176,6 +132,47 @@ fn change_class_for_fiat(value: &Option<crate::backend::FiatAmountView>) -> &'st
         .unwrap_or("")
 }
 
+/// Says why a wallet's value is missing and offers the next step.
+#[component]
+fn HoldingsGapNote(
+    gap: Option<HoldingsValueGapView>,
+    wallet_id: crate::wallets::WalletId,
+    selection: DateRangeSelection,
+    closing_observations: Option<Vec<BitcoinBalanceObservationView>>,
+) -> Element {
+    match gap {
+        Some(HoldingsValueGapView::BalanceUnknown) => rsx! {
+            div { class: "wr-gap-note",
+                if closing_observations.is_some() {
+                    "Closing balance unknown for this date. "
+                } else {
+                    "Balance unknown: history not fully synced. "
+                }
+                Link {
+                    to: Route::WalletReport {
+                        wallet_id,
+                        start: selection.start_query_value(),
+                        end: selection.end_query_value(),
+                    },
+                    "See accounts"
+                }
+            }
+            if let Some(observations) = closing_observations {
+                for observation in observations {
+                    LastConfirmedBitcoin { observation, show_account: true }
+                }
+            }
+        },
+        Some(HoldingsValueGapView::PriceMissing) => rsx! {
+            div { class: "wr-gap-note",
+                "No price for this day. "
+                Link { to: Route::Prices { asset: None, start: None, end: None }, "Add a price" }
+            }
+        },
+        None => rsx! {},
+    }
+}
+
 #[component]
 pub(crate) fn HoldingsReport(start: Option<String>, end: Option<String>) -> Element {
     let auth_state = use_context::<AuthState>();
@@ -194,14 +191,13 @@ pub(crate) fn HoldingsReport(start: Option<String>, end: Option<String>) -> Elem
         DateRangeFilterEffect::None => None,
         DateRangeFilterEffect::ReplaceRoute(selection) => Some(selection),
     };
-    let mut filter_state = use_signal(|| initial_filter.state.clone());
+    let filter_state = use_signal(|| initial_filter.state.clone());
     let active_selection = use_signal(|| initial_selection);
     let mut pending_route_selection = use_signal(|| initial_pending_route_selection);
     let mut unauthorized_handled = use_signal(|| false);
 
     if filter_state.peek().route() != &current_route {
-        dispatch_date_range_filter_event(
-            DateRangeFilterPolicy::RequiredCanonicalRange,
+        dispatch_report_date_event(
             filter_state,
             active_selection,
             pending_route_selection,
@@ -217,6 +213,7 @@ pub(crate) fn HoldingsReport(start: Option<String>, end: Option<String>) -> Elem
     });
 
     let mut report_resource = use_server_future(move || {
+        let _prices_enabled = (settings_state.price_fetching_enabled)();
         let timezone = ReportTimezoneParam((settings_state.timezone)());
         let selection = active_selection();
         async move {
@@ -225,6 +222,7 @@ pub(crate) fn HoldingsReport(start: Option<String>, end: Option<String>) -> Elem
     })?;
 
     let mut resolved_prices_resource = use_server_future(move || {
+        let _prices_enabled = (settings_state.price_fetching_enabled)();
         let timezone = ReportTimezoneParam((settings_state.timezone)());
         let selection = active_selection();
         let from = selection.start_param();
@@ -257,36 +255,22 @@ pub(crate) fn HoldingsReport(start: Option<String>, end: Option<String>) -> Elem
         .as_ref()
         .and_then(|result| result.as_ref().ok());
 
-    if let Some(report) = report {
-        let canonical_range =
-            WalletReportDateRange::new(report.resolved_from, report.resolved_to).ok();
-        if let Some(canonical_range) = canonical_range {
-            // Preserve explicit requests, but canonicalize a missing range even when clamped.
-            if report.access.range_clamped && *active_selection.peek() != DateRangeSelection::Empty
-            {
-                let outcome = transition_date_range_filter(
-                    DateRangeFilterPolicy::RequiredCanonicalRange,
-                    &filter_state.peek().clone(),
-                    DateRangeFilterEvent::ClampedDisplay(canonical_range),
-                );
-                if *filter_state.peek() != outcome.state {
-                    filter_state.set(outcome.state);
-                }
-            } else {
-                dispatch_date_range_filter_event(
-                    DateRangeFilterPolicy::RequiredCanonicalRange,
-                    filter_state,
-                    active_selection,
-                    pending_route_selection,
-                    DateRangeFilterEvent::ServerResolved(canonical_range),
-                );
-            }
-        }
-    }
-
     let this_year_preset = report.and_then(|data| {
         WalletReportDateRange::new(data.default_this_year_from, data.default_this_year_to).ok()
     });
+
+    if let Some(event) = report.and_then(|report| {
+        filter_state
+            .peek()
+            .report_access_event(&report.access, this_year_preset)
+    }) {
+        dispatch_report_date_event(
+            filter_state,
+            active_selection,
+            pending_route_selection,
+            event,
+        );
+    }
 
     let number_format = (settings_state.number_format)();
     let filter_state_snapshot = filter_state();
@@ -297,10 +281,7 @@ pub(crate) fn HoldingsReport(start: Option<String>, end: Option<String>) -> Elem
         .map(str::to_string);
     let user_timezone = (settings_state.timezone)();
 
-    let active_range = match filter_state_snapshot.selection() {
-        DateRangeSelection::Range(range) => Some(range),
-        DateRangeSelection::Empty => None,
-    };
+    let active_range = filter_state_snapshot.dial_range();
     let current_year = this_year_preset.map(|range| range.from().year());
     let displayed_year =
         active_range.and_then(|range| displayed_calendar_year(range, this_year_preset));
@@ -360,8 +341,7 @@ pub(crate) fn HoldingsReport(start: Option<String>, end: Option<String>) -> Elem
                         show_this_year,
                         custom_range_open,
                         on_start_change: move |value| {
-                            dispatch_date_range_filter_event(
-                                DateRangeFilterPolicy::RequiredCanonicalRange,
+                            dispatch_report_date_event(
                                 filter_state,
                                 active_selection,
                                 pending_route_selection,
@@ -369,8 +349,7 @@ pub(crate) fn HoldingsReport(start: Option<String>, end: Option<String>) -> Elem
                             );
                         },
                         on_end_change: move |value| {
-                            dispatch_date_range_filter_event(
-                                DateRangeFilterPolicy::RequiredCanonicalRange,
+                            dispatch_report_date_event(
                                 filter_state,
                                 active_selection,
                                 pending_route_selection,
@@ -379,8 +358,7 @@ pub(crate) fn HoldingsReport(start: Option<String>, end: Option<String>) -> Elem
                         },
                         on_this_year: move |_| {
                             if let Some(range) = this_year_preset {
-                                dispatch_date_range_filter_event(
-                                    DateRangeFilterPolicy::RequiredCanonicalRange,
+                                dispatch_report_date_event(
                                     filter_state,
                                     active_selection,
                                     pending_route_selection,
@@ -396,8 +374,7 @@ pub(crate) fn HoldingsReport(start: Option<String>, end: Option<String>) -> Elem
                                     this_year_preset,
                                 )
                             {
-                                dispatch_date_range_filter_event(
-                                    DateRangeFilterPolicy::RequiredCanonicalRange,
+                                dispatch_report_date_event(
                                     filter_state,
                                     active_selection,
                                     pending_route_selection,
@@ -413,8 +390,7 @@ pub(crate) fn HoldingsReport(start: Option<String>, end: Option<String>) -> Elem
                                     this_year_preset,
                                 )
                             {
-                                dispatch_date_range_filter_event(
-                                    DateRangeFilterPolicy::RequiredCanonicalRange,
+                                dispatch_report_date_event(
                                     filter_state,
                                     active_selection,
                                     pending_route_selection,
@@ -457,6 +433,7 @@ pub(crate) fn HoldingsReport(start: Option<String>, end: Option<String>) -> Elem
                                 user_timezone,
                                 resolved_views: resolved_views_for_section,
                                 can_edit_prices: report.access.can_edit_prices,
+                                report_range: (report.resolved_from, report.resolved_to),
                                 on_prices_changed: move |_| {
                                     resolved_prices_resource.restart();
                                     report_resource.restart();
@@ -511,12 +488,23 @@ pub(crate) fn HoldingsReport(start: Option<String>, end: Option<String>) -> Elem
                                                         div { class: "wr-fiat-value",
                                                             "{format_optional_fiat(&row.opening_fiat, user_currency, number_format)}"
                                                         }
+                                                        if row.opening_fiat.is_none() {
+                                                            HoldingsGapNote { gap: row.opening_gap, wallet_id: row.wallet_id, selection: active_selection() }
+                                                        }
                                                     }
                                                 }
                                                 td { class: "wr-td-value",
                                                     div { class: "wr-value-cell",
                                                         div { class: "wr-fiat-value",
                                                             "{format_optional_fiat(&row.closing_fiat, user_currency, number_format)}"
+                                                        }
+                                                        if row.closing_fiat.is_none() {
+                                                            HoldingsGapNote {
+                                                                gap: row.closing_gap,
+                                                                wallet_id: row.wallet_id,
+                                                                selection: active_selection(),
+                                                                closing_observations: row.last_confirmed_bitcoin.clone(),
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -541,6 +529,9 @@ pub(crate) fn HoldingsReport(start: Option<String>, end: Option<String>) -> Elem
                                                     span { class: "wr-total-value",
                                                         "{format_decimal_fiat(opening, user_currency, number_format)}"
                                                     }
+                                                } else {
+                                                    span { class: "wr-total-value wr-fiat-value-missing", "—" }
+                                                    div { class: "wr-gap-note", "Not every wallet has a value for this date" }
                                                 }
                                             }
                                             td { class: "wr-td-value",
@@ -548,6 +539,9 @@ pub(crate) fn HoldingsReport(start: Option<String>, end: Option<String>) -> Elem
                                                     span { class: "wr-total-value",
                                                         "{format_decimal_fiat(closing, user_currency, number_format)}"
                                                     }
+                                                } else {
+                                                    span { class: "wr-total-value wr-fiat-value-missing", "—" }
+                                                    div { class: "wr-gap-note", "Not every wallet has a value for this date" }
                                                 }
                                             }
                                             td { class: "wr-td-change",
@@ -603,6 +597,9 @@ pub(crate) fn HoldingsReport(start: Option<String>, end: Option<String>) -> Elem
                                                         "{format_optional_fiat(&row.opening_fiat, user_currency, number_format)}"
                                                     }
                                                 }
+                                                if row.opening_fiat.is_none() {
+                                                    HoldingsGapNote { gap: row.opening_gap, wallet_id: row.wallet_id, selection: active_selection() }
+                                                }
                                             }
                                             div { class: "wr-card-side",
                                                 div { class: "wr-card-side-header",
@@ -611,39 +608,42 @@ pub(crate) fn HoldingsReport(start: Option<String>, end: Option<String>) -> Elem
                                                         "{format_optional_fiat(&row.closing_fiat, user_currency, number_format)}"
                                                     }
                                                 }
+                                                if row.closing_fiat.is_none() {
+                                                    HoldingsGapNote {
+                                                        gap: row.closing_gap,
+                                                        wallet_id: row.wallet_id,
+                                                        selection: active_selection(),
+                                                        closing_observations: row.last_confirmed_bitcoin.clone(),
+                                                    }
+                                                }
                                             }
                                         }
                                     }
                                 }
 
-                                if totals.opening.is_some() || totals.closing.is_some() {
-                                    div { class: "wr-summary-card",
-                                        h3 { class: "wr-summary-title", "Total Holdings Summary" }
-                                        div { class: "wr-summary-rows",
-                                            if let Some(opening) = totals.opening {
-                                                div { class: "wr-summary-row",
-                                                    span { class: "wr-summary-label", "Opening ({from_display})" }
-                                                    span { class: "wr-summary-value",
-                                                        "{format_decimal_fiat(opening, user_currency, number_format)}"
+                                div { class: "wr-summary-card",
+                                    h3 { class: "wr-summary-title", "Total Holdings Summary" }
+                                    div { class: "wr-summary-rows",
+                                        for (label, date, value) in [("Opening", &from_display, totals.opening), ("Closing", &to_display, totals.closing)] {
+                                            div { class: "wr-summary-row",
+                                                span { class: "wr-summary-label", "{label} ({date})" }
+                                                div { class: "wr-value-cell",
+                                                    if let Some(amount) = value {
+                                                        span { class: "wr-summary-value", "{format_decimal_fiat(amount, user_currency, number_format)}" }
+                                                    } else {
+                                                        span { class: "wr-summary-value wr-fiat-value-missing", "—" }
+                                                        div { class: "wr-gap-note", "Not every wallet has a value for this date" }
                                                     }
                                                 }
                                             }
-                                            if let Some(closing) = totals.closing {
-                                                div { class: "wr-summary-row",
-                                                    span { class: "wr-summary-label", "Closing ({to_display})" }
-                                                    span { class: "wr-summary-value",
-                                                        "{format_decimal_fiat(closing, user_currency, number_format)}"
-                                                    }
-                                                }
-                                            }
-                                            if let Some(change) = totals.change {
-                                                div { class: "wr-summary-row wr-summary-change-row",
-                                                    span { class: "wr-summary-label wr-summary-change-label", "Total Change" }
-                                                    span { class: "wr-summary-value wr-change {change_class(change)}",
-                                                        "{format_decimal_fiat(change, user_currency, number_format)}"
-                                                        if let Some(percent) = totals.change_percent {
-                                                            " ({format_change_percent(percent)})"
-                                                        }
+                                        }
+                                        if let Some(change) = totals.change {
+                                            div { class: "wr-summary-row wr-summary-change-row",
+                                                span { class: "wr-summary-label wr-summary-change-label", "Total Change" }
+                                                span { class: "wr-summary-value wr-change {change_class(change)}",
+                                                    "{format_decimal_fiat(change, user_currency, number_format)}"
+                                                    if let Some(percent) = totals.change_percent {
+                                                        " ({format_change_percent(percent)})"
                                                     }
                                                 }
                                             }
@@ -712,6 +712,9 @@ mod tests {
             closing_fiat,
             change_fiat: None,
             change_percent: None,
+            opening_gap: None,
+            closing_gap: None,
+            last_confirmed_bitcoin: Vec::new(),
         }
     }
 

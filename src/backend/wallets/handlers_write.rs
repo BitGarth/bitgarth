@@ -186,18 +186,6 @@ pub(crate) async fn link_trezor_wallet(
         "wallets: link trezor authorized"
     );
 
-    tracing::info!(
-        fingerprint = %validated.master_fingerprint.as_str(),
-        accounts = ?validated
-            .accounts
-            .iter()
-            .map(|account| account.account_index.as_u32())
-            .collect::<Vec<_>>(),
-        device_id = ?validated.device_id.as_ref().map(|id| id.as_str()),
-        device_label = ?validated.device_label.as_ref().map(|label| label.as_str()),
-        "linking trezor wallet"
-    );
-
     let now = Utc::now();
     let entitlements = crate::payments::entitlements::load_feature_entitlements(user_id, now)
         .map_err(|e| internal_error("wallets", e))?;
@@ -250,8 +238,14 @@ pub(crate) async fn update_wallet_label(
         require_initialized_session("wallets", &session_token, unauthorized_error, |message| {
             internal_error("require_initialized_session", message)
         })?;
-    let user_id = initialized_session.session.user_id;
+    update_wallet_label_for_user(initialized_session.session.user_id, request).await
+}
 
+#[cfg(feature = "server")]
+pub(crate) async fn update_wallet_label_for_user(
+    user_id: crate::models::UserId,
+    request: UpdateWalletLabelRequest,
+) -> Result<(), WalletError> {
     tracing::debug!(
         user_id = %user_id,
         wallet_id = %request.wallet_id,
@@ -284,8 +278,14 @@ pub(crate) async fn update_account_label(
         require_initialized_session("wallets", &session_token, unauthorized_error, |message| {
             internal_error("require_initialized_session", message)
         })?;
-    let user_id = initialized_session.session.user_id;
+    update_account_label_for_user(initialized_session.session.user_id, request).await
+}
 
+#[cfg(feature = "server")]
+pub(crate) async fn update_account_label_for_user(
+    user_id: crate::models::UserId,
+    request: UpdateAccountLabelRequest,
+) -> Result<(), WalletError> {
     tracing::debug!(
         user_id = %user_id,
         account_id = %request.account_id,
@@ -316,8 +316,14 @@ pub(crate) async fn delete_account(request: DeleteAccountRequest) -> Result<(), 
         require_initialized_session("wallets", &session_token, unauthorized_error, |message| {
             internal_error("require_initialized_session", message)
         })?;
-    let user_id = initialized_session.session.user_id;
+    delete_account_for_user(initialized_session.session.user_id, request).await
+}
 
+#[cfg(feature = "server")]
+pub(crate) async fn delete_account_for_user(
+    user_id: crate::models::UserId,
+    request: DeleteAccountRequest,
+) -> Result<(), WalletError> {
     tracing::debug!(
         user_id = %user_id,
         account_id = %request.account_id,
@@ -345,8 +351,14 @@ pub(crate) async fn move_wallet_account(
         require_initialized_session("wallets", &session_token, unauthorized_error, |message| {
             internal_error("require_initialized_session", message)
         })?;
-    let user_id = initialized_session.session.user_id;
+    move_wallet_account_for_user(initialized_session.session.user_id, request).await
+}
 
+#[cfg(feature = "server")]
+pub(crate) async fn move_wallet_account_for_user(
+    user_id: crate::models::UserId,
+    request: MoveAccountRequest,
+) -> Result<MoveAccountResponse, WalletError> {
     let validated = request.try_into_validated().map_err(validation_error)?;
 
     tracing::debug!(
@@ -392,8 +404,14 @@ pub(crate) async fn delete_wallet(request: DeleteWalletRequest) -> Result<(), Wa
         require_initialized_session("wallets", &session_token, unauthorized_error, |message| {
             internal_error("require_initialized_session", message)
         })?;
-    let user_id = initialized_session.session.user_id;
+    delete_wallet_for_user(initialized_session.session.user_id, request).await
+}
 
+#[cfg(feature = "server")]
+pub(crate) async fn delete_wallet_for_user(
+    user_id: crate::models::UserId,
+    request: DeleteWalletRequest,
+) -> Result<(), WalletError> {
     tracing::debug!(
         user_id = %user_id,
         wallet_id = %request.wallet_id,
@@ -470,8 +488,14 @@ pub(crate) async fn validate_xpub(
         require_initialized_session("wallets", &session_token, unauthorized_error, |message| {
             internal_error("require_initialized_session", message)
         })?;
-    let user_id = initialized_session.session.user_id;
+    validate_xpub_for_user(initialized_session.session.user_id, request).await
+}
 
+#[cfg(feature = "server")]
+pub(crate) async fn validate_xpub_for_user(
+    user_id: crate::models::UserId,
+    request: ValidateXpubRequest,
+) -> Result<ValidateXpubResponse, WalletError> {
     let validated = request.try_into_validated().map_err(validation_error)?;
 
     // Suggest scheme from prefix (xpub->Legacy, ypub->NestedSegwit, zpub->NativeSegwit)
@@ -603,8 +627,14 @@ pub(crate) async fn add_xpub(request: AddXpubRequest) -> Result<AddXpubResponse,
         require_initialized_session("wallets", &session_token, unauthorized_error, |message| {
             internal_error("require_initialized_session", message)
         })?;
-    let user_id = initialized_session.session.user_id;
+    add_xpub_for_user(initialized_session.session.user_id, request).await
+}
 
+#[cfg(feature = "server")]
+pub(crate) async fn add_xpub_for_user(
+    user_id: crate::models::UserId,
+    request: AddXpubRequest,
+) -> Result<AddXpubResponse, WalletError> {
     let validated = request.try_into_validated().map_err(validation_error)?;
 
     tracing::debug!(
@@ -671,8 +701,14 @@ pub(crate) async fn add_manual_asset_account(
         require_initialized_session("wallets", &session_token, unauthorized_error, |message| {
             internal_error("require_initialized_session", message)
         })?;
-    let user_id = initialized_session.session.user_id;
+    add_manual_asset_account_for_user(initialized_session.session.user_id, request).await
+}
 
+#[cfg(feature = "server")]
+pub(crate) async fn add_manual_asset_account_for_user(
+    user_id: crate::models::UserId,
+    request: AddManualAssetAccountRequest,
+) -> Result<AddManualAssetAccountResponse, WalletError> {
     let validated = request.try_into_validated().map_err(|err| match err {
         AddManualAssetAccountValidationError::Fields(errors) => validation_error(errors),
         AddManualAssetAccountValidationError::Catalog(err) => {
@@ -728,8 +764,14 @@ pub(crate) async fn add_ethereum_address(
         require_initialized_session("wallets", &session_token, unauthorized_error, |message| {
             internal_error("require_initialized_session", message)
         })?;
-    let user_id = initialized_session.session.user_id;
+    add_ethereum_address_for_user(initialized_session.session.user_id, request).await
+}
 
+#[cfg(feature = "server")]
+pub(crate) async fn add_ethereum_address_for_user(
+    user_id: crate::models::UserId,
+    request: AddEthAddressRequest,
+) -> Result<AddEthAddressResponse, WalletError> {
     let validated = request.try_into_validated().map_err(validation_error)?;
 
     tracing::debug!(
@@ -795,8 +837,14 @@ pub(crate) async fn add_bitcoin_address(
         require_initialized_session("wallets", &session_token, unauthorized_error, |message| {
             internal_error("require_initialized_session", message)
         })?;
-    let user_id = initialized_session.session.user_id;
+    add_bitcoin_address_for_user(initialized_session.session.user_id, request).await
+}
 
+#[cfg(feature = "server")]
+pub(crate) async fn add_bitcoin_address_for_user(
+    user_id: crate::models::UserId,
+    request: AddBtcAddressRequest,
+) -> Result<AddBtcAddressResponse, WalletError> {
     let validated = request.try_into_validated().map_err(validation_error)?;
 
     tracing::debug!(

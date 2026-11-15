@@ -11,6 +11,8 @@ mod session_context;
 mod session_token;
 mod settings;
 mod sync_control;
+#[cfg(feature = "server")]
+mod transaction_values;
 mod transactions;
 mod updates;
 mod wallets;
@@ -96,9 +98,9 @@ pub(crate) use exports::{
     export_wallet_data, get_wallet_data_export_options, import_wallet_data,
 };
 pub(crate) use pairing::{
-    ApprovePairingRequest, DenyPairingRequest, PairedClientView, PairingReviewResponse,
-    RevokePairedClientRequest, approve_pairing, deny_pairing, list_paired_clients, review_pairing,
-    revoke_paired_client,
+    ApprovePairingRequest, DenyPairingRequest, LimitPairedClientRequest, PairedClientView,
+    PairingReviewResponse, RevokePairedClientRequest, approve_pairing, deny_pairing,
+    limit_paired_client, list_paired_clients, review_pairing, revoke_paired_client,
 };
 pub(crate) use payments::{
     cancel_premium_order, get_payment_catalog, get_payment_state_local, poll_premium_order,
@@ -106,9 +108,10 @@ pub(crate) use payments::{
     start_premium_top_up,
 };
 pub(crate) use prices::{
-    DeletePriceOverrideInput, PriceSourceView, ResolvedPriceView, UpsertPriceOverrideInput,
-    delete_price_override, list_resolved_prices_for_holdings_report,
-    list_resolved_prices_for_report, upsert_price_override,
+    DeletePriceOverrideInput, PriceHistoryView, PriceSourceView, ResolvedPriceView,
+    UpsertPriceOverrideInput, delete_price_override, get_price_history,
+    list_resolved_prices_for_holdings_report, list_resolved_prices_for_report,
+    upsert_price_override,
 };
 #[cfg(all(test, feature = "server"))]
 pub(crate) use prices::{PriceOverrideView, list_price_overrides};
@@ -121,13 +124,13 @@ pub(crate) use wallets::WalletAggregateBalanceView;
 pub(crate) use wallets::{
     AccountBalanceStateView, AccountCreationStateView, AccountLimitNoticeView,
     AccountReferenceKind, AccountStateView, AccountTransactionCountsView, AccountView,
-    BalanceAmountView, CustomAccountView, FiatAmountView, HoldingsReportResponse,
-    ManualAssetAccountView, ManualSyncDisabledReason, ManualSyncMode, NativeAccountManualSyncView,
-    NativeAccountView, NativeBalanceStateView, ValidateXpubResponse, WalletBalanceView,
-    WalletError, WalletReportAccountRow, WalletReportBalanceStateView, WalletReportResponse,
-    WalletValueSummaryView, WalletView, WalletsValueSummaryView, add_bitcoin_address,
-    add_ethereum_address, add_manual_asset_account, add_xpub,
-    delete_account as delete_wallet_account, delete_wallet, get_account_addresses,
+    BalanceAmountView, BitcoinBalanceObservationView, CustomAccountView, FiatAmountView,
+    HoldingsReportResponse, HoldingsValueGapView, ManualAssetAccountView, ManualSyncDisabledReason,
+    ManualSyncMode, NativeAccountManualSyncView, NativeAccountView, NativeBalanceStateView,
+    ValidateXpubResponse, WalletBalanceView, WalletError, WalletReportAccountRow,
+    WalletReportBalanceStateView, WalletReportResponse, WalletValueSummaryView, WalletView,
+    WalletsValueSummaryView, add_bitcoin_address, add_ethereum_address, add_manual_asset_account,
+    add_xpub, delete_account as delete_wallet_account, delete_wallet, get_account_addresses,
     get_holdings_report, get_wallet_report, get_wallets, manual_asset_catalog_total,
     manual_asset_discovery_detail, manual_asset_discovery_price, move_wallet_account,
     search_manual_asset_instances, update_account_label, update_wallet_label, validate_xpub,

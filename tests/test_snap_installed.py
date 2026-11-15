@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import time
+from typing import NamedTuple
 from urllib.error import URLError
 from urllib.request import HTTPCookieProcessor, ProxyHandler, Request, build_opener, urlopen
 
@@ -167,16 +168,32 @@ def check_port_config():
     print("web port change and reset passed")
 
 
+class CliCommands(NamedTuple):
+    login: tuple
+    profiles: tuple
+    balance: str
+    permission: str
+
+
+def cli_commands(help_text):
+    names = set(re.findall(r"^  ([a-z-]+)\s+", help_text, re.MULTILINE))
+    if {"auth", "balance"} <= names:
+        return CliCommands(("auth", "login"), ("auth", "status"), "balance", "full")
+    if {"pair", "profile", "balancesheet"} <= names:
+        return CliCommands(("pair",), ("profile", "list"), "balancesheet", "balances_read")
+    raise AssertionError("installed CLI help lacks expected commands")
+
+
 def check_cli(expected):
     version = run("snap", "run", "bitgarth-cli", "--version").stdout.strip()
     if version != f"bitgarth {expected}":
         raise AssertionError(f"CLI reports {version!r}, expected {expected}")
     help_text = run("snap", "run", "bitgarth-cli", "--help").stdout
-    if "balancesheet" not in help_text or "pair" not in help_text:
-        raise AssertionError("installed CLI help lacks expected commands")
+    commands = cli_commands(help_text)
     if not Path("/snap/bin/bitgarth-cli").exists():
         raise AssertionError("bitgarth-cli command missing")
     print("installed CLI version and help passed")
+    return commands
 
 
 def legal_versions(web_version):
@@ -208,7 +225,7 @@ def pairing_code(process, timeout=60):
                 break
             chunk = os.read(process.stderr.fileno(), 4096)
             output += chunk
-            match = re.search(rb"Pairing code: ([A-Z0-9]{4}-[A-Z0-9]{4})", output)
+            match = re.search(rb"(?:Pairing|One-time) code: +([A-Z0-9]{4}-[A-Z0-9]{4})", output)
             if match:
                 return match.group(1).decode()
             if not chunk or len(output) > 65536 or process.poll() is not None:
@@ -216,25 +233,25 @@ def pairing_code(process, timeout=60):
     raise AssertionError(f"CLI pairing code was not emitted within {timeout:g} seconds")
 
 
-def check_profile(profile):
+def check_profile(profile, commands):
     path = Path.home() / "snap/bitgarth-cli/common/.config/BitGarth/cli/profiles.json"
     metadata = path.stat()
     if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
         raise AssertionError("CLI profile has unsafe owner or permissions")
-    if profile not in run("snap", "run", "bitgarth-cli", "profile", "list").stdout:
+    if profile not in run("snap", "run", "bitgarth-cli", *commands.profiles).stdout:
         raise AssertionError("CLI profile is not listed")
     print("CLI profile persists with private permissions")
 
 
-def balancesheet(profile):
-    result = run("snap", "run", "bitgarth-cli", "--profile", profile, "balancesheet",
+def balancesheet(profile, commands):
+    result = run("snap", "run", "bitgarth-cli", "--profile", profile, commands.balance,
                  timeout=60)
     if not result.stdout.strip():
         raise AssertionError("CLI balancesheet returned no output")
-    print("authenticated balancesheet passed")
+    print("authenticated balance passed")
 
 
-def seed(state_file, web_version):
+def seed(state_file, web_version, commands):
     if state_file.exists():
         raise AssertionError(f"refusing to overwrite existing test state: {state_file}")
     suffix = secrets.token_hex(5)
@@ -251,19 +268,19 @@ def seed(state_file, web_version):
         },
     })
     process = subprocess.Popen(["snap", "run", "bitgarth-cli", "--profile", state["profile"],
-                                "pair", BASE, "--allow-insecure-http"],
+                                *commands.login, BASE, "--allow-insecure-http"],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         code = pairing_code(process)
         review = get_json(browser, "/_app/pairings/review", {"code": code})
         pairing = review.get("pairing", {})
         if (review.get("status") != "ready" or pairing.get("code") != code or
-                pairing.get("permissions") != ["balances_read"]):
+                pairing.get("permissions") != [commands.permission]):
             raise AssertionError("pairing review did not match requested capability")
         approved = post_json(browser, "/_app/pairings/approve", {
             "request": {
                 "pairing_id": pairing["pairing_id"], "code": code,
-                "permissions": ["balances_read"], "code_matches": True, "expires_at": None,
+                "permissions": pairing["permissions"], "code_matches": True, "expires_at": None,
             },
         })
         if approved.get("status") != "approved":
@@ -276,8 +293,8 @@ def seed(state_file, web_version):
             process.wait()
         process.stdout.close()
         process.stderr.close()
-    check_profile(state["profile"])
-    balancesheet(state["profile"])
+    check_profile(state["profile"], commands)
+    balancesheet(state["profile"], commands)
     state_file.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(state_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as output:
@@ -285,7 +302,7 @@ def seed(state_file, web_version):
     print("synthetic account and CLI pairing seeded")
 
 
-def verify(state_file):
+def verify(state_file, commands):
     if state_file.stat().st_mode & 0o077:
         raise AssertionError("test state file is not private")
     state = json.loads(state_file.read_text())
@@ -294,8 +311,8 @@ def verify(state_file):
         "username": state["username"], "password": state["password"]})
     if response.get("user", {}).get("username") != state["username"]:
         raise AssertionError("existing synthetic user could not log in")
-    check_profile(state["profile"])
-    balancesheet(state["profile"])
+    check_profile(state["profile"], commands)
+    balancesheet(state["profile"], commands)
     print("existing account and pairing survived restart/refresh")
 
 
@@ -333,11 +350,11 @@ def main():
                                     args.expected_cli_version or args.expected_version,
                                     args.allow_partial)
         check_web()
-        check_cli(args.expected_cli_version or args.expected_version)
+        commands = check_cli(args.expected_cli_version or args.expected_version)
         if args.mode == "seed":
-            seed(args.state_file, args.expected_version)
+            seed(args.state_file, args.expected_version, commands)
         else:
-            verify(args.state_file)
+            verify(args.state_file, commands)
             check_port_config()
         if confinement == "strict":
             check_home_isolation()

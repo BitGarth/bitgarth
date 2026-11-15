@@ -1,11 +1,13 @@
 use super::date_range_filter::{
-    DateRangeFilterEffect, DateRangeFilterEvent, DateRangeFilterPolicy, DateRangeFilterState,
-    DateRangeRouteParams, DateRangeSelection, initialize_date_range_filter,
-    transition_date_range_filter,
+    DateRangeFilterEffect, DateRangeFilterEvent, DateRangeFilterPolicy, DateRangeRouteParams,
+    DateRangeSelection, initialize_date_range_filter,
 };
 use super::date_range_toolbar::DateRangeToolbar;
 use super::formatting::DisplayAmountSign;
-use super::formatting::{ManualConversionQuote, convert_amount, format_date_for_display};
+use super::formatting::{
+    ManualConversionQuote, convert_amount, format_date_for_display, format_price_figure,
+};
+use super::report_common::{LastConfirmedBitcoin, dispatch_report_date_event};
 use super::wallet_report_prices::PricesSection;
 use super::wallets::{
     AddBitcoinAddressFlow, AddDropdownButton, AddEthereumAddressFlow, AddManualAssetFlow,
@@ -21,15 +23,15 @@ use crate::backend::{
     BalanceAmountView, FiatAmountView, ResolvedPriceView, WalletReportAccountRow,
     WalletReportBalanceStateView, WalletReportResponse, list_resolved_prices_for_report,
 };
+use crate::hooks::handle_session_expired;
 use crate::models::CurrencyCode;
 use crate::models::NumberFormat;
 use crate::report_dates::{dial_year_range, displayed_calendar_year};
 use crate::services::price_overrides::{BoundaryKind, PriceSubject, price_subject_sort_key};
 use crate::settings::SettingsState;
 use crate::wallets::{ReportTimezoneParam, WalletId, WalletReportDateRange};
-use crate::{AuthState, AuthStatus, BannerMessage, BannerState, Route};
+use crate::{AuthState, BannerState, Route};
 use chrono::Datelike;
-use dioxus::logger::tracing;
 use dioxus::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
@@ -37,58 +39,15 @@ use std::collections::HashMap;
 
 const WALLETS_CSS: Asset = asset!("/assets/wallets.css");
 const WALLET_REPORT_PRICES_CSS: Asset = asset!("/assets/wallet_report_prices.css");
+const UNKNOWN_BITCOIN_CLOSE: &str = "History does not establish the closing balance for this date";
 
 // ── Pure helpers ────────────────────────────────────────────
-
-fn handle_session_expired(
-    mut auth_state: AuthState,
-    mut banner_state: BannerState,
-    context: &'static str,
-) {
-    let user_id = {
-        let auth_snapshot = auth_state.read();
-        match &*auth_snapshot {
-            AuthStatus::Authenticated(auth) => Some(auth.user.user_id),
-            _ => None,
-        }
-    };
-    tracing::debug!(user_id = ?user_id, context, "wallet report ui: session expired");
-    auth_state.set(AuthStatus::Unauthenticated);
-    if user_id.is_some() {
-        banner_state.set(Some(BannerMessage::SessionExpired));
-    }
-}
 
 fn route_for_wallet_report(wallet_id: WalletId, selection: DateRangeSelection) -> Route {
     Route::WalletReport {
         wallet_id,
         start: selection.start_query_value(),
         end: selection.end_query_value(),
-    }
-}
-
-fn dispatch_date_range_filter_event(
-    policy: DateRangeFilterPolicy,
-    mut filter_state: Signal<DateRangeFilterState>,
-    mut active_selection: Signal<DateRangeSelection>,
-    mut pending_route_selection: Signal<Option<DateRangeSelection>>,
-    event: DateRangeFilterEvent,
-) {
-    let current_state = filter_state.peek().clone();
-    let outcome = transition_date_range_filter(policy, &current_state, event);
-
-    if current_state != outcome.state {
-        let next_selection = outcome.state.selection();
-        if *active_selection.peek() != next_selection {
-            active_selection.set(next_selection);
-        }
-        filter_state.set(outcome.state);
-    }
-
-    if let DateRangeFilterEffect::ReplaceRoute(selection) = outcome.effect
-        && pending_route_selection.peek().as_ref() != Some(&selection)
-    {
-        pending_route_selection.set(Some(selection));
     }
 }
 
@@ -234,6 +193,19 @@ fn format_fiat_decimal(
     format_fiat_view(&fiat_value, currency, number_format)
 }
 
+/// Stored price with grouped digits, never rounded: "€40,018.25".
+fn format_report_price(
+    price: Decimal,
+    currency: CurrencyCode,
+    number_format: NumberFormat,
+) -> String {
+    format!(
+        "{}{}",
+        currency.symbol(),
+        format_price_figure(price, number_format)
+    )
+}
+
 fn change_class(value: Decimal) -> &'static str {
     if value > Decimal::ZERO {
         "wr-change-positive"
@@ -341,7 +313,7 @@ pub(crate) fn WalletReport(
         DateRangeFilterEffect::None => None,
         DateRangeFilterEffect::ReplaceRoute(selection) => Some(selection),
     };
-    let mut filter_state = use_signal(|| initial_filter.state.clone());
+    let filter_state = use_signal(|| initial_filter.state.clone());
     let active_selection = use_signal(|| initial_selection);
     let mut pending_route_selection = use_signal(|| initial_pending_route_selection);
     let mut unauthorized_handled = use_signal(|| false);
@@ -351,8 +323,7 @@ pub(crate) fn WalletReport(
     let mut show_add_manual_asset = use_signal(|| false);
 
     if filter_state.peek().route() != &current_route {
-        dispatch_date_range_filter_event(
-            DateRangeFilterPolicy::RequiredCanonicalRange,
+        dispatch_report_date_event(
             filter_state,
             active_selection,
             pending_route_selection,
@@ -382,6 +353,7 @@ pub(crate) fn WalletReport(
     })?;
 
     let mut resolved_prices_resource = use_server_future(move || {
+        let _prices_enabled = (settings_state.price_fetching_enabled)();
         let timezone = ReportTimezoneParam((settings_state.timezone)());
         let selection = active_selection();
         let from = selection.start_param();
@@ -415,39 +387,22 @@ pub(crate) fn WalletReport(
         .as_ref()
         .and_then(|result| result.as_ref().ok());
 
-    if let Some(report) = report {
-        let canonical_range =
-            WalletReportDateRange::new(report.resolved_from, report.resolved_to).ok();
-        if let Some(canonical_range) = canonical_range {
-            if report.access.range_clamped && *active_selection.peek() != DateRangeSelection::Empty
-            {
-                // The server clamped the requested range to the Free window. Show the
-                // effective range in the controls without moving the requested route,
-                // so the fetch (and the Free-window badge) still reflect the request.
-                // A missing range must first be canonicalized from the server response.
-                let outcome = transition_date_range_filter(
-                    DateRangeFilterPolicy::RequiredCanonicalRange,
-                    &filter_state.peek().clone(),
-                    DateRangeFilterEvent::ClampedDisplay(canonical_range),
-                );
-                if *filter_state.peek() != outcome.state {
-                    filter_state.set(outcome.state);
-                }
-            } else {
-                dispatch_date_range_filter_event(
-                    DateRangeFilterPolicy::RequiredCanonicalRange,
-                    filter_state,
-                    active_selection,
-                    pending_route_selection,
-                    DateRangeFilterEvent::ServerResolved(canonical_range),
-                );
-            }
-        }
-    }
-
     let this_year_preset = report.and_then(|data| {
         WalletReportDateRange::new(data.default_this_year_from, data.default_this_year_to).ok()
     });
+
+    if let Some(event) = report.and_then(|report| {
+        filter_state
+            .peek()
+            .report_access_event(&report.access, this_year_preset)
+    }) {
+        dispatch_report_date_event(
+            filter_state,
+            active_selection,
+            pending_route_selection,
+            event,
+        );
+    }
 
     let number_format = (settings_state.number_format)();
     let date_format = (settings_state.date_time_format)();
@@ -462,10 +417,7 @@ pub(crate) fn WalletReport(
 
     // Drive the controls from the filter state so a clamped report can display its
     // effective range while the requested route keeps driving the fetch.
-    let active_range = match filter_state_snapshot.selection() {
-        DateRangeSelection::Range(range) => Some(range),
-        DateRangeSelection::Empty => None,
-    };
+    let active_range = filter_state_snapshot.dial_range();
     let current_year = this_year_preset.map(|range| range.from().year());
     let displayed_year =
         active_range.and_then(|range| displayed_calendar_year(range, this_year_preset));
@@ -535,8 +487,7 @@ pub(crate) fn WalletReport(
                         show_this_year,
                         custom_range_open,
                         on_start_change: move |value| {
-                            dispatch_date_range_filter_event(
-                                DateRangeFilterPolicy::RequiredCanonicalRange,
+                            dispatch_report_date_event(
                                 filter_state,
                                 active_selection,
                                 pending_route_selection,
@@ -544,8 +495,7 @@ pub(crate) fn WalletReport(
                             );
                         },
                         on_end_change: move |value| {
-                            dispatch_date_range_filter_event(
-                                DateRangeFilterPolicy::RequiredCanonicalRange,
+                            dispatch_report_date_event(
                                 filter_state,
                                 active_selection,
                                 pending_route_selection,
@@ -554,8 +504,7 @@ pub(crate) fn WalletReport(
                         },
                         on_this_year: move |_| {
                             if let Some(range) = this_year_preset {
-                                dispatch_date_range_filter_event(
-                                    DateRangeFilterPolicy::RequiredCanonicalRange,
+                                dispatch_report_date_event(
                                     filter_state,
                                     active_selection,
                                     pending_route_selection,
@@ -571,8 +520,7 @@ pub(crate) fn WalletReport(
                                     this_year_preset,
                                 )
                             {
-                                dispatch_date_range_filter_event(
-                                    DateRangeFilterPolicy::RequiredCanonicalRange,
+                                dispatch_report_date_event(
                                     filter_state,
                                     active_selection,
                                     pending_route_selection,
@@ -588,8 +536,7 @@ pub(crate) fn WalletReport(
                                     this_year_preset,
                                 )
                             {
-                                dispatch_date_range_filter_event(
-                                    DateRangeFilterPolicy::RequiredCanonicalRange,
+                                dispatch_report_date_event(
                                     filter_state,
                                     active_selection,
                                     pending_route_selection,
@@ -675,6 +622,7 @@ pub(crate) fn WalletReport(
                                 user_timezone,
                                 resolved_views: resolved_views_for_section,
                                 can_edit_prices: report.access.can_edit_prices,
+                                report_range: (report.resolved_from, report.resolved_to),
                                 on_prices_changed: move |_| {
                                     resolved_prices_resource.restart();
                                 },
@@ -714,18 +662,20 @@ pub(crate) fn WalletReport(
                                                             span { class: asset_badge_class(row.catalog_asset_key.as_ref()),
                                                                 "{row.unit_code}"
                                                             }
-                                                            Link {
-                                                                class: "wr-account-label-link",
-                                                                to: Route::AccountTransactions {
-                                                                    account_id,
-                                                                    start: None,
-                                                                    end: None,
-                                                                },
-                                                                div { class: "wr-account-label", "{row.account_label}" }
-                                                            }
-                                                            if let Some(coverage) = row.bitcoin_history_coverage {
-                                                                span { class: "muted",
-                                                                    "History coverage: {coverage.label()}"
+                                                            div { class: "wr-account-name-stack",
+                                                                Link {
+                                                                    class: "wr-account-label-link",
+                                                                    to: Route::AccountTransactions {
+                                                                        account_id,
+                                                                        start: None,
+                                                                        end: None,
+                                                                    },
+                                                                    div { class: "wr-account-label", "{row.account_label}" }
+                                                                }
+                                                                if let Some(coverage) = row.bitcoin_history_coverage {
+                                                                    span { class: "wr-account-coverage",
+                                                                        "History coverage: {coverage.label()}"
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -748,6 +698,10 @@ pub(crate) fn WalletReport(
                                                             currency: user_currency,
                                                             number_format,
                                                             price: resolved_price_for_row(&prices_snapshot, row, BoundaryKind::Closing),
+                                                            bitcoin_closing: row.bitcoin_history_coverage.is_some(),
+                                                        }
+                                                        if let Some(observation) = &row.last_confirmed_bitcoin {
+                                                            LastConfirmedBitcoin { observation: observation.clone(), show_account: false }
                                                         }
                                                     }
                                                     td { class: "wr-td-change",
@@ -814,7 +768,13 @@ pub(crate) fn WalletReport(
                                     let closing_date_str = row
                                         .closing_balance_date
                                         .map(|d| format_date_for_display(d, date_format))
-                                        .unwrap_or_else(|| "—".to_string());
+                                        .unwrap_or_else(|| {
+                                            if row.bitcoin_history_coverage.is_some() {
+                                                to_display.clone()
+                                            } else {
+                                                "—".to_string()
+                                            }
+                                        });
 
                                     rsx! {
                                         div { class: "card wr-card",
@@ -823,20 +783,22 @@ pub(crate) fn WalletReport(
                                                     span { class: asset_badge_class(row.catalog_asset_key.as_ref()),
                                                         "{row.unit_code}"
                                                     }
-                                                    Link {
-                                                        class: "wr-account-label-link",
-                                                        to: Route::AccountTransactions {
-                                                            account_id,
-                                                            start: None,
-                                                            end: None,
-                                                        },
-                                                        span { class: "wr-account-label",
-                                                            "{row.account_label}"
+                                                    div { class: "wr-account-name-stack",
+                                                        Link {
+                                                            class: "wr-account-label-link",
+                                                            to: Route::AccountTransactions {
+                                                                account_id,
+                                                                start: None,
+                                                                end: None,
+                                                            },
+                                                            span { class: "wr-account-label",
+                                                                "{row.account_label}"
+                                                            }
                                                         }
-                                                    }
-                                                    if let Some(coverage) = row.bitcoin_history_coverage {
-                                                        span { class: "muted",
-                                                            "History coverage: {coverage.label()}"
+                                                        if let Some(coverage) = row.bitcoin_history_coverage {
+                                                            span { class: "wr-account-coverage",
+                                                                "History coverage: {coverage.label()}"
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -871,8 +833,8 @@ pub(crate) fn WalletReport(
                                                         }
                                                         if let Some(p) = resolved_price_for_row(&prices_snapshot, row, BoundaryKind::Opening) {
                                                             span { class: "wr-price-display",
-                                                                span { class: "wr-price-display-prefix", "@ {user_currency.symbol()}" }
-                                                                span { class: "wr-price-display-value", "{p}" }
+                                                                span { class: "wr-price-display-prefix", "@" }
+                                                                span { class: "wr-price-display-value", "{format_report_price(p, user_currency, number_format)}" }
                                                             }
                                                         }
                                                     }
@@ -894,10 +856,16 @@ pub(crate) fn WalletReport(
                                                         }
                                                         if let Some(p) = resolved_price_for_row(&prices_snapshot, row, BoundaryKind::Closing) {
                                                             span { class: "wr-price-display",
-                                                                span { class: "wr-price-display-prefix", "@ {user_currency.symbol()}" }
-                                                                span { class: "wr-price-display-value", "{p}" }
+                                                                span { class: "wr-price-display-prefix", "@" }
+                                                                span { class: "wr-price-display-value", "{format_report_price(p, user_currency, number_format)}" }
                                                             }
                                                         }
+                                                    }
+                                                    if row.bitcoin_history_coverage.is_some() && row.closing_balance_state == WalletReportBalanceStateView::Unknown {
+                                                        div { class: "wr-gap-note", "{UNKNOWN_BITCOIN_CLOSE}" }
+                                                    }
+                                                    if let Some(observation) = &row.last_confirmed_bitcoin {
+                                                        LastConfirmedBitcoin { observation: observation.clone(), show_account: false }
                                                     }
                                                 }
                                             }
@@ -1009,6 +977,7 @@ fn ReportValueCell(
     currency: CurrencyCode,
     number_format: NumberFormat,
     price: Option<Decimal>,
+    #[props(default)] bitcoin_closing: bool,
 ) -> Element {
     let crypto_display = format_crypto_balance(&balance_state, &unit_code);
     let show_fiat = should_show_fiat_value(&balance_state);
@@ -1025,10 +994,19 @@ fn ReportValueCell(
                 }
             }
             div { class: "wr-crypto-value", "{crypto_display}" }
+            if !show_fiat {
+                div { class: "wr-gap-note",
+                    if bitcoin_closing {
+                        "{UNKNOWN_BITCOIN_CLOSE}"
+                    } else {
+                        "Needs complete transaction history for this date"
+                    }
+                }
+            }
             if let Some(p) = price {
                 div { class: "wr-price-display",
-                    span { class: "wr-price-display-prefix", "@ {currency.symbol()}" }
-                    span { class: "wr-price-display-value", "{p}" }
+                    span { class: "wr-price-display-prefix", "@" }
+                    span { class: "wr-price-display-value", "{format_report_price(p, currency, number_format)}" }
                 }
             }
         }
@@ -1117,6 +1095,22 @@ mod tests {
         };
 
         assert!(show_free_report_notice(&access));
+    }
+
+    #[test]
+    fn free_report_notice_gives_way_to_the_badge_when_clamped() {
+        let access = crate::report_access::ReportAccessView {
+            requested_from: date(2026, 1, 1),
+            requested_to: date(2026, 12, 31),
+            effective_from: date(2026, 3, 15),
+            effective_to: date(2026, 12, 15),
+            gate: crate::report_access::ReportAccessGate::RollingNineMonthWindow,
+            range_clamped: true,
+            can_edit_prices: false,
+        };
+
+        assert!(!show_free_report_notice(&access));
+        assert!(free_window_badge_label(&access).is_some());
     }
 
     #[test]
@@ -1220,6 +1214,7 @@ mod tests {
             unit_code: unit_code.to_string(),
             symbol: None,
             bitcoin_history_coverage: None,
+            last_confirmed_bitcoin: None,
             opening_balance_state: opening.clone(),
             opening_balance: balance_from_state(&opening),
             opening_balance_date: None,

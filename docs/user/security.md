@@ -46,10 +46,38 @@ Your password unlocks the user database. BitGarth cannot recover it for you. If 
 
 ## Paired CLI Access
 
-You can pair the BitGarth command-line client with an app account to read wallet
-balances. Pairing creates a Client Key: a second way to unlock the same
-encrypted user database without entering your password for every command. Your
-private data remains in that encrypted database.
+You can pair the BitGarth command-line client with an app account. Pairing
+creates a Client Key: a second way to unlock the same encrypted user database
+without entering your password for every command. Your private data remains in
+that encrypted database.
+
+Each Client Key has one permission, shown on the approval page before you
+approve it:
+
+- **Full access** (the default) can read everything and change wallets,
+  accounts, balances, prices, settings, and stored API keys. It can also export
+  and import wallets, accounts, addresses, and manual balances in a password-encrypted ZIP.
+- **Read only** (`bitgarth auth login --read-only`) can read wallets, accounts,
+  transactions, reports, prices, and settings, but cannot change anything or
+  start a sync.
+- **Wallet names and balances** is the permission granted by older, balance-only CLI versions.
+
+You can lower a full-access key to read only under **Settings → Paired
+Clients** without pairing again. BitGarth stores this limit in the app
+database. If you restore an older app database, check the key's access again.
+To replace a full-access key with a new read-only key, log out of the old CLI
+profile and pair again with `bitgarth auth login --read-only`.
+
+Choose a different Etherscan provider in the web app under Settings. The CLI can update its path on the same origin. Provider URLs returned to paired clients omit embedded usernames and passwords.
+
+For a wallet-data transfer, the CLI sends the archive password to your paired
+BitGarth instance, which encrypts or decrypts the ZIP. The CLI accepts the
+password at a hidden prompt or from standard input.
+
+No Client Key can read stored API keys back, change your password, manage
+payments, or create a browser session. `bitgarth auth logout` revokes the
+key on the server it was paired with; you can also revoke it under
+**Settings → Paired clients**.
 
 The CLI requires HTTPS by default and validates server certificates. It does
 not follow redirects. Plain HTTP works only when you pass
@@ -67,6 +95,8 @@ revoke it or it expires.
 BitGarth also has an app database for login records and app-level metadata. This app database is not encrypted.
 
 The app database can contain your app username, login metadata, and the fact that your app account acknowledged a specific version of the Terms and Privacy Notice. It should not contain wallet addresses, transaction history, balances, labels, saved API keys, invoice details, or other private financial records.
+
+Your instance also keeps a copy of public plan descriptions in the app database so you can browse them when BitGarth's servers are unavailable. Checkout requires current prices.
 
 If you run BitGarth yourself, this app database stays with your app instance and is not sent to BitGarth. If you use a BitGarth-hosted app in the future, BitGarth may operate the app database for that hosted service and keep the minimum records needed to run it.
 
@@ -120,6 +150,12 @@ boundary journals are included normally.
 BitGarth connects to blockchain data providers such as Mempool and Etherscan so it can sync public transaction history for the addresses and xpubs you add. Those providers can see the public wallet data being queried.
 
 BitGarth can also fetch market prices from CoinGecko. This is optional and off by default. When you enable it, BitGarth sends CoinGecko asset IDs and your selected currency, such as `bitcoin` and `USD`. It does not send wallet addresses, xpubs, account labels, your app username, or transaction history for price lookups.
+
+While anyone has price syncing enabled, BitGarth collects daily history using public CoinGecko access, even when everyone is signed out. It covers every asset and currency pair BitGarth has already priced.
+
+Turning off the last enabled setting stops new scheduled requests. Saved quotes remain available when you enable syncing again. When collection resumes, BitGarth fills missing dates as far back as CoinGecko supplies data.
+
+The Prices page shows prices only for assets in your own wallets, and only in your reporting currency. Prices you set yourself are always shown. Saved CoinGecko prices are shown only while you have CoinGecko syncing turned on yourself. The page does not list assets that other users of the same instance hold.
 
 BitGarth may cache fetched market prices in a local unencrypted `prices.db` so it does not need to ask CoinGecko for the same current price repeatedly. That cache stores public market data such as asset ID, selected currency, CoinGecko ID, price, and retrieval time. It does not store wallet addresses, xpubs, balances, account labels, saved API keys, or your app username.
 

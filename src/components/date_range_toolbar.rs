@@ -88,7 +88,7 @@ pub(crate) fn DateRangeToolbar(
             if custom_is_open {
                 div { class: "date-range-custom-fields",
                     div { class: "date-range-toolbar-date-group",
-                        label { class: "form-label", r#for: "{start_input_id}", "Start Date" }
+                        label { class: "form-label", r#for: "{start_input_id}", "Start date" }
                         input {
                             id: "{start_input_id}",
                             class: "form-input",
@@ -100,7 +100,7 @@ pub(crate) fn DateRangeToolbar(
                     }
 
                     div { class: "date-range-toolbar-date-group",
-                        label { class: "form-label", r#for: "{end_input_id}", "End Date" }
+                        label { class: "form-label", r#for: "{end_input_id}", "End date" }
                         input {
                             id: "{end_input_id}",
                             class: "form-input",

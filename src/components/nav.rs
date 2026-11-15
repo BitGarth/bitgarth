@@ -7,9 +7,10 @@ use dioxus::prelude::*;
 
 use super::{
     ArchiveIcon, Banner, BuildDriftWatcher, CheckIcon, CoinGeckoPriceControl, CommandPalette,
-    ContactModal, CopyIcon, ExternalLinkIcon, FileExportIcon, InstanceNoticeBanner,
-    InstanceNoticeState, LoginIcon, LogoutIcon, PaymentsIcon, SettingsIcon, SidebarContact,
-    ToastContainer, UpdateNotice, UserIdenticon, UserIdenticonData, WalletIcon, copy_to_clipboard,
+    ContactModal, CopyFeedback, CopyIcon, ExternalLinkIcon, FileExportIcon, InstanceNoticeBanner,
+    InstanceNoticeState, LoginIcon, LogoutIcon, PaymentsIcon, PriceHistoryIcon, SettingsIcon,
+    SidebarContact, ToastContainer, UpdateNotice, UserIdenticon, UserIdenticonData, WalletIcon,
+    use_copy_feedback,
 };
 
 /// Freshest update status observed client-side, or `None` when nothing has been
@@ -1004,7 +1005,7 @@ const AUTO_UPDATE_CHECK_DELAY_MS: u32 = 3_000;
 pub(crate) fn UpdateAvailableBanner(initial_status: Option<UpdateStatus>) -> Element {
     let mut latest_update_status = use_context::<UpdateAwarenessRefreshState>();
     let mut dismissed = use_signal(|| false);
-    let mut copied = use_signal(|| false);
+    let (feedback, copy) = use_copy_feedback(1600);
 
     // Auto update-check: once per authenticated session, kick a throttled
     // server-side refresh so checks don't depend on the user pressing "Check
@@ -1061,25 +1062,14 @@ pub(crate) fn UpdateAvailableBanner(initial_status: Option<UpdateStatus>) -> Ele
                             let command = format!(
                                 "curl -fsSL https://bitgarth.app/{banner_channel}.sh | sh",
                             );
-                            move |_| {
-                                copy_to_clipboard(&command);
-                                copied.set(true);
-                                spawn(async move {
-                                    let mut wait = dioxus::document::eval(
-                                        "setTimeout(() => dioxus.send(true), 1600);",
-                                    );
-                                    let _ = wait.recv::<bool>().await;
-                                    copied.set(false);
-                                });
-                            }
+                            move |_| copy.call(command.clone())
                         },
-                        if copied() {
+                        if feedback == CopyFeedback::Copied {
                             CheckIcon {}
-                            span { "Copied" }
                         } else {
                             CopyIcon {}
-                            span { "Copy" }
                         }
+                        span { {feedback.label("Copy", "Copied")} }
                     }
                     pre {
                         code {
@@ -1195,6 +1185,29 @@ pub(crate) fn UpdateAvailableBanner(initial_status: Option<UpdateStatus>) -> Ele
     }
 }
 
+/// The browser tab title, so tabs, history and screen readers can tell pages apart.
+fn page_title(route: &Route) -> String {
+    let page = match route {
+        Route::Login => "Sign in",
+        Route::Register => "Create account",
+        Route::PairingLogin { .. } => "Pair a client",
+        Route::StyleGuide => "Style guide",
+        Route::PairingApproval { .. } => "Approve a client",
+        Route::HomeView => return "BitGarth".to_string(),
+        Route::Settings { .. } => "Settings",
+        Route::Payments => "Plans",
+        Route::Wallets => "Wallets",
+        Route::WalletReport { .. } => "Wallet report",
+        Route::HoldingsReport { .. } => "Holdings report",
+        Route::Prices { .. } => "Prices",
+        Route::AccountTransactions { .. } => "Transactions",
+        Route::HledgerExport => "Accounting export",
+        Route::WalletDataExport => "Backup and restore",
+        Route::NotFound { .. } => "Page not found",
+    };
+    format!("{page} — BitGarth")
+}
+
 #[component]
 pub fn NavBar() -> Element {
     let mut auth_state = use_context::<AuthState>();
@@ -1285,14 +1298,19 @@ pub fn NavBar() -> Element {
         Route::Wallets | Route::AccountTransactions { .. }
     );
     let reports_active = matches!(current_route, Route::HoldingsReport { .. });
+    let prices_active = matches!(current_route, Route::Prices { .. });
     let transactions_export_active = matches!(current_route, Route::HledgerExport);
     let wallet_data_export_active = matches!(current_route, Route::WalletDataExport);
     let payments_active = matches!(current_route, Route::Payments);
     let settings_active = matches!(current_route, Route::Settings { .. });
 
+    let title = page_title(&current_route);
+
     rsx! {
+        document::Title { "{title}" }
         div { class: if is_logged_in { "app-layout logged-in" } else { "app-layout" },
             onkeydown: close_user_menu_on_escape,
+            a { class: "skip-link", href: "#main-content", "Skip to content" }
             // Top Navigation Bar (always visible)
             nav { class: "navbar",
                 // Left side: Brand + sidebar toggle (when logged in)
@@ -1433,7 +1451,7 @@ pub fn NavBar() -> Element {
                                     },
                                     LogoutIcon {}
                                     " "
-                                    "Logout"
+                                    "Log out"
                                     }
                                 }
                             }
@@ -1500,6 +1518,13 @@ pub fn NavBar() -> Element {
                         div { class: "sidebar-section",
                             div { class: "sidebar-section-title", "Data" }
                             Link {
+                                to: Route::Prices { asset: None, start: None, end: None },
+                                class: if prices_active { "sidebar-link active" } else { "sidebar-link" },
+                                onclick: close_sidebar,
+                                span { class: "sidebar-link-icon", PriceHistoryIcon {} }
+                                "Prices"
+                            }
+                            Link {
                                 to: Route::HledgerExport,
                                 class: if transactions_export_active { "sidebar-link active" } else { "sidebar-link" },
                                 onclick: close_sidebar,
@@ -1561,19 +1586,19 @@ pub fn NavBar() -> Element {
                             to: Route::Wallets,
                             class: if wallets_active { "mobile-bottom-bar-link active" } else { "mobile-bottom-bar-link" },
                             WalletIcon {}
-                            "Accounts"
+                            "Wallets"
                         }
                         Link {
-                            to: Route::HledgerExport,
-                            class: if transactions_export_active { "mobile-bottom-bar-link active" } else { "mobile-bottom-bar-link" },
+                            to: Route::HoldingsReport { start: None, end: None },
+                            class: if reports_active { "mobile-bottom-bar-link active" } else { "mobile-bottom-bar-link" },
                             FileExportIcon {}
-                            "Export"
+                            "Reports"
                         }
                         Link {
-                            to: Route::WalletDataExport,
-                            class: if wallet_data_export_active { "mobile-bottom-bar-link active" } else { "mobile-bottom-bar-link" },
-                            ArchiveIcon {}
-                            "Backup"
+                            to: Route::Prices { asset: None, start: None, end: None },
+                            class: if prices_active { "mobile-bottom-bar-link active" } else { "mobile-bottom-bar-link" },
+                            PriceHistoryIcon {}
+                            "Prices"
                         }
                         Link {
                             to: Route::Settings { section: None },
@@ -1586,7 +1611,7 @@ pub fn NavBar() -> Element {
             }
 
             // Main content area
-            main { class: "{main_content_class}",
+            main { class: "{main_content_class}", id: "main-content", tabindex: "-1",
                 InstanceNoticeBanner { html: notice_html }
                 BuildDriftWatcher {}
                 UpdateNotice {}
@@ -1607,6 +1632,12 @@ pub fn NavBar() -> Element {
 #[cfg(all(test, not(bitgarth_db_unit_only)))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_title_names_the_page_before_the_app() {
+        assert_eq!(page_title(&Route::Wallets), "Wallets — BitGarth");
+        assert_eq!(page_title(&Route::HomeView), "BitGarth");
+    }
 
     fn status(channel: &str, available: bool, enabled: bool) -> UpdateStatus {
         UpdateStatus {

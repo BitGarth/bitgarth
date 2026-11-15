@@ -46,21 +46,39 @@ impl SqliteAutoVacuumMode {
     }
 }
 
-pub(super) fn configure_connection(conn: &Connection, context: &str, enable_wal: bool) {
+pub(super) fn configure_connection(conn: &Connection, context: &'static str, enable_wal: bool) {
     if let Err(err) = conn.pragma_update(None, "foreign_keys", "ON") {
-        tracing::warn!("{context}: failed to enable foreign keys: {err}");
+        tracing::warn!(database = context, sqlite_code = ?err.sqlite_error_code(), "failed to enable foreign keys");
     }
 
     if let Err(err) = conn.busy_timeout(SQLITE_BUSY_TIMEOUT) {
-        tracing::warn!("{context}: failed to set busy_timeout: {err}");
+        tracing::warn!(database = context, sqlite_code = ?err.sqlite_error_code(), "failed to set busy_timeout");
     }
 
     if enable_wal {
         if let Err(err) = conn.pragma_update(None, "journal_mode", "WAL") {
-            tracing::warn!("{context}: failed to enable WAL mode: {err}");
+            tracing::warn!(database = context, sqlite_code = ?err.sqlite_error_code(), "failed to enable WAL mode");
         } else {
-            tracing::info!("{context}: WAL mode enabled");
+            tracing::debug!(database = context, "WAL mode enabled");
         }
+    }
+}
+
+pub(super) fn log_migration_result(
+    database: &'static str,
+    last_migration: Option<refinery::Migration>,
+    applied_count: usize,
+) {
+    let schema_version = last_migration.map(|migration| migration.version());
+    if applied_count == 0 {
+        tracing::debug!(database, schema_version, "no migrations applied");
+    } else {
+        tracing::info!(
+            database,
+            schema_version,
+            applied_count,
+            "migrations applied"
+        );
     }
 }
 

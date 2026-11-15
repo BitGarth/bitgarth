@@ -59,12 +59,8 @@ fn ensure_sync_control_repair_allowed(repair_owns_account: bool) -> Result<(), S
 }
 
 #[cfg(feature = "server")]
-fn internal_error(context: &str, detail: impl std::fmt::Display) -> SyncControlError {
-    tracing::error!(
-        context,
-        error = %detail,
-        "sync control: internal failure"
-    );
+fn internal_error(context: &'static str) -> SyncControlError {
+    tracing::error!(context, "sync control: internal failure");
     SyncControlError::internal()
 }
 
@@ -92,8 +88,8 @@ async fn run_manual_sync_control_blocking(
         crate::tasks::run_manual_sync_control(user_id, native_account_id, iteration_budget)
     })
     .await
-    .map_err(|err| internal_error("run_manual_sync_control_join", err))?
-    .map_err(|err| internal_error("run_manual_sync_control", err))
+    .map_err(|_| internal_error("run_manual_sync_control_join"))?
+    .map_err(|_| internal_error("run_manual_sync_control"))
 }
 
 #[cfg(feature = "server")]
@@ -128,13 +124,13 @@ fn require_native_account(
     use std::str::FromStr;
 
     let account_kind = resolve_wallet_account_record_kind(user_id, account_id)
-        .map_err(|err| internal_error("resolve_wallet_account_record_kind", err))?
+        .map_err(|_| internal_error("resolve_wallet_account_record_kind"))?
         .ok_or_else(|| not_found_error("Account not found"))?;
 
     match account_kind {
         WalletAccountRecordKind::Native => {
             crate::wallets::DigitalAssetAccountId::from_str(&account_id.to_string())
-                .map_err(|err| internal_error("native_wallet_account_id_parse", err))
+                .map_err(|_| internal_error("native_wallet_account_id_parse"))
         }
         WalletAccountRecordKind::Manual => Err(forbidden_error(
             "Sync control is not available for manual accounts",
@@ -149,13 +145,13 @@ fn require_active_native_account_for_sync(
 ) -> Result<(), SyncControlError> {
     let now = chrono::Utc::now();
     let entitlements = crate::payments::entitlements::load_feature_entitlements(user_id, now)
-        .map_err(|err| internal_error("load_feature_entitlements", err))?;
+        .map_err(|_| internal_error("load_feature_entitlements"))?;
     let eligible = crate::db::account_limits::native_account_sync_eligible_for_user(
         user_id,
         &entitlements,
         native_account_id,
     )
-    .map_err(|err| internal_error("classify_supported_accounts_for_user", err))?;
+    .map_err(|_| internal_error("classify_supported_accounts_for_user"))?;
 
     if eligible {
         Ok(())
@@ -245,7 +241,7 @@ pub(crate) async fn get_account_sync_control_state(
     require_active_native_account_for_sync(user_id, native_account_id)?;
 
     let addresses = crate::db::get_sync_addresses_for_account(user_id, native_account_id)
-        .map_err(|err| internal_error("get_sync_addresses_for_account", err))?;
+        .map_err(|_| internal_error("get_sync_addresses_for_account"))?;
 
     let integration = addresses.first().map(|addr| {
         match crate::asset_capabilities::default_sync_provider(addr.asset_id) {
@@ -285,7 +281,7 @@ pub(crate) async fn run_account_sync_control(
     let guard = acquire_sync_control_lease(user_id)?;
     ensure_sync_control_repair_allowed(
         crate::db::bitcoin_history_repair_owns_account(user_id, native_account_id)
-            .map_err(|err| internal_error("bitcoin_history_repair_owns_account", err))?,
+            .map_err(|_| internal_error("bitcoin_history_repair_owns_account"))?,
     )?;
     require_active_native_account_for_sync(user_id, native_account_id)?;
     let iteration_budget = validate_iterations(request.iterations)?;

@@ -25,6 +25,7 @@ use crate::payments::views::{
 #[cfg(feature = "server")]
 use crate::payments::views::{
     AppCompatibilityStatusView, AppCompatibilityView, PaymentOptionView, PaymentTierView,
+    PlanDescriptions,
 };
 use crate::payments::views::{
     PaymentCatalogView, PaymentStateView, PremiumOrderLaunchView, PremiumTopUpLaunchView,
@@ -195,7 +196,7 @@ fn central_error(
         error = %error,
         "payments: Central request failed"
     );
-    bad_request("Could not reach BitGarth payment service.")
+    bad_request("Could not reach BitGarth's servers.")
 }
 
 #[cfg(feature = "server")]
@@ -832,10 +833,7 @@ async fn refresh_entitlements_after_login(user_id: crate::models::UserId) {
     let product_options = if let Some(client) = client {
         match client.payment_product_options().await {
             Ok(options) => {
-                crate::payments::free_tier::record_free_tier_from_product_options(
-                    &options,
-                    Utc::now(),
-                );
+                record_product_catalog(&options);
                 Some(options)
             }
             Err(err) => {
@@ -1441,20 +1439,20 @@ fn paid_order_cancel_state(
 }
 
 #[cfg(feature = "server")]
-fn map_product_options(
-    product_options: crate::payments::client::CentralProductOptions,
-) -> Result<PaymentPageViewParts, PaymentError> {
+fn record_product_catalog(product_options: &CentralProductOptions) -> PlanDescriptions {
+    let fetched_at = Utc::now();
+    crate::payments::free_tier::record_free_tier_from_product_options(product_options, fetched_at);
     let pricing_summary = product_options
         .pricing_summary
         .as_deref()
         .map(crate::payments::views::parse_bullet);
     let tiers = product_options
         .tiers
-        .into_iter()
+        .iter()
         .map(|tier| PaymentTierView {
-            tier: tier.tier,
-            display_name: tier.display_name,
-            summary: tier.presentation.summary,
+            tier: tier.tier.clone(),
+            display_name: tier.display_name.clone(),
+            summary: tier.presentation.summary.clone(),
             bullets: tier
                 .presentation
                 .bullets
@@ -1462,9 +1460,24 @@ fn map_product_options(
                 .map(|raw| crate::payments::views::parse_bullet(raw))
                 .collect(),
             is_featured: tier.presentation.is_featured,
-            ribbon_label: tier.presentation.ribbon_label,
+            ribbon_label: tier.presentation.ribbon_label.clone(),
         })
         .collect();
+    let descriptions = PlanDescriptions {
+        tiers,
+        pricing_summary,
+    };
+    if let Err(err) = crate::db::payments::save_plan_descriptions(&descriptions, fetched_at) {
+        tracing::warn!(error = %err, "payments: failed to save plan descriptions");
+    }
+    descriptions
+}
+
+#[cfg(feature = "server")]
+fn map_product_options(
+    product_options: CentralProductOptions,
+    descriptions: PlanDescriptions,
+) -> Result<PaymentPageViewParts, PaymentError> {
     let options = product_options
         .options
         .into_iter()
@@ -1523,11 +1536,12 @@ fn map_product_options(
     };
 
     Ok(PaymentPageViewParts {
-        tiers,
+        showing_saved_descriptions: false,
+        tiers: descriptions.tiers,
         options,
         app_compatibility,
         options_message,
-        pricing_summary,
+        pricing_summary: descriptions.pricing_summary,
     })
 }
 
@@ -1552,12 +1566,14 @@ fn payment_order_history_view(
         display_amount: order.amount.atlos_decimal_amount(),
         currency: order.amount.currency,
         status: payment_order_status_view(order.status),
+        created_at: order.order_id.created_at().map(|value| value.to_rfc3339()),
         paid_at: order.paid_at.map(|value| value.to_rfc3339()),
     }
 }
 
 #[cfg(feature = "server")]
 struct PaymentPageViewParts {
+    showing_saved_descriptions: bool,
     tiers: Vec<PaymentTierView>,
     options: Vec<PaymentOptionView>,
     app_compatibility: Option<AppCompatibilityView>,
@@ -1573,13 +1589,14 @@ async fn load_payment_page_options(
         .map_err(|err| internal_error("central_client", err))?;
     match client.payment_product_options().await {
         Ok(options) => {
-            crate::payments::free_tier::record_free_tier_from_product_options(&options, Utc::now());
-            map_product_options(options)
+            let descriptions = record_product_catalog(&options);
+            map_product_options(options, descriptions)
         }
         Err(error) => {
             if error.is_upgrade_required() {
                 tracing::warn!(error = %error, "payments: product options require app upgrade");
                 return Ok(PaymentPageViewParts {
+                    showing_saved_descriptions: false,
                     tiers: Vec::new(),
                     options: Vec::new(),
                     app_compatibility: Some(AppCompatibilityView {
@@ -1598,14 +1615,24 @@ async fn load_payment_page_options(
             }
 
             tracing::warn!(error = %error, "payments: product options unavailable");
+            let saved = crate::db::payments::load_plan_descriptions().unwrap_or_else(|err| {
+                tracing::warn!(error = %err, "payments: failed to read saved plan descriptions");
+                None
+            });
+            let showing_saved_descriptions = saved.is_some();
+            let message = if showing_saved_descriptions {
+                "Showing saved plan descriptions. Current prices are unavailable from BitGarth's servers."
+            } else {
+                "Price unavailable. Could not reach BitGarth's servers."
+            };
+            let descriptions = saved.unwrap_or_default();
             Ok(PaymentPageViewParts {
-                tiers: Vec::new(),
+                showing_saved_descriptions,
+                tiers: descriptions.tiers,
                 options: Vec::new(),
                 app_compatibility: None,
-                options_message: Some(
-                    "Price unavailable. Could not reach BitGarth payment service.".to_string(),
-                ),
-                pricing_summary: None,
+                options_message: Some(message.to_string()),
+                pricing_summary: descriptions.pricing_summary,
             })
         }
     }
@@ -1626,7 +1653,7 @@ async fn build_refreshed_payment_state(
         .map_err(|err| internal_error("central_client", err))?;
     let product_options = match client.payment_product_options().await {
         Ok(options) => {
-            crate::payments::free_tier::record_free_tier_from_product_options(&options, Utc::now());
+            record_product_catalog(&options);
             Some(options)
         }
         Err(error) => {
@@ -1679,6 +1706,7 @@ async fn build_payment_catalog_view(
         .map(payment_order_history_view)
         .collect();
     Ok(PaymentCatalogView {
+        showing_saved_descriptions: options.showing_saved_descriptions,
         tiers: options.tiers,
         options: options.options,
         app_compatibility: options.app_compatibility,
@@ -1755,7 +1783,7 @@ pub(crate) async fn start_premium_order(
             err,
         )
     })?;
-    crate::payments::free_tier::record_free_tier_from_product_options(&product_options, Utc::now());
+    record_product_catalog(&product_options);
     if let Some(app_compatibility) = product_options.app_compatibility
         && app_compatibility.status
             == crate::payments::client::CentralAppCompatibilityStatus::UpgradeRequired
@@ -2213,6 +2241,7 @@ mod tests {
             crate::tasks::TriggerParams::SessionCleanup(_)
             | crate::tasks::TriggerParams::TraceCleanup(_)
             | crate::tasks::TriggerParams::InactiveUserCleanup(_)
+            | crate::tasks::TriggerParams::SharedPriceHistory
             | crate::tasks::TriggerParams::PriceHistoryReconciliation(_) => {
                 panic!("expected sync params");
             }

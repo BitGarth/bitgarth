@@ -235,7 +235,7 @@ fn debug_assert_child_summary_invariants(
 }
 
 fn log_child_worker_started(run: RunContext<'_>, workset: &IntegrationWorkset) {
-    tracing::info!(
+    tracing::debug!(
         user_id = %run.user_id,
         run_id = %run.run_id,
         integration = %workset.integration_id,
@@ -248,7 +248,7 @@ fn log_child_worker_started(run: RunContext<'_>, workset: &IntegrationWorkset) {
 }
 
 fn log_child_worker_terminal(run: RunContext<'_>, child_summary: &IntegrationChildSummary) {
-    tracing::info!(
+    tracing::debug!(
         user_id = %run.user_id,
         run_id = %run.run_id,
         integration = %child_summary.integration_id,
@@ -371,10 +371,15 @@ pub(super) fn run_parent_sync_cycle_with_runner(
         for workset in worksets {
             let integration_id = workset.integration_id;
             let total_addresses = workset.total_addresses();
+            #[cfg(any(feature = "dev-config", test))]
+            let runtime = crate::runtime_context::current_runtime_context();
             handles.push((
                 integration_id,
                 total_addresses,
                 scope.spawn(move || {
+                    #[cfg(any(feature = "dev-config", test))]
+                    let _runtime =
+                        runtime.map(crate::runtime_context::push_default_runtime_context);
                     log_child_worker_started(request.run, &workset);
                     child_runner.run_child_cycle(IntegrationChildCycleRequest {
                         run: request.run,
@@ -410,6 +415,9 @@ pub(super) fn run_parent_sync_cycle_with_runner(
                     IntegrationChildFailureKind::FatalExecution,
                 ),
             };
+            if let Some(failure_kind) = child_summary.failure_kind {
+                tracing::warn!(target: "wallet_sync", run_id = %request.run.run_id, ?failure_kind, "sync worker failed");
+            }
             log_child_worker_terminal(request.run, &child_summary);
             child_summaries.push(child_summary);
         }

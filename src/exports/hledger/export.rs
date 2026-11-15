@@ -4715,6 +4715,10 @@ mod tests {
         )
         .expect("failed fee export should succeed");
         assert_eq!(result.transactions_exported, 3);
+        assert_eq!(
+            crate::db::count_transactions_for_export(user_id).expect("export count should load"),
+            result.transactions_exported
+        );
         let wallet_segment = normalize_label_for_hledger("Hardware Wallet");
         let account_segment = normalize_label_for_hledger("Ethereum Account");
         let journal = std::fs::read_to_string(hledger_owner_account_year_journal_path(

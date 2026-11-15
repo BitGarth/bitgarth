@@ -484,13 +484,7 @@ pub(super) fn run_hd_chain_scan(
                 address_scheme,
                 derivation_change,
             ) {
-                tracing::warn!(
-                    user_id = %run.user_id,
-                    run_id = %run.run_id,
-                    account_id = %account_id,
-                    address_id = %addresses[idx].address_id,
-                    "transactions sync: skipping address with mismatched HD metadata"
-                );
+                tracing::warn!(target: "wallet_sync", run_id = %run.run_id, "sync metadata mismatch");
                 idx = idx.saturating_add(1);
                 continue;
             }
@@ -567,13 +561,7 @@ pub(super) fn run_hd_chain_scan(
                     address_scheme,
                     derivation_change,
                 ) {
-                    tracing::warn!(
-                        user_id = %run.user_id,
-                        run_id = %run.run_id,
-                        account_id = %account_id,
-                        address_id = %addresses[resume_idx].address_id,
-                        "transactions sync: skipping resumed derived address with mismatched HD metadata"
-                    );
+                    tracing::warn!(target: "wallet_sync", run_id = %run.run_id, "sync metadata mismatch");
                     resume_idx = resume_idx.saturating_add(1);
                     continue;
                 }
@@ -699,13 +687,7 @@ pub(super) fn run_hd_chain_scan(
                     address_scheme,
                     derivation_change,
                 ) {
-                    tracing::warn!(
-                        user_id = %run.user_id,
-                        run_id = %run.run_id,
-                        account_id = %account_id,
-                        address_id = %addresses[new_idx].address_id,
-                        "transactions sync: skipping generated address with mismatched HD metadata"
-                    );
+                    tracing::warn!(target: "wallet_sync", run_id = %run.run_id, "sync metadata mismatch");
                     new_idx = new_idx.saturating_add(1);
                     continue;
                 }
@@ -892,13 +874,7 @@ pub(super) fn run_hd_bundle_scan(
     if let Some(sync_state) = bundle.sync_state.as_ref()
         && sync_state.account_id != bundle.account_id
     {
-        tracing::warn!(
-            user_id = %run.user_id,
-            run_id = %run.run_id,
-            account_id = %bundle.account_id,
-            sync_state_account_id = %sync_state.account_id,
-            "transactions sync: account sync state does not match bundle account"
-        );
+        tracing::warn!(target: "wallet_sync", run_id = %run.run_id, "sync metadata mismatch");
     }
 
     let gap_limit = bundle
@@ -935,7 +911,7 @@ pub(super) fn run_hd_bundle_scan(
     .unwrap_or(u32::MAX);
     let mut processed_for_account = 0_u32;
     let started_at_utc = run.clock.utc_now();
-    tracing::info!(
+    tracing::debug!(
         user_id = %run.user_id,
         run_id = %run.run_id,
         account_id = %bundle.account_id,
@@ -1079,7 +1055,7 @@ pub(super) fn run_hd_bundle_scan(
             )?;
         }
     }
-    tracing::info!(
+    tracing::debug!(
         user_id = %run.user_id,
         run_id = %run.run_id,
         account_id = %bundle.account_id,

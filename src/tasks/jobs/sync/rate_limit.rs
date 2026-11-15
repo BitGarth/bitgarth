@@ -117,6 +117,7 @@ pub(super) fn record_rate_limit(
         }
         Err(_) => {
             tracing::error!(
+                target: "wallet_sync",
                 "transactions sync: global rate limiter lock poisoned while recording limit"
             );
         }
@@ -139,6 +140,7 @@ pub(super) fn is_rate_limited(user_id: UserId, integration: &str, now: Instant) 
         }
         Err(_) => {
             tracing::error!(
+                target: "wallet_sync",
                 "transactions sync: global rate limiter lock poisoned while reading limit"
             );
             false
@@ -170,6 +172,7 @@ pub(crate) fn blocked_integrations_for_user(
         }
         Err(_) => {
             tracing::error!(
+                target: "wallet_sync",
                 "transactions sync: global rate limiter lock poisoned while reading blocked integrations"
             );
             HashSet::new()
@@ -195,6 +198,7 @@ pub(super) fn earliest_rate_limit_unblock_for_user(
         }
         Err(_) => {
             tracing::error!(
+                target: "wallet_sync",
                 "transactions sync: global rate limiter lock poisoned while reading earliest unblock"
             );
             None
@@ -225,6 +229,7 @@ pub(super) fn retry_after_utc_for_integration(
         }),
         Err(_) => {
             tracing::error!(
+                target: "wallet_sync",
                 "transactions sync: global rate limiter lock poisoned while reading retry_after"
             );
             None
@@ -258,6 +263,7 @@ pub(crate) fn earliest_rate_limit_unblock_for_integrations(
         }
         Err(_) => {
             tracing::error!(
+                target: "wallet_sync",
                 "transactions sync: global rate limiter lock poisoned while reading scoped unblock"
             );
             None

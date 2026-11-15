@@ -159,6 +159,24 @@ pub fn WalletIcon() -> Element {
 }
 
 #[component]
+pub fn PriceHistoryIcon() -> Element {
+    rsx! {
+        svg {
+            width: "16",
+            height: "16",
+            view_box: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            stroke_width: "2",
+            stroke_linecap: "round",
+            stroke_linejoin: "round",
+            path { d: "M4 19h16" }
+            polyline { points: "5 15 9 10 13 13 19 6" }
+        }
+    }
+}
+
+#[component]
 pub fn FileExportIcon() -> Element {
     rsx! {
         svg {

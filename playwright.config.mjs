@@ -52,6 +52,8 @@ if (process.env.TEST_WORKER_INDEX === undefined) {
 }
 
 const MOCK_CENTRAL_PORT = 8082;
+const MOCK_COINGECKO_PORT = 8083;
+const mockCoingeckoBaseUrl = `http://127.0.0.1:${MOCK_COINGECKO_PORT}/api/v3/`;
 const mockCentralLogPath = path.join(logsDir, "mock-central.log");
 
 const serverExtension = process.platform === "win32" ? ".exe" : "";
@@ -88,6 +90,11 @@ export default defineConfig({
       reuseExistingServer: false,
     },
     {
+      command: `node tests/e2e/helpers/mock-coingecko.mjs ${MOCK_COINGECKO_PORT}`,
+      url: `${mockCoingeckoBaseUrl}simple/price?ids=monero&vs_currencies=usd`,
+      reuseExistingServer: false,
+    },
+    {
       command: webServerCommand,
       env: {
         IP: "127.0.0.1",
@@ -96,6 +103,7 @@ export default defineConfig({
         BGTRACES: "fs",
         BITGARTH_PROJECT_DIR: e2eProjectDir,
         BITGARTH_CENTRAL_BASE_URL: `http://127.0.0.1:${MOCK_CENTRAL_PORT}`,
+        BITGARTH_COINGECKO_BASE_URL: mockCoingeckoBaseUrl,
         BITGARTH_CHANNEL: process.env.BITGARTH_E2E_CHANNEL ?? "docker",
         BITGARTH_PAYMENT_SIGNING_PUBLIC_KEY_B64: "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik",
         BITGARTH_INSTANCE_NOTICE_INFO: "E2E demo notice with [bitgarth.app](https://bitgarth.app/) and [hello@bitgarth.app](mailto:hello@bitgarth.app).",

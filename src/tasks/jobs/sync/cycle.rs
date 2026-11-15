@@ -342,7 +342,7 @@ pub(super) fn log_account_sync_completed(run: RunContext<'_>, summary: &AccountS
     let asset = format!("{}/{}", summary.asset_id.as_str(), summary.network.as_str());
 
     if summary.is_hd {
-        tracing::info!(
+        tracing::debug!(
             user_id = %run.user_id,
             run_id = %run.run_id,
             account_id = %summary.account_id,
@@ -382,7 +382,7 @@ pub(super) fn mark_sync_failure(
     completed_at: DateTime<Utc>,
 ) {
     let sync_error = SyncErrorMessage::sanitize(error.to_string());
-    if let Err(mark_err) = mark_address_sync_completed_failure(
+    if mark_address_sync_completed_failure(
         run.user_id,
         address_id,
         run.run_id,
@@ -390,14 +390,10 @@ pub(super) fn mark_sync_failure(
         completed_at,
         &sync_error,
         error.counts_as_address_failure(),
-    ) {
-        tracing::error!(
-            user_id = %run.user_id,
-            run_id = %run.run_id,
-            address_id = %address_id,
-            error = %mark_err,
-            "transactions sync: failed to persist per-address failure state"
-        );
+    )
+    .is_err()
+    {
+        tracing::error!(target: "wallet_sync", run_id = %run.run_id, "transactions sync: failed to persist failure state");
     }
 }
 

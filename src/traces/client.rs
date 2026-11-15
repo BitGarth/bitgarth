@@ -332,7 +332,7 @@ fn redact_headers(
 
 #[allow(clippy::too_many_arguments)]
 fn record_trace(
-    user_id: UserId,
+    user_id: Option<UserId>,
     label: &IntegrationLabel,
     req_method: String,
     req_url: String,
@@ -346,10 +346,14 @@ fn record_trace(
     req_timestamp: chrono::DateTime<Utc>,
     rsp_timestamp: chrono::DateTime<Utc>,
 ) {
-    let user_traces_dir = match get_user_traces_dir(user_id) {
+    let directory = match user_id {
+        Some(id) => get_user_traces_dir(id),
+        None => crate::project_paths::get_project_dir().map(|root| root.join("traces/instance")),
+    };
+    let user_traces_dir = match directory {
         Ok(dir) => dir,
-        Err(err) => {
-            tracing::warn!("Failed to resolve user traces dir: {err}");
+        Err(_) => {
+            tracing::warn!("Failed to resolve user traces directory");
             return;
         }
     };
@@ -370,8 +374,8 @@ fn record_trace(
         failure,
     };
 
-    if let Err(err) = writer::write_trace(trace_data) {
-        tracing::warn!("Failed to write HTTP trace: {err}");
+    if writer::write_trace(trace_data).is_err() {
+        tracing::warn!("Failed to write HTTP trace");
     }
 }
 
@@ -394,7 +398,7 @@ struct ResponseTraceSnapshot {
 }
 
 fn record_trace_snapshot(
-    user_id: UserId,
+    user_id: Option<UserId>,
     label: &IntegrationLabel,
     request: &RequestTraceSnapshot,
     response: &ResponseTraceSnapshot,
@@ -487,7 +491,7 @@ fn response_body_read_failed_trace_failure(error: &reqwest::Error) -> TraceFailu
 }
 
 fn record_send_failure_trace(
-    user_id: UserId,
+    user_id: Option<UserId>,
     label: &IntegrationLabel,
     request: &RequestTraceSnapshot,
     failure: TraceFailureMetadata,
@@ -678,7 +682,7 @@ impl<'a> TracedAsyncRequestBuilder<'a> {
                 let error = error.without_url();
                 let failure = send_failed_trace_failure(&error);
                 record_send_failure_trace(
-                    self.client.user_id,
+                    Some(self.client.user_id),
                     &self.client.label,
                     &request_snapshot,
                     failure,
@@ -704,7 +708,7 @@ impl<'a> TracedAsyncRequestBuilder<'a> {
                 let error = error.without_url();
                 let failure = response_body_read_failed_trace_failure(&error);
                 record_trace_snapshot(
-                    self.client.user_id,
+                    Some(self.client.user_id),
                     &self.client.label,
                     &request_snapshot,
                     &response_snapshot,
@@ -716,7 +720,7 @@ impl<'a> TracedAsyncRequestBuilder<'a> {
         };
 
         record_trace_snapshot(
-            self.client.user_id,
+            Some(self.client.user_id),
             &self.client.label,
             &request_snapshot,
             &response_snapshot,
@@ -783,7 +787,7 @@ impl TracedAsyncResponse {
 /// Blocking HTTP client with automatic tracing when `BGTRACES=fs` is set.
 pub(crate) struct TracedBlockingClient {
     client: reqwest::blocking::Client,
-    user_id: UserId,
+    user_id: Option<UserId>,
     label: IntegrationLabel,
     tracing_enabled: bool,
     redacted_query_params: Vec<String>,
@@ -794,7 +798,7 @@ pub(crate) struct TracedBlockingClient {
 /// Builder for [`TracedBlockingClient`].
 pub(crate) struct TracedBlockingClientBuilder {
     label: IntegrationLabel,
-    user_id: UserId,
+    user_id: Option<UserId>,
     client_builder: reqwest::blocking::ClientBuilder,
     custom_redacted_query_params: Vec<String>,
     custom_redacted_headers: Vec<String>,
@@ -803,6 +807,17 @@ pub(crate) struct TracedBlockingClientBuilder {
 
 impl TracedBlockingClient {
     pub(crate) fn builder(label: IntegrationLabel, user_id: UserId) -> TracedBlockingClientBuilder {
+        Self::builder_for_owner(label, Some(user_id))
+    }
+
+    pub(crate) fn instance_builder(label: IntegrationLabel) -> TracedBlockingClientBuilder {
+        Self::builder_for_owner(label, None)
+    }
+
+    fn builder_for_owner(
+        label: IntegrationLabel,
+        user_id: Option<UserId>,
+    ) -> TracedBlockingClientBuilder {
         TracedBlockingClientBuilder {
             label,
             user_id,
@@ -1477,6 +1492,34 @@ mod tests {
     }
 
     #[test]
+    fn instance_requests_trace_outside_user_directories() {
+        let root = create_test_project_dir("bitgarth_instance_trace");
+        let _guard = crate::runtime_context::push_default_runtime_context(
+            crate::runtime_context::RuntimeContext::new_test(root.clone()),
+        );
+        let mut client =
+            TracedBlockingClient::instance_builder(IntegrationLabel::new("shared-price-history"))
+                .configure(|b| b.timeout(Duration::from_millis(200)))
+                .build()
+                .unwrap();
+        for enabled in [false, true] {
+            client.tracing_enabled = enabled;
+            assert!(
+                client
+                    .get(failed_loopback_url("/market_chart/range"))
+                    .send()
+                    .is_err()
+            );
+            assert_eq!(
+                collect_files(&root.join("traces/instance")).len(),
+                usize::from(enabled)
+            );
+        }
+        assert!(!root.join("users").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn traced_blocking_send_failure_writes_single_har_trace() {
         let _serial = TRACE_TEST_MUTEX
             .lock()
@@ -1488,7 +1531,7 @@ mod tests {
                 .timeout(Duration::from_millis(200))
                 .build()
                 .expect("blocking client should build"),
-            user_id,
+            user_id: Some(user_id),
             label: IntegrationLabel::new("etherscan"),
             tracing_enabled: true,
             redacted_query_params: vec!["apikey".to_string()],

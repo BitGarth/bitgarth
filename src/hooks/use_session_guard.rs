@@ -25,13 +25,7 @@ impl SessionGuard {
     ///
     /// This is a side-effecting function that modifies global state.
     pub(crate) fn check<T>(&mut self, result: Result<T, SettingsError>) {
-        let (user_id, was_authenticated) = {
-            let auth_snapshot = self.auth_state.read();
-            match &*auth_snapshot {
-                AuthStatus::Authenticated(auth) => (Some(auth.user.user_id), true),
-                _ => (None, false),
-            }
-        };
+        let user_id = authenticated_user_id(self.auth_state);
 
         match &result {
             Ok(_) => {
@@ -41,14 +35,7 @@ impl SessionGuard {
                 );
             }
             Err(err) if err.is_unauthorized() => {
-                tracing::debug!(
-                    user_id = ?user_id,
-                    "session guard: unauthorized detected, marking session expired"
-                );
-                self.auth_state.set(AuthStatus::Unauthenticated);
-                if was_authenticated {
-                    self.banner_state.set(Some(BannerMessage::SessionExpired));
-                }
+                handle_session_expired(self.auth_state, self.banner_state, "session guard");
             }
             Err(err) => {
                 tracing::debug!(
@@ -58,6 +45,28 @@ impl SessionGuard {
                 );
             }
         }
+    }
+}
+
+fn authenticated_user_id(auth_state: AuthState) -> Option<crate::models::UserId> {
+    match &*auth_state.read() {
+        AuthStatus::Authenticated(auth) => Some(auth.user.user_id),
+        _ => None,
+    }
+}
+
+/// Marks the session expired after an unauthorized API response: signs the UI
+/// out and, if the user was signed in, shows the session-expired banner.
+pub(crate) fn handle_session_expired(
+    mut auth_state: AuthState,
+    mut banner_state: BannerState,
+    context: &'static str,
+) {
+    let user_id = authenticated_user_id(auth_state);
+    tracing::debug!(user_id = ?user_id, context, "ui: session expired");
+    auth_state.set(AuthStatus::Unauthenticated);
+    if user_id.is_some() {
+        banner_state.set(Some(BannerMessage::SessionExpired));
     }
 }
 

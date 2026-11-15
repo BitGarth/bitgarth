@@ -1,17 +1,18 @@
 use super::super::{
     AmountDisplayContext, ArrowDownRightIcon, ArrowRightLeftIcon, ArrowUpRightIcon, CardViewIcon,
     CheckIcon, ChevronDoubleLeftIcon, ChevronDoubleRightIcon, ChevronLeftIcon, ChevronRightIcon,
-    CopyIcon, DisplayAmountSign, EmptyTransactionsIllustration, ExternalLinkIcon,
-    ManualConversionQuote, SortAscIcon, SortDescIcon, TableIcon, convert_amount,
+    CopyIcon, EmptyTransactionsIllustration, ExternalLinkIcon, SortAscIcon, SortDescIcon,
+    TableIcon, copy_to_clipboard,
 };
 use super::helpers::{
-    amount_class, amount_sign, copy_to_clipboard, direction_label, format_closing_balance,
-    format_fee_amount, format_transaction_amount, last_page, show_closing_balance_provisional,
-    status_label, table_totals_text, tx_explorer_url,
+    all_balances_provisional, amount_class, direction_label, format_closing_balance,
+    format_fee_amount, format_transaction_amount, format_transaction_time, last_page,
+    show_closing_balance_provisional, status_display_label, status_label, table_totals_text,
+    transaction_fiat_display, tx_explorer_url,
 };
 use crate::Route;
 use crate::components::wallets::truncate_reference_with_lengths;
-use crate::models::NumberFormat;
+use crate::models::{CurrencyCode, NumberFormat};
 use crate::settings::SettingsState;
 use crate::timezone::format_timestamp;
 use crate::transactions::{AccountTransactionDirection, ChainTransactionStatus, display_tx_hash};
@@ -25,6 +26,7 @@ use dioxus::prelude::*;
 #[component]
 pub(super) fn TransactionsPaginationRow(
     table: AccountTransactionTableResponse,
+    totals_text: Option<String>,
     loading: bool,
     on_page_change: EventHandler<u32>,
 ) -> Element {
@@ -33,7 +35,6 @@ pub(super) fn TransactionsPaginationRow(
     let can_next = !loading && table.page < total_pages;
     let can_first = can_prev;
     let can_last = can_next;
-    let totals_text = table_totals_text(&table);
 
     let mut page_input = use_signal(String::new);
 
@@ -43,7 +44,9 @@ pub(super) fn TransactionsPaginationRow(
 
     rsx! {
         div { class: "transactions-pagination-row",
-            span { class: "muted", "{totals_text}" }
+            if let Some(text) = totals_text {
+                span { class: "muted", "{text}" }
+            }
             div { class: "transactions-pagination",
                 button {
                     class: "btn btn-secondary",
@@ -112,7 +115,7 @@ pub(super) fn TransactionsTableSection(
     asset: SyncedAssetId,
     network: Network,
     amount_context: AmountDisplayContext,
-    active_quote: Option<ManualConversionQuote>,
+    fiat_currency: Option<CurrencyCode>,
     number_format: NumberFormat,
     table: AccountTransactionTableResponse,
     loading: bool,
@@ -121,10 +124,10 @@ pub(super) fn TransactionsTableSection(
     on_page_change: EventHandler<u32>,
     on_sort_toggle: EventHandler<TransactionSortDirection>,
 ) -> Element {
-    let totals_text = table_totals_text(&table);
-    let show_totals = last_page(&table) > 1;
     let bottom_table = table.clone();
     let mut use_table_view = use_signal(|| false);
+    // Provisional is usually account-wide: say it once instead of on every row.
+    let all_balances_provisional = all_balances_provisional(&table.rows);
 
     rsx! {
         section { class: "transactions-table-section card",
@@ -147,9 +150,6 @@ pub(super) fn TransactionsTableSection(
                             onclick: move |_| use_table_view.set(true),
                             TableIcon {}
                         }
-                    }
-                    if show_totals {
-                        span { class: "muted", "{totals_text}" }
                     }
                     if let Some(current_sort) = sort_toggle {
                         button {
@@ -176,8 +176,16 @@ pub(super) fn TransactionsTableSection(
 
             TransactionsPaginationRow {
                 table: table.clone(),
+                totals_text: table_totals_text(&table, number_format),
                 loading,
                 on_page_change,
+            }
+
+            if all_balances_provisional {
+                p { class: "tx-provisional-note", "data-testid": "tx-provisional-note",
+                    span { class: "tx-status-indicator tx-status-provisional", "Provisional" }
+                    " Balances on this page are provisional until history sync completes."
+                }
             }
 
 
@@ -282,19 +290,7 @@ pub(super) fn TransactionsTableSection(
                                             row.closing_balance.as_ref(),
                                             &amount_context,
                                         );
-                                        let converted_amount = active_quote.as_ref().map(|q| {
-                                            convert_amount(&row.value.formatted_value, amount_sign(direction), q, number_format)
-                                        });
-                                        let converted_fee = active_quote.as_ref().and_then(|q| {
-                                            row.fee.as_ref().map(|fee| {
-                                                convert_amount(&fee.formatted_value, DisplayAmountSign::Negative, q, number_format)
-                                            })
-                                        });
-                                        let converted_balance = active_quote.as_ref().and_then(|q| {
-                                            row.closing_balance.as_ref().map(|bal| {
-                                                convert_amount(&bal.formatted_value, DisplayAmountSign::Hidden, q, number_format)
-                                            })
-                                        });
+                                        let fiat = transaction_fiat_display(&row, fiat_currency, number_format);
                                         let status = row.status;
                                         let tx_hash = display_tx_hash(asset, &row.tx_hash).into_owned();
                                         let tx_explorer = tx_explorer_url(
@@ -322,37 +318,34 @@ pub(super) fn TransactionsTableSection(
                                                     } else {
                                                         "{amount_display}"
                                                     }
-                                                    if let Some(converted) = &converted_amount {
-                                                        div { class: "tx-converted-secondary",
-                                                            if status == ChainTransactionStatus::Failed {
-                                                                s { "{converted}" }
-                                                                span { class: "muted", " Not transferred" }
-                                                            } else {
-                                                                "{converted}"
-                                                            }
-                                                        }
+                                                    if let Some(fiat) = &fiat {
+                                                        TransactionFiatLine { fiat: fiat.clone(), failed: status == ChainTransactionStatus::Failed }
+                                                    } else if fiat_currency.is_some() {
+                                                        div { class: "tx-converted-secondary tx-fiat-missing", "No price for this day" }
                                                     }
                                                 }
                                                 td { class: "tx-table-fee",
                                                     "{fee_display}"
-                                                    if let Some(converted) = &converted_fee {
-                                                        div { class: "tx-converted-secondary", "{converted}" }
+                                                    if let Some(fee) = fiat.as_ref().and_then(|fiat| fiat.fee.clone()) {
+                                                        div { class: "tx-converted-secondary", "{fee}" }
                                                     }
                                                 }
                                                 td { class: "tx-table-balance",
                                                     "{balance_display}"
-                                                    if let Some(converted) = &converted_balance {
-                                                        div { class: "tx-converted-secondary", "{converted}" }
-                                                    }
-                                                    if show_closing_balance_provisional(
-                                                        row.closing_balance.as_ref(),
-                                                        &row.balance_reliability,
-                                                    ) {
-                                                        span { class: "tx-status-indicator tx-status-provisional", " Provisional" }
+                                                    if !all_balances_provisional
+                                                        && show_closing_balance_provisional(
+                                                            row.closing_balance.as_ref(),
+                                                            &row.balance_reliability,
+                                                        )
+                                                    {
+                                                        span { class: "tx-status-indicator tx-status-provisional", "Provisional" }
                                                     }
                                                 }
                                                 td {
-                                                    span { class: "tx-status-indicator tx-status-{status_label(status)}", "{status_label(status)}" }
+                                                    // Confirmed is the normal state; only exceptions get a badge.
+                                                    if status != ChainTransactionStatus::Confirmed {
+                                                        span { class: "tx-status-indicator tx-status-{status_label(status)}", "{status_display_label(status)}" }
+                                                    }
                                                 }
                                                 td { class: "tx-table-hash",
                                                     match tx_explorer {
@@ -414,9 +407,10 @@ pub(super) fn TransactionsTableSection(
                                             asset,
                                             network,
                                             amount_context: amount_context.clone(),
-                                            active_quote: active_quote.clone(),
+                                            fiat_currency,
                                             number_format,
                                             heading_status: heading_status.clone(),
+                                            hide_provisional: all_balances_provisional,
                                             row,
                                         }
                                     }
@@ -441,9 +435,10 @@ pub(super) fn TransactionCardRow(
     asset: SyncedAssetId,
     network: Network,
     amount_context: AmountDisplayContext,
-    active_quote: Option<ManualConversionQuote>,
+    fiat_currency: Option<CurrencyCode>,
     number_format: NumberFormat,
     heading_status: Option<String>,
+    #[props(default)] hide_provisional: bool,
     row: AccountTransactionRowResponse,
 ) -> Element {
     let settings_state = use_context::<SettingsState>();
@@ -464,40 +459,14 @@ pub(super) fn TransactionCardRow(
     };
     let fee_display = format_fee_amount(row.fee.as_ref(), &amount_context);
     let balance_display = format_closing_balance(row.closing_balance.as_ref(), &amount_context);
-    let converted_amount = active_quote.as_ref().map(|q| {
-        convert_amount(
-            &row.value.formatted_value,
-            amount_sign(direction),
-            q,
-            number_format,
-        )
-    });
-    let converted_fee = active_quote.as_ref().and_then(|q| {
-        row.fee.as_ref().map(|fee| {
-            convert_amount(
-                &fee.formatted_value,
-                DisplayAmountSign::Negative,
-                q,
-                number_format,
-            )
-        })
-    });
-    let converted_balance = active_quote.as_ref().and_then(|q| {
-        row.closing_balance.as_ref().map(|bal| {
-            convert_amount(
-                &bal.formatted_value,
-                DisplayAmountSign::Hidden,
-                q,
-                number_format,
-            )
-        })
-    });
+    let fiat = transaction_fiat_display(&row, fiat_currency, number_format);
     let status = row.status;
 
     let tz = (settings_state.timezone)().0;
     let date_fmt = (settings_state.date_time_format)();
+    // Cards sit under a date header, so they only need the time of day.
     let timestamp_display = chrono::DateTime::parse_from_rfc3339(&row.occurred_at)
-        .map(|parsed| format_timestamp(&parsed.with_timezone(&chrono::Utc), tz, date_fmt))
+        .map(|parsed| format_transaction_time(&parsed.with_timezone(&chrono::Utc), tz, date_fmt))
         .unwrap_or_else(|_| row.occurred_at.clone());
 
     rsx! {
@@ -524,19 +493,17 @@ pub(super) fn TransactionCardRow(
                         } else {
                             "{amount_display}"
                         }
-                        if let Some(converted) = &converted_amount {
-                            div { class: "tx-converted-secondary",
-                                if status == ChainTransactionStatus::Failed {
-                                    s { "{converted}" }
-                                    span { class: "muted", " Not transferred" }
-                                } else {
-                                    "{converted}"
-                                }
-                            }
+                        if let Some(fiat) = &fiat {
+                            TransactionFiatLine { fiat: fiat.clone(), failed: status == ChainTransactionStatus::Failed }
+                        } else if fiat_currency.is_some() {
+                            div { class: "tx-converted-secondary tx-fiat-missing", "No price for this day" }
                         }
                     }
-                    if heading_status.as_deref() != Some(status_label(status)) {
-                        span { class: "tx-status-indicator tx-status-{status_label(status)}", "{status_label(status)}" }
+                    // Confirmed is the normal state; only exceptions get a badge.
+                    if status != ChainTransactionStatus::Confirmed
+                        && heading_status.as_deref() != Some(status_label(status))
+                    {
+                        span { class: "tx-status-indicator tx-status-{status_label(status)}", "{status_display_label(status)}" }
                     }
                 }
             }
@@ -570,22 +537,21 @@ pub(super) fn TransactionCardRow(
                     span { class: "tx-card-detail-label", "Fee" }
                     div { class: "tx-fee-value",
                         "{fee_display}"
-                        if let Some(converted) = &converted_fee {
-                            div { class: "tx-converted-secondary", "{converted}" }
+                        if let Some(fee) = fiat.as_ref().and_then(|fiat| fiat.fee.clone()) {
+                            div { class: "tx-converted-secondary", "{fee}" }
                         }
                     }
                 }
                 div { class: "tx-card-detail-item",
                     span { class: "tx-card-detail-label", "Balance" }
                     div { class: "tx-balance-cell",
-                        span { "{balance_display}" }
-                        if let Some(converted) = &converted_balance {
-                            div { class: "tx-converted-secondary", "{converted}" }
-                        }
-                        if show_closing_balance_provisional(
-                            row.closing_balance.as_ref(),
-                            &row.balance_reliability,
-                        ) {
+                        span { class: "tx-balance-value", "{balance_display}" }
+                        if !hide_provisional
+                            && show_closing_balance_provisional(
+                                row.closing_balance.as_ref(),
+                                &row.balance_reliability,
+                            )
+                        {
                             span { class: "tx-status-indicator tx-status-provisional", "Provisional" }
                         }
                     }
@@ -595,9 +561,26 @@ pub(super) fn TransactionCardRow(
     }
 }
 
+/// The fiat value under a transaction amount, with the price it used. A failed
+/// transaction moved nothing, so its value is struck through.
+#[component]
+fn TransactionFiatLine(fiat: super::helpers::TransactionFiatDisplay, failed: bool) -> Element {
+    rsx! {
+        div { class: "tx-converted-secondary tx-fiat-value", "data-testid": "tx-fiat-value",
+            if failed {
+                s { "{fiat.value}" }
+            } else {
+                "{fiat.value}"
+            }
+            span { class: "tx-fiat-price", " at {fiat.price}" }
+        }
+    }
+}
+
 #[component]
 pub(super) fn CopyIconButton(value: String, aria_label: String) -> Element {
     let mut copied = use_signal(|| false);
+    let mut copy_generation = use_signal(|| 0_u32);
     let toast_state = use_context::<super::super::ToastState>();
 
     rsx! {
@@ -607,14 +590,24 @@ pub(super) fn CopyIconButton(value: String, aria_label: String) -> Element {
             "aria-label": if copied() { "Copied!" } else { aria_label.as_str() },
             title: if copied() { "Copied!" } else { aria_label.as_str() },
             onclick: move |_| {
-                copy_to_clipboard(&value);
-                copied.set(true);
-                super::super::push_toast(toast_state, super::super::ToastLevel::Success, "Copied to clipboard".to_string());
+                let write = copy_to_clipboard(&value);
                 spawn(async move {
+                    let success = write.await;
+                    copied.set(success);
+                    if !success {
+                        super::super::push_toast(toast_state, super::super::ToastLevel::Error, "Couldn't copy to clipboard".to_string());
+                        return;
+                    }
+                    super::super::push_toast(toast_state, super::super::ToastLevel::Success, "Copied to clipboard".to_string());
+                    // Only the latest successful click's timer clears the state.
+                    let generation = copy_generation.peek().wrapping_add(1);
+                    copy_generation.set(generation);
                     let mut timer =
                         eval(r#"setTimeout(() => { dioxus.send(null); }, 1500);"#);
                     let _ = timer.recv::<serde_json::Value>().await;
-                    copied.set(false);
+                    if *copy_generation.peek() == generation {
+                        copied.set(false);
+                    }
                 });
             },
             if copied() {

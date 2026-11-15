@@ -9,6 +9,7 @@
 pub(crate) mod automatic_sync;
 mod eligibility_refresh;
 mod jobs;
+mod paired_jobs;
 
 pub(crate) use jobs::sync::TransactionFetchPolicy;
 #[cfg(feature = "server")]
@@ -19,6 +20,12 @@ pub(crate) use jobs::sync::integrations::etherscan::map_etherscan_transactions;
 pub(crate) use jobs::sync::integrations::unfinished_backfill_state;
 #[cfg(feature = "server")]
 pub(crate) use jobs::sync::run_manual_sync_control;
+use paired_jobs::{ClientJobLease, PairedSyncRuns};
+#[cfg(any(
+    all(not(test), not(feature = "desktop")),
+    all(test, not(bitgarth_db_unit_only))
+))]
+pub(crate) use paired_jobs::{client_sync_status, with_paired_job_authority};
 
 use self::automatic_sync::{
     AutomaticSyncDecision, AutomaticSyncEligibility, AutomaticSyncEnqueueReason,
@@ -29,7 +36,7 @@ use self::automatic_sync::{
 use self::jobs::inactive_user_cleanup::{
     INACTIVE_USER_CLEANUP_INTERVAL, InactiveUserCleanupParams,
 };
-use self::jobs::price_history::PriceHistoryReconciliationParams;
+use self::jobs::price_history::{PriceHistoryReconciliationParams, SharedPriceHistorySummary};
 use self::jobs::session_cleanup::{SESSION_CLEANUP_INTERVAL, SessionCleanupParams};
 #[cfg(all(test, not(bitgarth_db_unit_only)))]
 use self::jobs::sync::{
@@ -74,6 +81,7 @@ pub(crate) enum JobId {
     InactiveUserCleanup,
     UserTransactionMonitor,
     PriceHistoryReconciliation,
+    SharedPriceHistory,
 }
 
 impl std::fmt::Display for JobId {
@@ -83,6 +91,7 @@ impl std::fmt::Display for JobId {
             JobId::TraceCleanup => write!(f, "TraceCleanup"),
             JobId::InactiveUserCleanup => write!(f, "InactiveUserCleanup"),
             JobId::UserTransactionMonitor => write!(f, "UserTransactionMonitor"),
+            JobId::SharedPriceHistory => write!(f, "SharedPriceHistory"),
             JobId::PriceHistoryReconciliation => write!(f, "PriceHistoryReconciliation"),
         }
     }
@@ -137,6 +146,7 @@ pub(crate) enum TriggerParams {
     InactiveUserCleanup(InactiveUserCleanupParams),
     UserTransactionMonitor(UserTransactionMonitorParams),
     PriceHistoryReconciliation(PriceHistoryReconciliationParams),
+    SharedPriceHistory,
 }
 
 impl TriggerParams {
@@ -155,6 +165,7 @@ impl TriggerParams {
                     scope: TransactionSyncScope::User,
                 })
             }
+            JobId::SharedPriceHistory => TriggerParams::SharedPriceHistory,
             JobId::PriceHistoryReconciliation => {
                 unreachable!("price history reconciliation is not scheduled")
             }
@@ -164,7 +175,8 @@ impl TriggerParams {
     fn matches_job(self, job_id: JobId) -> bool {
         matches!(
             (job_id, self),
-            (JobId::SessionCleanup, TriggerParams::SessionCleanup(_))
+            (JobId::SharedPriceHistory, TriggerParams::SharedPriceHistory)
+                | (JobId::SessionCleanup, TriggerParams::SessionCleanup(_))
                 | (JobId::TraceCleanup, TriggerParams::TraceCleanup(_))
                 | (
                     JobId::InactiveUserCleanup,
@@ -188,6 +200,7 @@ fn transaction_sync_run_id_for_params(params: TriggerParams) -> Option<Transacti
         TriggerParams::SessionCleanup(_)
         | TriggerParams::TraceCleanup(_)
         | TriggerParams::InactiveUserCleanup(_)
+        | TriggerParams::SharedPriceHistory
         | TriggerParams::PriceHistoryReconciliation(_) => None,
     }
 }
@@ -274,6 +287,7 @@ fn canonicalize_pending_request(request: TriggerRequest) -> TriggerRequest {
         TriggerParams::SessionCleanup(_)
         | TriggerParams::TraceCleanup(_)
         | TriggerParams::InactiveUserCleanup(_)
+        | TriggerParams::SharedPriceHistory
         | TriggerParams::PriceHistoryReconciliation(_) => request,
     }
 }
@@ -308,7 +322,17 @@ fn compute_trigger_transition(
 enum ManagerCommand {
     Enqueue {
         request: TriggerRequest,
+        lease: Option<ClientJobLease>,
         result_tx: oneshot::Sender<TriggerEnqueueResult>,
+    },
+    #[cfg(any(
+        all(not(test), not(feature = "desktop")),
+        all(test, not(bitgarth_db_unit_only))
+    ))]
+    ClientSyncStatus {
+        user_id: UserId,
+        run_id: TransactionSyncRunId,
+        reply: oneshot::Sender<Option<paired_jobs::ClientSyncStatus>>,
     },
     JobCompleted(JobCompletion),
     Shutdown {
@@ -317,15 +341,19 @@ enum ManagerCommand {
 }
 
 #[derive(Clone, Debug)]
-struct JobExecutionSuccess {
-    summary: String,
-    next_due_hint: Option<UserTransactionMonitorScheduleHint>,
+enum JobReport {
+    Summary(String),
+    WalletSync(
+        UserTransactionMonitorScheduleHint,
+        crate::transactions::AggregateSyncResult,
+    ),
+    SharedPrices(Result<SharedPriceHistorySummary, SharedPriceHistorySummary>),
 }
 
 #[derive(Clone, Debug)]
 struct JobCompletion {
     request: TriggerRequest,
-    result: Result<JobExecutionSuccess, String>,
+    result: Result<JobReport, &'static str>,
     elapsed: Duration,
 }
 
@@ -334,6 +362,8 @@ struct TaskManager {
     command_rx: mpsc::Receiver<ManagerCommand>,
     jobs: HashMap<JobKey, JobState>,
     eligibility_refresh: eligibility_refresh::EligibilityRefresh,
+    pending_client_leases: HashMap<JobKey, ClientJobLease>,
+    client_runs: PairedSyncRuns,
     shutting_down: bool,
     shutdown_result: Option<oneshot::Sender<()>>,
 }
@@ -426,31 +456,21 @@ fn automatic_sync_decision_for_user(
     user_id: UserId,
     now: Instant,
     now_utc: DateTime<Utc>,
-) -> (AutomaticSyncFreshnessSummary, AutomaticSyncDecision) {
+) -> AutomaticSyncDecision {
     if is_automatic_sync_suppressed(crate::sync_control::sync_control_mode()) {
-        return (
-            AutomaticSyncFreshnessSummary::empty(),
-            AutomaticSyncDecision::Skip {
-                reason: AutomaticSyncSkipReason::DisabledBySyncControl,
-            },
-        );
+        return AutomaticSyncDecision::Skip {
+            reason: AutomaticSyncSkipReason::DisabledBySyncControl,
+        };
     }
 
     let freshness = match automatic_sync_freshness_summary(user_id, now_utc) {
         Ok(summary) => summary,
-        Err(err) => {
-            tracing::warn!(
-                user_id = %user_id,
-                error = %err,
-                "tasks: failed to inspect automatic sync freshness"
-            );
-            return (
-                AutomaticSyncFreshnessSummary::empty(),
-                AutomaticSyncDecision::KeepScheduled {
-                    reason: AutomaticSyncKeepScheduledReason::InspectionFailed,
-                    next_due_in: USER_TRANSACTION_MONITOR_INTERVAL.as_duration(),
-                },
-            );
+        Err(_) => {
+            tracing::warn!("tasks: failed to inspect automatic sync freshness");
+            return AutomaticSyncDecision::KeepScheduled {
+                reason: AutomaticSyncKeepScheduledReason::InspectionFailed,
+                next_due_in: USER_TRANSACTION_MONITOR_INTERVAL.as_duration(),
+            };
         }
     };
 
@@ -463,61 +483,14 @@ fn automatic_sync_decision_for_user(
     .map(|blocked_until| blocked_until.saturating_duration_since(now.into()));
     let block_state =
         automatic_sync_block_state(&freshness, &blocked_integrations, blocked_retry_in);
-    let decision =
-        automatic_sync_decision(AutomaticSyncEligibility::Eligible, &freshness, block_state);
-
-    (freshness, decision)
-}
-
-fn log_automatic_sync_decision(
-    user_id: UserId,
-    source: TriggerSource,
-    freshness: &AutomaticSyncFreshnessSummary,
-    decision: AutomaticSyncDecision,
-) {
-    match decision {
-        AutomaticSyncDecision::EnqueueNow { reason } => {
-            tracing::info!(
-                user_id = %user_id,
-                source = %source,
-                reason = ?reason,
-                urgent_accounts = freshness.urgent_accounts,
-                stale_warm_accounts = freshness.stale_warm_accounts,
-                stale_cold_accounts = freshness.stale_cold_accounts,
-                "tasks: automatic sync enqueued"
-            );
-        }
-        AutomaticSyncDecision::KeepScheduled {
-            reason,
-            next_due_in,
-        } => {
-            tracing::debug!(
-                user_id = %user_id,
-                source = %source,
-                reason = ?reason,
-                next_due_in_seconds = next_due_in.as_secs(),
-                urgent_accounts = freshness.urgent_accounts,
-                stale_warm_accounts = freshness.stale_warm_accounts,
-                stale_cold_accounts = freshness.stale_cold_accounts,
-                fresh_accounts = freshness.fresh_accounts,
-                "tasks: automatic sync kept scheduled"
-            );
-        }
-        AutomaticSyncDecision::Skip { reason } => {
-            tracing::debug!(
-                user_id = %user_id,
-                source = %source,
-                reason = ?reason,
-                "tasks: automatic sync skipped"
-            );
-        }
-    }
+    automatic_sync_decision(AutomaticSyncEligibility::Eligible, &freshness, block_state)
 }
 
 fn register_scheduled_app_job(
     jobs: &mut HashMap<JobKey, JobState>,
     job_id: JobId,
     interval: Duration,
+    first_run_delay: Duration,
     now: Instant,
     now_utc: DateTime<Utc>,
 ) {
@@ -531,10 +504,10 @@ fn register_scheduled_app_job(
             },
             running: false,
             pending: None,
-            next_due_at: now + interval,
+            next_due_at: now + first_run_delay,
         },
     );
-    log_job_registration(key, interval, now_utc);
+    log_job_registration(key, interval, Some(first_run_delay), now_utc);
 }
 
 fn register_static_app_jobs(
@@ -547,6 +520,7 @@ fn register_static_app_jobs(
         jobs,
         JobId::SessionCleanup,
         SESSION_CLEANUP_INTERVAL.as_duration(),
+        SESSION_CLEANUP_INTERVAL.as_duration(),
         now,
         now_utc,
     );
@@ -554,14 +528,25 @@ fn register_static_app_jobs(
         jobs,
         JobId::TraceCleanup,
         TRACE_CLEANUP_INTERVAL.as_duration(),
+        TRACE_CLEANUP_INTERVAL.as_duration(),
         now,
         now_utc,
     );
 
+    register_scheduled_app_job(
+        jobs,
+        JobId::SharedPriceHistory,
+        Duration::from_secs(60),
+        // Collect right after startup instead of a minute later.
+        Duration::ZERO,
+        now,
+        now_utc,
+    );
     if channel == Channel::Hosted {
         register_scheduled_app_job(
             jobs,
             JobId::InactiveUserCleanup,
+            INACTIVE_USER_CLEANUP_INTERVAL.as_duration(),
             INACTIVE_USER_CLEANUP_INTERVAL.as_duration(),
             now,
             now_utc,
@@ -583,6 +568,8 @@ impl TaskManager {
             command_tx,
             command_rx,
             jobs,
+            pending_client_leases: HashMap::new(),
+            client_runs: PairedSyncRuns::default(),
             eligibility_refresh: eligibility_refresh::EligibilityRefresh::default(),
             shutting_down: false,
             shutdown_result: None,
@@ -643,7 +630,7 @@ impl TaskManager {
                 next_due_at: now + interval,
             },
         );
-        log_job_registration(key, interval, now_utc);
+        log_job_registration(key, interval, Some(interval), now_utc);
         true
     }
 
@@ -674,7 +661,7 @@ impl TaskManager {
                 next_due_at: now + interval,
             },
         );
-        log_job_registration(key, interval, now_utc);
+        log_job_registration(key, interval, None, now_utc);
         true
     }
 
@@ -707,12 +694,11 @@ impl TaskManager {
 
         let open_user_ids: HashSet<UserId> = match load_open() {
             Ok(users) => users.into_iter().collect(),
-            Err(err) => {
+            Err(_) => {
                 if let Some(attempts) = self.eligibility_refresh.failed(now) {
                     tracing::warn!(
                         source = "open-user-databases",
                         attempts,
-                        error = %err,
                         "tasks: transaction monitor eligibility refresh failed"
                     );
                 }
@@ -722,12 +708,11 @@ impl TaskManager {
 
         let logged_in_user_ids: HashSet<UserId> = match load_sessions() {
             Ok(users) => users.into_iter().collect(),
-            Err(err) => {
+            Err(_) => {
                 if let Some(attempts) = self.eligibility_refresh.failed(now) {
                     tracing::warn!(
                         source = "unexpired-sessions",
                         attempts,
-                        error = %err,
                         "tasks: transaction monitor eligibility refresh failed"
                     );
                 }
@@ -753,7 +738,7 @@ impl TaskManager {
                 job_id: JobId::UserTransactionMonitor,
                 user_id: *user_id,
             };
-            let (freshness, decision) = automatic_sync_decision_for_user(*user_id, now, now_utc);
+            let decision = automatic_sync_decision_for_user(*user_id, now, now_utc);
             match decision {
                 AutomaticSyncDecision::EnqueueNow {
                     reason:
@@ -779,12 +764,7 @@ impl TaskManager {
                 }
                 AutomaticSyncDecision::Skip { .. } => {}
             }
-            log_automatic_sync_decision(
-                *user_id,
-                TriggerSource::AutoSessionRestore,
-                &freshness,
-                decision,
-            );
+            tracing::debug!(source = %TriggerSource::AutoSessionRestore, ?decision, "tasks: automatic sync decision");
         }
 
         self.jobs.retain(|key, state| match key {
@@ -825,6 +805,7 @@ impl TaskManager {
 
     fn handle_schedule_tick(&mut self) {
         let now = Instant::now();
+        self.client_runs.prune(now);
         let now_utc = Utc::now();
         let automatic_requests = self.sync_user_transaction_jobs(now, now_utc);
         for request in automatic_requests {
@@ -851,8 +832,7 @@ impl TaskManager {
                     job_id: JobId::UserTransactionMonitor,
                     user_id,
                 } => {
-                    let (freshness, decision) =
-                        automatic_sync_decision_for_user(user_id, now, now_utc);
+                    let decision = automatic_sync_decision_for_user(user_id, now, now_utc);
                     match decision {
                         AutomaticSyncDecision::EnqueueNow {
                             reason:
@@ -876,12 +856,7 @@ impl TaskManager {
                         }
                         AutomaticSyncDecision::Skip { .. } => {}
                     }
-                    log_automatic_sync_decision(
-                        user_id,
-                        TriggerSource::AutoFreshness,
-                        &freshness,
-                        decision,
-                    );
+                    tracing::debug!(source = %TriggerSource::AutoFreshness, ?decision, "tasks: automatic sync decision");
                 }
                 JobKey::App { .. } | JobKey::User { .. } => {
                     due_requests.push(TriggerRequest {
@@ -900,9 +875,24 @@ impl TaskManager {
 
     fn handle_command(&mut self, command: ManagerCommand) {
         match command {
-            ManagerCommand::Enqueue { request, result_tx } => {
-                let result = self.apply_trigger(request);
+            ManagerCommand::Enqueue {
+                request,
+                lease,
+                result_tx,
+            } => {
+                let result = self.apply_trigger_with_lease(request, lease);
                 let _ = result_tx.send(result);
+            }
+            #[cfg(any(
+                all(not(test), not(feature = "desktop")),
+                all(test, not(bitgarth_db_unit_only))
+            ))]
+            ManagerCommand::ClientSyncStatus {
+                user_id,
+                run_id,
+                reply,
+            } => {
+                let _ = reply.send(self.client_runs.get(user_id, run_id));
             }
             ManagerCommand::JobCompleted(completion) => {
                 self.handle_job_completion(completion);
@@ -912,12 +902,21 @@ impl TaskManager {
                 for state in self.jobs.values_mut() {
                     state.pending = None;
                 }
+                self.pending_client_leases.clear();
                 self.shutdown_result = Some(result_tx);
             }
         }
     }
 
     fn apply_trigger(&mut self, request: TriggerRequest) -> TriggerEnqueueResult {
+        self.apply_trigger_with_lease(request, None)
+    }
+
+    fn apply_trigger_with_lease(
+        &mut self,
+        request: TriggerRequest,
+        lease: Option<ClientJobLease>,
+    ) -> TriggerEnqueueResult {
         if self.shutting_down || TASK_MANAGER_SHUTTING_DOWN.load(Ordering::Acquire) {
             return TriggerEnqueueResult::RejectedShuttingDown;
         }
@@ -945,20 +944,23 @@ impl TaskManager {
             } = transition.enqueue_result
         {
             tracing::debug!(
-                key = ?request.key,
+                job_id = %request.key.job_id(),
                 run_id = %run_id,
                 pending_action = if had_pending { "coalesced" } else { "created" },
-                queued_scope = ?state.pending.and_then(|pending| match pending.params {
-                    TriggerParams::UserTransactionMonitor(params) => Some(params.scope),
-                    TriggerParams::SessionCleanup(_)
-                    | TriggerParams::TraceCleanup(_)
-                    | TriggerParams::InactiveUserCleanup(_)
-                    | TriggerParams::PriceHistoryReconciliation(_) => None,
-                }),
                 "tasks: trigger queued into canonical pending rerun"
             );
         }
 
+        if let Some(lease) = lease {
+            if let JobKey::User { user_id, .. } = request.key {
+                self.client_runs
+                    .register(user_id, transition.enqueue_result);
+            }
+            // Coalesced requests share the original pending run and one authorized lease.
+            self.pending_client_leases
+                .entry(request.key)
+                .or_insert(lease);
+        }
         if transition.should_start_now {
             self.start_job_run(request);
         }
@@ -974,19 +976,41 @@ impl TaskManager {
 
         state.running = false;
 
+        let job_id = completion.request.key.job_id();
+        let duration_ms = completion.elapsed.as_millis();
+        if let (JobKey::User { user_id, .. }, Some(run_id)) = (
+            completion.request.key,
+            transaction_sync_run_id_for_params(completion.request.params),
+        ) {
+            let result = match &completion.result {
+                Ok(JobReport::WalletSync(_, result)) => *result,
+                _ => crate::transactions::AggregateSyncResult::Failure,
+            };
+            self.client_runs.complete(user_id, run_id, result);
+        }
         match completion.result {
-            Ok(success) => {
+            Ok(JobReport::WalletSync(hint, _)) => {
                 apply_completion_schedule_hint(
                     state,
                     completion.request.key,
-                    success.next_due_hint,
+                    Some(hint),
                     Instant::now(),
                     Utc::now(),
                 );
-                log_job_completed(completion.request, &success.summary, completion.elapsed);
             }
-            Err(error) => {
-                log_job_failed(completion.request, &error, completion.elapsed);
+            Ok(JobReport::SharedPrices(result)) => {
+                let (Ok(summary) | Err(summary)) = &result;
+                if let Some(retry_at) = summary.retry_at {
+                    defer_until_retry_at(state, retry_at, Instant::now(), Utc::now());
+                }
+                log_shared_price_history(result, duration_ms);
+            }
+            Ok(JobReport::Summary(summary)) => {
+                tracing::info!(%job_id, %summary, duration_ms, "tasks: job completed");
+            }
+            Err(failure_kind) => {
+                let run_id = transaction_sync_run_id_for_params(completion.request.params);
+                tracing::error!(%job_id, run_id = run_id.as_ref().map(tracing::field::display), failure_kind, duration_ms, "tasks: job failed");
             }
         }
 
@@ -999,10 +1023,17 @@ impl TaskManager {
         }
     }
 
-    fn start_job_run(&self, request: TriggerRequest) {
+    fn start_job_run(&mut self, request: TriggerRequest) {
+        let lease = self.pending_client_leases.remove(&request.key);
+        if let (JobKey::User { user_id, .. }, Some(run_id)) = (
+            request.key,
+            transaction_sync_run_id_for_params(request.params),
+        ) {
+            self.client_runs.start(user_id, run_id);
+        }
         let command_tx = self.command_tx.clone();
         tokio::spawn(async move {
-            run_job_and_report_completion(request, command_tx).await;
+            run_job_and_report_completion(request, lease, command_tx).await;
         });
     }
 }
@@ -1022,82 +1053,100 @@ fn apply_completion_schedule_hint(
     log_job_rescheduled(key, next_due_hint, now_utc);
 }
 
-fn execute_job(request: TriggerRequest) -> Result<JobExecutionSuccess, String> {
+/// Starts the next run once a provider backoff ends, so a fixed tick that lands
+/// just before the deadline doesn't waste a run.
+fn defer_until_retry_at(state: &mut JobState, retry_at: i64, now: Instant, now_utc: DateTime<Utc>) {
+    let wait_ms = retry_at
+        .saturating_mul(1000)
+        .saturating_sub(now_utc.timestamp_millis());
+    let due_at = now + Duration::from_millis(u64::try_from(wait_ms).unwrap_or(0));
+    state.next_due_at = state.next_due_at.max(due_at);
+}
+
+fn execute_job(request: TriggerRequest, paired: bool) -> Result<JobReport, &'static str> {
     match (request.key, request.params) {
+        (
+            JobKey::App {
+                job_id: JobId::SharedPriceHistory,
+            },
+            TriggerParams::SharedPriceHistory,
+        ) => Ok(JobReport::SharedPrices(
+            jobs::price_history::run_shared_price_history(),
+        )),
         (
             JobKey::App {
                 job_id: JobId::SessionCleanup,
             },
             TriggerParams::SessionCleanup(params),
         ) => jobs::session_cleanup::run(params)
-            .map(|summary| JobExecutionSuccess {
-                summary: format!("{summary:?}"),
-                next_due_hint: None,
-            })
-            .map_err(|err| err.to_string()),
+            .map(|summary| JobReport::Summary(format!("{summary:?}")))
+            .map_err(|err| match err {
+                jobs::session_cleanup::SessionCleanupError::Auth(_) => "session_expiry",
+                jobs::session_cleanup::SessionCleanupError::Database(_) => "database",
+                jobs::session_cleanup::SessionCleanupError::Capability(_) => "capability_shutdown",
+            }),
         (
             JobKey::App {
                 job_id: JobId::TraceCleanup,
             },
             TriggerParams::TraceCleanup(params),
         ) => jobs::trace_cleanup::run(params)
-            .map(|summary| JobExecutionSuccess {
-                summary: format!("{summary:?}"),
-                next_due_hint: None,
-            })
-            .map_err(|err| err.to_string()),
+            .map(|summary| JobReport::Summary(format!("{summary:?}")))
+            .map_err(|err| match err {
+                jobs::trace_cleanup::TraceCleanupError::ProjectPath(_) => "project_path",
+                jobs::trace_cleanup::TraceCleanupError::ReadUsersRoot { .. } => "read_directory",
+            }),
         (
             JobKey::App {
                 job_id: JobId::InactiveUserCleanup,
             },
             TriggerParams::InactiveUserCleanup(params),
         ) => jobs::inactive_user_cleanup::run(params)
-            .map(|summary| JobExecutionSuccess {
-                summary: format!("{summary:?}"),
-                next_due_hint: None,
-            })
-            .map_err(|err| err.to_string()),
+            .map(|summary| JobReport::Summary(format!("{summary:?}")))
+            .map_err(|err| match err {
+                jobs::inactive_user_cleanup::InactiveUserCleanupError::Db(_) => "database",
+                jobs::inactive_user_cleanup::InactiveUserCleanupError::Auth(_) => "session_cleanup",
+                jobs::inactive_user_cleanup::InactiveUserCleanupError::Lifecycle(_) => "lifecycle",
+                jobs::inactive_user_cleanup::InactiveUserCleanupError::Io { .. } => "filesystem",
+            }),
         (
             JobKey::User {
                 job_id: JobId::UserTransactionMonitor,
                 user_id,
             },
             TriggerParams::UserTransactionMonitor(params),
-        ) => jobs::user_transaction_monitor::run(user_id, request.source, params)
-            .map(|summary| JobExecutionSuccess {
-                summary: format!("{summary:?}"),
-                next_due_hint: Some(summary.schedule_hint),
-            })
-            .map_err(|err| err.to_string()),
+        ) => jobs::user_transaction_monitor::run(user_id, request.source, params, paired)
+            .map(|(summary, result)| JobReport::WalletSync(summary.schedule_hint, result))
+            .map_err(|error| error.log_category()),
         (
             JobKey::User {
                 job_id: JobId::PriceHistoryReconciliation,
                 user_id,
             },
             TriggerParams::PriceHistoryReconciliation(params),
-        ) => {
-            jobs::price_history::run_price_history_reconciliation(user_id, params).map(|summary| {
-                JobExecutionSuccess {
-                    summary,
-                    next_due_hint: None,
-                }
-            })
-        }
-        (key, _) => Err(format!("Mismatched trigger params for job key {key:?}")),
+        ) => jobs::price_history::run_price_history_reconciliation(user_id, params)
+            .map(JobReport::Summary)
+            .map_err(|_| "price_reconciliation"),
+        _ => Err("mismatched_job_parameters"),
     }
 }
 
 async fn run_job_and_report_completion(
     request: TriggerRequest,
+    lease: Option<ClientJobLease>,
     command_tx: mpsc::Sender<ManagerCommand>,
 ) {
     log_job_started(request);
 
     let started_at = StdInstant::now();
-    let result = tokio::task::spawn_blocking(move || execute_job(request))
-        .await
-        .map_err(|err| format!("Job join failure: {err}"))
-        .and_then(|inner| inner);
+    let result = tokio::task::spawn_blocking(move || {
+        #[cfg(any(feature = "dev-config", test))]
+        let _runtime = lease.as_ref().and_then(ClientJobLease::enter_runtime);
+        execute_job(request, lease.is_some())
+    })
+    .await
+    .map_err(|_| "worker_join")
+    .and_then(|inner| inner);
     let elapsed = started_at.elapsed();
 
     let completion = JobCompletion {
@@ -1116,23 +1165,17 @@ fn next_run_at_utc(now_utc: DateTime<Utc>, interval: Duration) -> Option<DateTim
         .and_then(|delta| now_utc.checked_add_signed(delta))
 }
 
-fn log_job_registration(key: JobKey, interval: Duration, now_utc: DateTime<Utc>) {
-    let next_run_at_utc = next_run_at_utc(now_utc, interval);
-    match key {
-        JobKey::App { job_id } => tracing::info!(
-            job_id = %job_id,
-            interval_seconds = interval.as_secs(),
-            next_run_at_utc = ?next_run_at_utc,
-            "tasks: registered background job"
-        ),
-        JobKey::User { job_id, user_id } => tracing::info!(
-            job_id = %job_id,
-            user_id = %user_id,
-            interval_seconds = interval.as_secs(),
-            next_run_at_utc = ?next_run_at_utc,
-            "tasks: registered background job"
-        ),
-    }
+fn log_job_registration(
+    key: JobKey,
+    interval: Duration,
+    first_run_delay: Option<Duration>,
+    now_utc: DateTime<Utc>,
+) {
+    let next_run_at_utc = first_run_delay.and_then(|delay| next_run_at_utc(now_utc, delay));
+    tracing::debug!(
+        job_id = %key.job_id(), interval_seconds = interval.as_secs(), ?next_run_at_utc,
+        "tasks: registered background job"
+    );
 }
 
 fn log_job_rescheduled(
@@ -1140,146 +1183,53 @@ fn log_job_rescheduled(
     next_due_hint: UserTransactionMonitorScheduleHint,
     now_utc: DateTime<Utc>,
 ) {
-    let next_run_at_utc = next_due_hint.next_due_at_utc(now_utc);
-    match key {
-        JobKey::App { job_id } => tracing::info!(
-            job_id = %job_id,
-            next_due_in_seconds = next_due_hint.interval.as_secs(),
-            next_due_reason = ?next_due_hint.reason,
-            schedule_urgency = ?next_due_hint.urgency,
-            next_run_at_utc = ?next_run_at_utc,
-            "tasks: background job rescheduled"
-        ),
-        JobKey::User { job_id, user_id } => tracing::info!(
-            job_id = %job_id,
-            user_id = %user_id,
-            next_due_in_seconds = next_due_hint.interval.as_secs(),
-            next_due_reason = ?next_due_hint.reason,
-            schedule_urgency = ?next_due_hint.urgency,
-            next_run_at_utc = ?next_run_at_utc,
-            "tasks: background job rescheduled"
-        ),
-    }
+    tracing::debug!(
+        job_id = %key.job_id(),
+        next_run_at_utc = ?next_due_hint.next_due_at_utc(now_utc),
+        "tasks: background job rescheduled"
+    );
 }
 
 fn log_job_started(request: TriggerRequest) {
     let run_id = transaction_sync_run_id_for_params(request.params);
-    match (request.key, run_id) {
-        (JobKey::App { job_id }, None) => tracing::info!(
-            job_id = %job_id,
-            source = %request.source,
-            "tasks: job started"
-        ),
-        (JobKey::User { job_id, user_id }, None) => tracing::info!(
-            job_id = %job_id,
-            user_id = %user_id,
-            source = %request.source,
-            "tasks: job started"
-        ),
-        (JobKey::App { job_id }, Some(run_id)) => tracing::info!(
-            job_id = %job_id,
-            source = %request.source,
-            run_id = %run_id,
-            "tasks: job started"
-        ),
-        (JobKey::User { job_id, user_id }, Some(run_id)) => tracing::info!(
-            job_id = %job_id,
-            user_id = %user_id,
-            source = %request.source,
-            run_id = %run_id,
-            "tasks: job started"
-        ),
-    }
+    tracing::debug!(
+        job_id = %request.key.job_id(),
+        run_id = run_id.as_ref().map(tracing::field::display),
+        "tasks: job started"
+    );
 }
 
-fn log_job_completed(request: TriggerRequest, summary: &str, elapsed: Duration) {
-    let run_id = transaction_sync_run_id_for_params(request.params);
-    match (request.key, run_id) {
-        (JobKey::App { job_id }, None) => tracing::info!(
-            job_id = %job_id,
-            source = %request.source,
-            summary = %summary,
-            duration_ms = elapsed.as_millis(),
-            "tasks: job completed"
-        ),
-        (JobKey::User { job_id, user_id }, None) => tracing::info!(
-            job_id = %job_id,
-            user_id = %user_id,
-            source = %request.source,
-            summary = %summary,
-            duration_ms = elapsed.as_millis(),
-            "tasks: job completed"
-        ),
-        (JobKey::App { job_id }, Some(run_id)) => tracing::info!(
-            job_id = %job_id,
-            source = %request.source,
-            run_id = %run_id,
-            summary = %summary,
-            duration_ms = elapsed.as_millis(),
-            "tasks: job completed"
-        ),
-        (JobKey::User { job_id, user_id }, Some(run_id)) => tracing::info!(
-            job_id = %job_id,
-            user_id = %user_id,
-            source = %request.source,
-            run_id = %run_id,
-            summary = %summary,
-            duration_ms = elapsed.as_millis(),
-            "tasks: job completed"
-        ),
+fn log_shared_price_history(
+    result: Result<SharedPriceHistorySummary, SharedPriceHistorySummary>,
+    duration_ms: u128,
+) {
+    // Use the same allowlisted fields even when a later step fails after a commit.
+    macro_rules! report {
+        ($level:expr, $summary:ident) => {{
+            let retry_at = $summary
+                .retry_at
+                .and_then(|ts| DateTime::from_timestamp(ts, 0));
+            tracing::event!(
+                $level,
+                reason = $summary.reason,
+                requests_attempted = $summary.requests_attempted,
+                requests_succeeded = $summary.requests_succeeded,
+                history_limit_responses = $summary.history_limit_responses,
+                rows_written = $summary.rows_written,
+                retry_at_utc = retry_at.as_ref().map(tracing::field::display),
+                duration_ms,
+                "shared price history run"
+            )
+        }};
     }
-}
-
-fn log_job_failed(request: TriggerRequest, error: &str, elapsed: Duration) {
-    let run_id = transaction_sync_run_id_for_params(request.params);
-    match (request.key, run_id) {
-        (JobKey::App { job_id }, None) => tracing::error!(
-            job_id = %job_id,
-            source = %request.source,
-            error = %error,
-            duration_ms = elapsed.as_millis(),
-            "tasks: job failed"
-        ),
-        (JobKey::User { job_id, user_id }, None) => tracing::error!(
-            job_id = %job_id,
-            user_id = %user_id,
-            source = %request.source,
-            error = %error,
-            duration_ms = elapsed.as_millis(),
-            "tasks: job failed"
-        ),
-        (JobKey::App { job_id }, Some(run_id)) => tracing::error!(
-            job_id = %job_id,
-            source = %request.source,
-            run_id = %run_id,
-            error = %error,
-            duration_ms = elapsed.as_millis(),
-            "tasks: job failed"
-        ),
-        (JobKey::User { job_id, user_id }, Some(run_id)) => tracing::error!(
-            job_id = %job_id,
-            user_id = %user_id,
-            source = %request.source,
-            run_id = %run_id,
-            error = %error,
-            duration_ms = elapsed.as_millis(),
-            "tasks: job failed"
-        ),
+    match result {
+        Ok(summary) => report!(tracing::Level::INFO, summary),
+        Err(summary) => report!(tracing::Level::ERROR, summary),
     }
 }
 
 fn log_unknown_job_completion_key(key: JobKey) {
-    match key {
-        JobKey::App { job_id } => tracing::warn!(
-            job_id = %job_id,
-            "tasks: job completion received for unknown key"
-        ),
-        JobKey::User { job_id, user_id } => tracing::warn!(
-            job_id = %job_id,
-            user_id = %user_id,
-            "tasks: job completion received for unknown key"
-        ),
-    }
+    tracing::warn!(job_id = %key.job_id(), "tasks: job completion received for unknown key");
 }
 
 fn user_sync_event_senders()
@@ -1294,10 +1244,7 @@ fn user_sync_event_sender(user_id: UserId) -> Option<broadcast::Sender<Transacti
     let mut write_guard = match senders.write() {
         Ok(guard) => guard,
         Err(_) => {
-            tracing::error!(
-                user_id = %user_id,
-                "tasks: user sync event sender lock poisoned"
-            );
+            tracing::error!("tasks: user sync event sender lock poisoned");
             return None;
         }
     };
@@ -1319,7 +1266,6 @@ pub(crate) fn publish_transaction_sync_event(user_id: UserId, event: Transaction
     let run_id_display = run_id.map(|id| id.to_string()).unwrap_or_default();
     let Some(sender) = user_sync_event_sender(user_id) else {
         tracing::error!(
-            user_id = %user_id,
             event = event_name,
             run_id = %run_id_display,
             "tasks: failed to publish transaction sync event (sender unavailable)"
@@ -1330,7 +1276,6 @@ pub(crate) fn publish_transaction_sync_event(user_id: UserId, event: Transaction
     let active_receiver_count = sender.receiver_count();
     if !should_warn_transaction_sync_publish_send_failure(active_receiver_count) {
         tracing::debug!(
-            user_id = %user_id,
             event = event_name,
             run_id = %run_id_display,
             "tasks: skipped transaction sync event publish because no receivers are subscribed"
@@ -1341,30 +1286,25 @@ pub(crate) fn publish_transaction_sync_event(user_id: UserId, event: Transaction
     match sender.send(event) {
         Ok(receiver_count) => {
             tracing::debug!(
-                user_id = %user_id,
                 event = event_name,
                 run_id = %run_id_display,
                 receiver_count,
                 "tasks: published transaction sync event"
             );
         }
-        Err(err) => {
+        Err(_) => {
             let active_receiver_count = sender.receiver_count();
             if should_warn_transaction_sync_publish_send_failure(active_receiver_count) {
                 tracing::warn!(
-                    user_id = %user_id,
                     event = event_name,
                     run_id = %run_id_display,
                     active_receiver_count,
-                    error = %err,
                     "tasks: failed to publish transaction sync event"
                 );
             } else {
                 tracing::debug!(
-                    user_id = %user_id,
                     event = event_name,
                     run_id = %run_id_display,
-                    error = %err,
                     "tasks: skipped transaction sync event publish because receivers disconnected"
                 );
             }
@@ -1462,9 +1402,16 @@ pub(crate) async fn enqueue_trigger(request: TriggerRequest) -> TriggerEnqueueRe
         return TriggerEnqueueResult::RejectedShuttingDown;
     };
 
+    let Ok(lease) = ClientJobLease::for_request(request.key) else {
+        return TriggerEnqueueResult::RejectedInvalidKey;
+    };
     let (result_tx, result_rx) = oneshot::channel();
     let send_result = command_tx
-        .send(ManagerCommand::Enqueue { request, result_tx })
+        .send(ManagerCommand::Enqueue {
+            request,
+            lease,
+            result_tx,
+        })
         .await;
     if send_result.is_err() {
         return TriggerEnqueueResult::RejectedShuttingDown;
@@ -1502,6 +1449,15 @@ pub(crate) fn join_task_manager_thread() -> Result<(), &'static str> {
         handle.join().map_err(|_| "task manager thread panicked")?;
     }
     Ok(())
+}
+
+pub(crate) async fn enqueue_shared_price_history() -> TriggerEnqueueResult {
+    enqueue_trigger(TriggerRequest {
+        key: JobKey::app(JobId::SharedPriceHistory),
+        source: TriggerSource::ManualInternal,
+        params: TriggerParams::SharedPriceHistory,
+    })
+    .await
 }
 
 pub(crate) async fn enqueue_price_history_reconciliation(
@@ -1599,6 +1555,7 @@ mod tests {
         command_tx
             .send(ManagerCommand::Enqueue {
                 request,
+                lease: None,
                 result_tx: enqueue_tx,
             })
             .await
@@ -1612,7 +1569,7 @@ mod tests {
         command_tx
             .send(ManagerCommand::JobCompleted(JobCompletion {
                 request,
-                result: Err("finished".to_owned()),
+                result: Err("finished"),
                 elapsed: Duration::ZERO,
             }))
             .await
@@ -1759,6 +1716,10 @@ mod tests {
         let mut docker_jobs = HashMap::new();
         register_static_app_jobs(&mut docker_jobs, Channel::Docker, now, now_utc);
 
+        let shared = &docker_jobs[&JobKey::app(JobId::SharedPriceHistory)];
+        assert!(shared.definition.scheduled);
+        assert_eq!(shared.next_due_at, now);
+        assert_eq!(shared.definition.interval, Duration::from_secs(60));
         assert!(docker_jobs.contains_key(&JobKey::app(JobId::SessionCleanup)));
         assert!(docker_jobs.contains_key(&JobKey::app(JobId::TraceCleanup)));
         assert!(!docker_jobs.contains_key(&JobKey::app(JobId::InactiveUserCleanup)));
@@ -1863,6 +1824,20 @@ mod tests {
         );
 
         assert_eq!(state.next_due_at, now + Duration::from_secs(60));
+    }
+
+    #[test]
+    fn defer_until_retry_at_moves_next_run_to_backoff_end_only_when_later() {
+        let now = Instant::now();
+        let now_utc = DateTime::from_timestamp_millis(1_000_500).expect("valid timestamp");
+        let mut state = make_user_sync_job_state(now);
+        state.next_due_at = now + Duration::from_secs(60);
+
+        defer_until_retry_at(&mut state, 1_062, now, now_utc);
+        assert_eq!(state.next_due_at, now + Duration::from_millis(61_500));
+
+        defer_until_retry_at(&mut state, 1_010, now, now_utc);
+        assert_eq!(state.next_due_at, now + Duration::from_millis(61_500));
     }
 
     #[test]

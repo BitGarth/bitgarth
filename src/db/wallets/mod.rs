@@ -21,7 +21,7 @@ pub(crate) use errors::{
 pub(crate) use labels::{update_account_label, update_wallet_label};
 pub(crate) use loaders::{
     ManualAssetAccountRow, WalletSummaryBundle, account_exists, address_exists,
-    get_wallet_by_fingerprint, list_wallets, load_account_addresses_page,
+    get_wallet_by_fingerprint, list_wallets, load_account_addresses_page, load_held_asset_names,
     load_wallet_summary_bundle,
 };
 pub(crate) use manual_assets::add_manual_asset_account;

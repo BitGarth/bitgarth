@@ -14,6 +14,35 @@ import {
 
 const MOCK_CENTRAL_URL = "http://127.0.0.1:8082";
 
+test("CoinGecko-only manual assets require a detail lookup before adding", async ({ page }) => {
+  await registerViaUiAndExpectAuthenticated(page);
+  const assetApi = "**/_app/user/wallets/manual-assets";
+  await page.route(`${assetApi}/search`, (route) => route.fulfill({ json: {
+    results: [{
+      source: "coin_gecko_catalog", coingecko_id: "litecoin", unit_code: "LTC",
+      asset_name: "Litecoin", network_name: "Native",
+    }],
+    total_match_count: 1,
+  } }));
+  await page.route(`${assetApi}/coingecko-detail`, (route) => route.fulfill({ json: {
+    coingecko_id: "litecoin", name: "Litecoin", symbol: "ltc", suggested_unit_code: "LTC",
+    default_decimal_precision: 8, platforms: [],
+  } }));
+  await page.route(`${assetApi}/coingecko-price`, (route) => route.fulfill({ json: {
+    price: null, quote_currency: "USD",
+  } }));
+
+  await page.getByTestId("wallets-add-button").click();
+  await page.getByRole("menuitem", { name: "Manual Asset" }).click();
+  await page.getByPlaceholder("Search by name, ticker, or network…").fill("litecoin");
+  await page.getByRole("option", { name: /Litecoin/ }).click();
+  const add = page.getByRole("button", { name: "Add Manual Asset" });
+  await expect(page.getByText("To add this asset, look up its details on CoinGecko.", { exact: false })).toBeVisible();
+  await expect(add).toBeDisabled();
+  await page.getByRole("button", { name: "Look Up Details" }).click();
+  await expect(add).toBeEnabled();
+});
+
 async function assertBitcoinBalanceRows(walletCard) {
   const knownRow = walletCard
     .locator(".account-row")
@@ -156,7 +185,7 @@ test("wallets page renders actions and empty state for a new user", async ({
     "No wallets linked yet.",
   );
   await expect(page.getByTestId("wallets-empty-state-body")).toHaveText(
-    "Use the + Add button above to get started.",
+    "Add a Bitcoin xpub, an address, or a manual asset with + Add to start.",
   );
 
   assertNoBrowserDiagnostics(diagnostics);
@@ -176,8 +205,11 @@ test("free wallet account limit follows product options free tier", async ({
   await setMockCentralScenario(request, {
     productOptionsResponse: freeProductOptionsResponse(22),
   });
+  await page.route("https://atlos.io/packages/app/atlos.js", (route) =>
+    route.fulfill({ contentType: "application/javascript", body: "" }),
+  );
   await page.goto("/payments");
-  await expect(page.getByTestId("payments-tier-card-free")).toBeVisible();
+  await expect(page.getByTestId("payments-tier-card-free")).toContainText("22");
 
   const addAddressResponse = await page.request.post("/_app/user/wallets/ethereum/add", {
     data: {
@@ -191,6 +223,7 @@ test("free wallet account limit follows product options free tier", async ({
   expect(addAddressResponse.ok()).toBeTruthy();
 
   await page.goto("/wallets");
+  await expect(page.locator(".wallet-card").filter({ hasText: "E2E Free Limit Wallet" })).toBeVisible();
   await expect(page.getByText(/1 of 22 active accounts used/i)).not.toBeVisible();
 
   assertNoBrowserDiagnostics(diagnostics);

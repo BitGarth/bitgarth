@@ -17,10 +17,13 @@ pub(crate) use ledger_rebuild::{
     rebuild_account_transaction_ledger, rebuild_account_transaction_ledger_conn,
     rebuild_account_transaction_ledger_with_unknown_bitcoin_basis,
 };
-pub(crate) use page_query::load_account_transactions_pages;
+pub(crate) use page_query::{
+    AccountTransactionFlowRow, load_account_settled_transaction_flows,
+    load_account_transactions_pages,
+};
 pub(crate) use types::AccountTransactionLedgerPage;
 pub(crate) use wallet_report::{
-    HoldingsReportData, HoldingsReportWalletData, WalletReportBalanceState, WalletReportLoadError,
-    load_holdings_report, load_holdings_report_range_plan, load_wallet_report,
-    load_wallet_report_range_plan,
+    BitcoinBalanceObservation, HoldingsReportData, HoldingsReportWalletData,
+    WalletReportBalanceState, WalletReportLoadError, load_holdings_report,
+    load_holdings_report_range_plan, load_wallet_report, load_wallet_report_range_plan,
 };

@@ -157,6 +157,11 @@ fn encrypted_db_file_reopens_with_runtime_reported_compatibility() {
         .expect("encrypted envelope should expose compatibility");
 
     let conn = open_encrypted_db(&db_path, &dek, &compatibility).expect("encrypted db should open");
+    assert!(
+        rusqlite::version_number() >= 3_054_000,
+        "the linked SQLCipher engine must include the SQLite WAL fix for RUSTSEC-2026-0459, found {}",
+        rusqlite::version()
+    );
     let runtime_version: String = conn
         .query_row("PRAGMA cipher_version", [], |row| row.get(0))
         .expect("cipher version pragma should read");

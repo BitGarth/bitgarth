@@ -50,9 +50,9 @@ use super::helpers::{
     unauthorized_error, validation_error,
 };
 #[cfg(feature = "server")]
-use super::types::WalletReportAccountRow;
+use super::types::{BitcoinBalanceObservationView, WalletReportAccountRow};
 #[cfg(feature = "server")]
-use super::types::{FiatAmountView, HoldingsReportWalletRow};
+use super::types::{FiatAmountView, HoldingsReportWalletRow, HoldingsValueGapView};
 use super::types::{
     HoldingsReportResponse, WalletError, WalletReportResponse, WalletView, WalletsResponse,
 };
@@ -81,6 +81,24 @@ fn fiat_amount_view(value: rust_decimal::Decimal) -> FiatAmountView {
     FiatAmountView {
         raw_value: value.to_string(),
         formatted_value: value.normalize().to_string(),
+    }
+}
+
+#[cfg(feature = "server")]
+fn bitcoin_observation_view(
+    observation: crate::db::BitcoinBalanceObservation,
+    account_label: &str,
+) -> BitcoinBalanceObservationView {
+    let synced = crate::asset_capabilities::synced_asset_instance(
+        crate::asset_capabilities::synced_asset_instance_id(crate::wallets::SyncedAssetId::Bitcoin),
+    );
+    let precision =
+        crate::asset_capabilities::synced_asset_instance_asset_instance(synced).decimal_precision;
+    BitcoinBalanceObservationView {
+        account_label: account_label.to_owned(),
+        amount: balance_amount_view(observation.amount, precision),
+        observed_at: observation.observed_at,
+        latest_observed_at: observation.latest_observed_at,
     }
 }
 
@@ -228,7 +246,14 @@ pub(crate) async fn search_manual_asset_instances(
         require_initialized_session("wallets", &session_token, unauthorized_error, |message| {
             internal_error("require_initialized_session", message)
         })?;
-    let user_id = initialized_session.session.user_id;
+    search_manual_asset_instances_for_user(initialized_session.session.user_id, request).await
+}
+
+#[cfg(feature = "server")]
+pub(crate) async fn search_manual_asset_instances_for_user(
+    user_id: crate::models::UserId,
+    request: crate::wallets::SearchManualAssetInstancesRequest,
+) -> Result<crate::wallets::SearchManualAssetInstancesResponse, WalletError> {
     crate::services::manual_asset_discovery::refresh_coingecko_catalog_for_manual_asset_search(
         user_id,
         request.allow_coingecko_catalog_refresh,
@@ -344,7 +369,13 @@ pub(crate) async fn get_wallets() -> Result<WalletsResponse, WalletError> {
         require_initialized_session("wallets", &session_token, unauthorized_error, |message| {
             internal_error("require_initialized_session", message)
         })?;
-    let user_id = initialized_session.session.user_id;
+    get_wallets_for_user(initialized_session.session.user_id).await
+}
+
+#[cfg(feature = "server")]
+pub(crate) async fn get_wallets_for_user(
+    user_id: crate::models::UserId,
+) -> Result<WalletsResponse, WalletError> {
     tracing::debug!(user_id = %user_id, "wallets: list authorized");
 
     let summary_bundle = load_wallet_summary_bundle(user_id)
@@ -485,8 +516,24 @@ pub(crate) async fn get_wallet_report(
         require_initialized_session("wallets", &session_token, unauthorized_error, |message| {
             internal_error("require_initialized_session", message)
         })?;
-    let user_id = initialized_session.session.user_id;
+    get_wallet_report_for_user(
+        initialized_session.session.user_id,
+        wallet_id,
+        from,
+        to,
+        timezone,
+    )
+    .await
+}
 
+#[cfg(feature = "server")]
+pub(crate) async fn get_wallet_report_for_user(
+    user_id: crate::models::UserId,
+    wallet_id: crate::wallets::WalletId,
+    from: Option<ReportDateParam>,
+    to: Option<ReportDateParam>,
+    timezone: ReportTimezoneParam,
+) -> Result<WalletReportResponse, WalletError> {
     let user_timezone = timezone.into_user_timezone();
     let requested_from = from.map(ReportDateParam::into_naive_date);
     let requested_to = to.map(ReportDateParam::into_naive_date);
@@ -560,6 +607,9 @@ pub(crate) async fn get_wallet_report(
             let decimal_precision = instance.decimal_precision;
             Ok(WalletReportAccountRow {
                 account_id: row.account_id.into(),
+                last_confirmed_bitcoin: row
+                    .last_confirmed_bitcoin
+                    .map(|observation| bitcoin_observation_view(observation, &row.account_label)),
                 account_label: row.account_label,
                 catalog_asset_key: Some(crate::asset_views::CatalogAssetKey::from_trusted(
                     crate::asset_capabilities::asset_id_for_synced_asset(row.asset_id)
@@ -626,6 +676,7 @@ pub(crate) async fn get_wallet_report(
             unit_code: row.unit_code.to_string(),
             symbol: None,
             bitcoin_history_coverage: None,
+            last_confirmed_bitcoin: None,
             opening_balance_state,
             opening_balance,
             opening_balance_date: row.opening_balance_date,
@@ -660,8 +711,16 @@ pub(crate) async fn get_holdings_report(
         require_initialized_session("wallets", &session_token, unauthorized_error, |message| {
             internal_error("require_initialized_session", message)
         })?;
-    let user_id = initialized_session.session.user_id;
+    get_holdings_report_for_user(initialized_session.session.user_id, from, to, timezone).await
+}
 
+#[cfg(feature = "server")]
+pub(crate) async fn get_holdings_report_for_user(
+    user_id: crate::models::UserId,
+    from: Option<ReportDateParam>,
+    to: Option<ReportDateParam>,
+    timezone: ReportTimezoneParam,
+) -> Result<HoldingsReportResponse, WalletError> {
     let user_timezone = timezone.into_user_timezone();
     let requested_from = from.map(ReportDateParam::into_naive_date);
     let requested_to = to.map(ReportDateParam::into_naive_date);
@@ -825,6 +884,35 @@ fn holdings_wallet_boundary_value(
     sum_required_values(values)
 }
 
+/// Why a wallet's boundary value is missing: an unknown balance outranks a
+/// missing price, since adding a price would not help.
+#[cfg(feature = "server")]
+fn holdings_wallet_boundary_gap(
+    wallet_id: crate::wallets::WalletId,
+    price_rows: &[HoldingsReportPriceRow],
+    boundary: BoundaryKind,
+    prices: &HoldingsResolvedPriceMap,
+) -> Option<HoldingsValueGapView> {
+    let rows = price_rows.iter().filter(|row| row.wallet_id == wallet_id);
+    let amounts = rows.map(|row| {
+        let amount = match boundary {
+            BoundaryKind::Opening => row.opening,
+            BoundaryKind::Closing => row.closing,
+        };
+        (row, amount)
+    });
+    let mut gap = None;
+    for (row, amount) in amounts {
+        if amount.amount().is_none() {
+            return Some(HoldingsValueGapView::BalanceUnknown);
+        }
+        if amount.needs_price() && !prices.contains_key(&(row.subject.clone(), boundary)) {
+            gap = Some(HoldingsValueGapView::PriceMissing);
+        }
+    }
+    gap
+}
+
 #[cfg(feature = "server")]
 fn holdings_report_response(
     report: crate::db::HoldingsReportData,
@@ -862,10 +950,31 @@ fn holdings_report_response(
             Ok(HoldingsReportWalletRow {
                 wallet_id: wallet.wallet_id,
                 wallet_label: wallet.wallet_label,
+                last_confirmed_bitcoin: wallet
+                    .accounts
+                    .iter()
+                    .filter_map(|row| {
+                        row.last_confirmed_bitcoin.map(|observation| {
+                            bitcoin_observation_view(observation, &row.account_label)
+                        })
+                    })
+                    .collect(),
                 opening_fiat: opening_fiat.map(fiat_amount_view),
                 closing_fiat: closing_fiat.map(fiat_amount_view),
                 change_fiat,
                 change_percent,
+                opening_gap: holdings_wallet_boundary_gap(
+                    wallet.wallet_id,
+                    price_rows,
+                    BoundaryKind::Opening,
+                    &resolved_price_map,
+                ),
+                closing_gap: holdings_wallet_boundary_gap(
+                    wallet.wallet_id,
+                    price_rows,
+                    BoundaryKind::Closing,
+                    &resolved_price_map,
+                ),
             })
         })
         .collect::<Result<Vec<_>, WalletError>>()?;
@@ -892,8 +1001,14 @@ pub(crate) async fn get_account_addresses(
         require_initialized_session("wallets", &session_token, unauthorized_error, |message| {
             internal_error("require_initialized_session", message)
         })?;
-    let user_id = initialized_session.session.user_id;
+    get_account_addresses_for_user(initialized_session.session.user_id, request).await
+}
 
+#[cfg(feature = "server")]
+pub(crate) async fn get_account_addresses_for_user(
+    user_id: crate::models::UserId,
+    request: GetAccountAddressesRequest,
+) -> Result<GetAccountAddressesResponse, WalletError> {
     let validated = request.try_into_validated().map_err(validation_error)?;
 
     let wallets = list_wallets(user_id).map_err(|e| internal_error("wallets", e))?;
@@ -1289,5 +1404,45 @@ mod tests {
             "130"
         );
         assert_eq!(response.wallets[0].change_percent.as_deref(), Some("65.00"));
+        assert_eq!(response.wallets[0].opening_gap, None);
+    }
+
+    #[test]
+    fn holdings_wallet_boundary_gap_prefers_unknown_balance_over_missing_price() {
+        let wallet_id = WalletId::new();
+        let subject = |key: &str| {
+            PriceSubject::CatalogAsset(crate::asset_views::CatalogAssetKey::from_trusted(
+                key.to_string(),
+            ))
+        };
+        let row = |key: &str, amount| HoldingsReportPriceRow {
+            wallet_id,
+            subject: subject(key),
+            label: key.to_string(),
+            opening: amount,
+            closing: amount,
+        };
+        let no_prices = HoldingsResolvedPriceMap::new();
+
+        let unpriced = [row("gold", HoldingsReportBoundaryAmount::Amount(dec("1")))];
+        assert_eq!(
+            holdings_wallet_boundary_gap(wallet_id, &unpriced, BoundaryKind::Opening, &no_prices),
+            Some(HoldingsValueGapView::PriceMissing)
+        );
+
+        let mixed = [
+            row("gold", HoldingsReportBoundaryAmount::Amount(dec("1"))),
+            row("bitcoin", HoldingsReportBoundaryAmount::Unknown),
+        ];
+        assert_eq!(
+            holdings_wallet_boundary_gap(wallet_id, &mixed, BoundaryKind::Closing, &no_prices),
+            Some(HoldingsValueGapView::BalanceUnknown)
+        );
+
+        let zero = [row("gold", HoldingsReportBoundaryAmount::Zero)];
+        assert_eq!(
+            holdings_wallet_boundary_gap(wallet_id, &zero, BoundaryKind::Opening, &no_prices),
+            None
+        );
     }
 }

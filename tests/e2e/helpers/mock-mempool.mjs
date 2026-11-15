@@ -31,7 +31,7 @@ export async function startMockMempoolServer(options = {}) {
     const respond = () => {
       if (url.pathname === "/api/blocks/tip/height") {
         res.writeHead(200, { "content-type": "text/plain" });
-        res.end(String(fixture.chainTipHeight));
+        res.end(String(options.chainTipHeight ?? fixture.chainTipHeight));
         return;
       }
 

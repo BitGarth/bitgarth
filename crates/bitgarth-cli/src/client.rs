@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Read as _;
 use std::time::Duration;
@@ -5,9 +6,9 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
-use reqwest::StatusCode;
 use reqwest::blocking::Response;
 use reqwest::header::{AUTHORIZATION, HeaderValue, RETRY_AFTER};
+use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
 use url::Url;
@@ -18,7 +19,7 @@ use crate::profiles::{ProfileError, SecretClientKey, canonicalize_origin};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const PAIRING_BODY_LIMIT: usize = 64 * 1024;
-pub(crate) const BALANCES_BODY_LIMIT: usize = 8 * 1024 * 1024;
+pub(crate) const RESPONSE_BODY_LIMIT: usize = 8 * 1024 * 1024;
 const MINIMUM_POLL_DELAY: Duration = Duration::from_secs(5);
 const VERIFIER_DOMAIN: &[u8] = b"bitgarth-client-key-verifier-v1\0";
 
@@ -111,12 +112,13 @@ impl BitGarthClient {
         &self,
         profile_name: &str,
         verifier: &str,
+        permission: &str,
     ) -> Result<PairingStartResponse, ClientError> {
         let url = self.origin.endpoint(&["api", "v1", "pairings"])?;
         let request = PairingStartRequest {
             client_name: profile_name,
             key_verifier: verifier,
-            permissions: ["balances_read"],
+            permissions: [permission],
         };
         let response = self
             .client
@@ -136,6 +138,7 @@ impl BitGarthClient {
         &self,
         pairing_id: &str,
         client_key: &SecretClientKey,
+        permission: &str,
     ) -> Result<PairingClaim, ClientError> {
         let url = self
             .origin
@@ -161,7 +164,7 @@ impl BitGarthClient {
                     remote_user_id,
                     permissions,
                 },
-            ) if !remote_user_id.is_empty() && permissions.as_slice() == ["balances_read"] => {
+            ) if !remote_user_id.is_empty() && permissions.as_slice() == [permission] => {
                 Ok(PairingClaim::Active { remote_user_id })
             }
             _ => Err(ClientError::InvalidResponse(
@@ -170,28 +173,40 @@ impl BitGarthClient {
         }
     }
 
-    pub(crate) fn wallet_balances(
+    /// Send an authenticated `/api/v1` request and decode the JSON reply.
+    /// `path` is relative to `/api/v1/` and its segments are percent-encoded.
+    pub(crate) fn request(
         &self,
         client_key: &SecretClientKey,
-    ) -> Result<crate::output::WalletBalances, ClientError> {
-        let url = self.origin.endpoint(&["api", "v1", "wallet-balances"])?;
-        let response = self
+        method: Method,
+        path: &[&str],
+        query: &[(&str, String)],
+        body: Option<&serde_json::Value>,
+    ) -> Result<serde_json::Value, ClientError> {
+        let mut segments = vec!["api", "v1"];
+        segments.extend_from_slice(path);
+        let mut url = self.origin.endpoint(&segments)?;
+        if !query.is_empty() {
+            url.query_pairs_mut()
+                .extend_pairs(query.iter().map(|(name, value)| (*name, value.as_str())));
+        }
+        let mut request = self
             .client
-            .get(url)
-            .header(AUTHORIZATION, authorization_header(client_key)?)
+            .request(method, url)
+            .header(AUTHORIZATION, authorization_header(client_key)?);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request
             .send()
             .map_err(|_| ClientError::Transport(self.origin.url().to_string()))?;
-        match response.status() {
-            StatusCode::UNAUTHORIZED => return Err(ClientError::BalancesUnauthorized),
-            StatusCode::FORBIDDEN => return Err(ClientError::BalancesForbidden),
-            _ => {}
-        }
-        let balances: crate::output::WalletBalances =
-            decode_success(response, BALANCES_BODY_LIMIT, self.origin.url())?;
-        balances
-            .validate()
-            .map_err(|_| ClientError::InvalidResponse("incompatible wallet balance response"))?;
-        Ok(balances)
+        // A wallet archive contains up to 10 MiB before base64 and summary fields.
+        let limit = if path == ["exports", "wallet-data"] {
+            14 * 1024 * 1024
+        } else {
+            RESPONSE_BODY_LIMIT
+        };
+        decode_success(response, limit, self.origin.url())
     }
 }
 
@@ -298,6 +313,8 @@ enum PairingClaimResponse {
 pub(crate) struct PublicErrorEnvelope {
     code: String,
     message: String,
+    #[serde(default)]
+    field_errors: Option<BTreeMap<String, Vec<String>>>,
 }
 
 impl PublicErrorEnvelope {
@@ -312,6 +329,20 @@ impl PublicErrorEnvelope {
             && self.message.len() <= 1024
             && !self.message.chars().any(char::is_control)
     }
+
+    /// Field-level validation messages, such as `label: must not be empty`.
+    pub(crate) fn field_messages(&self) -> Vec<String> {
+        self.field_errors
+            .iter()
+            .flatten()
+            .flat_map(|(field, messages)| {
+                messages
+                    .iter()
+                    .filter(|message| !message.chars().any(char::is_control))
+                    .map(move |message| format!("{field}: {message}"))
+            })
+            .collect()
+    }
 }
 
 fn decode_success<T: DeserializeOwned>(
@@ -325,6 +356,9 @@ fn decode_success<T: DeserializeOwned>(
         let public = serde_json::from_slice::<PublicErrorEnvelope>(&bytes)
             .ok()
             .filter(PublicErrorEnvelope::is_safe);
+        if status == StatusCode::UNAUTHORIZED {
+            return Err(ClientError::Unauthorized);
+        }
         return Err(ClientError::Http {
             origin: origin.to_string(),
             status,
@@ -340,7 +374,6 @@ fn read_limited(
     limit: usize,
     origin: &Url,
 ) -> Result<Vec<u8>, ClientError> {
-    let limit = limit.min(BALANCES_BODY_LIMIT);
     if response
         .content_length()
         .is_some_and(|length| length > limit as u64)
@@ -376,6 +409,27 @@ fn parse_retry_after(value: Option<&HeaderValue>, now: DateTime<Utc>) -> Duratio
         .unwrap_or(MINIMUM_POLL_DELAY)
 }
 
+impl ClientError {
+    /// HTTP status of a server-side rejection, if this was one.
+    pub(crate) fn status(&self) -> Option<u16> {
+        match self {
+            Self::Http { status, .. } => Some(status.as_u16()),
+            Self::Unauthorized => Some(401),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn field_messages(&self) -> Vec<String> {
+        match self {
+            Self::Http {
+                public: Some(public),
+                ..
+            } => public.field_messages(),
+            _ => Vec::new(),
+        }
+    }
+}
+
 pub(crate) enum ClientError {
     Profile(ProfileError),
     InvalidOrigin(&'static str),
@@ -393,9 +447,7 @@ pub(crate) enum ClientError {
         returned: String,
     },
     RandomnessUnavailable,
-    PairingExpired,
-    BalancesUnauthorized,
-    BalancesForbidden,
+    Unauthorized,
 }
 
 impl fmt::Display for ClientError {
@@ -414,13 +466,10 @@ impl fmt::Display for ClientError {
                 origin,
                 status,
                 public,
-            } => {
-                write!(formatter, "request to {origin} failed with HTTP {status}")?;
-                if let Some(public) = public {
-                    write!(formatter, ": {}: {}", public.code, public.message)?;
-                }
-                Ok(())
-            }
+            } => match public {
+                Some(public) => formatter.write_str(&public.message),
+                None => write!(formatter, "request to {origin} failed with HTTP {status}"),
+            },
             Self::PairingUnsupported(origin) => {
                 write!(formatter, "server {origin} does not support CLI pairing")
             }
@@ -428,12 +477,8 @@ impl fmt::Display for ClientError {
                 write!(formatter, "response from {origin} exceeded the size limit")
             }
             Self::RandomnessUnavailable => formatter.write_str("OS randomness is unavailable"),
-            Self::PairingExpired => formatter.write_str("pairing request expired before approval"),
-            Self::BalancesUnauthorized => formatter.write_str(
-                "this profile's Client Key was rejected; pair the profile again",
-            ),
-            Self::BalancesForbidden => formatter.write_str(
-                "this profile lacks balances_read permission or was revoked; review paired clients or pair again",
+            Self::Unauthorized => formatter.write_str(
+                "the server rejected this profile's Client Key; it was revoked, expired, or the account was deleted",
             ),
         }
     }
@@ -573,7 +618,11 @@ mod tests {
         let client = BitGarthClient::new(origin);
         assert!(client.is_ok());
         let Ok(client) = client else { return };
-        let result = client.start_pairing("profile", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        let result = client.start_pairing(
+            "profile",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "full",
+        );
         assert!(matches!(result, Err(ClientError::Http { status, .. }) if status.as_u16() == 302));
         assert!(handle.join().is_ok());
         assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -594,7 +643,8 @@ mod tests {
         assert!(client.is_ok());
         let Ok(client) = client else { return };
         let key = SecretClientKey::from_bytes(&[0; 32]);
-        let claim = client.claim_pairing("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE", &key);
+        let claim =
+            client.claim_pairing("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE", &key, "full");
         assert!(
             matches!(claim, Ok(PairingClaim::Pending { retry_after }) if retry_after.as_secs() == 17)
         );
@@ -647,7 +697,11 @@ mod tests {
         let client = BitGarthClient::new(parsed);
         assert!(client.is_ok());
         let Ok(client) = client else { return };
-        let result = client.start_pairing("profile", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        let result = client.start_pairing(
+            "profile",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "full",
+        );
         assert!(matches!(result, Err(ClientError::PairingUnsupported(_))));
         assert!(server.join().is_ok());
     }
@@ -674,8 +728,11 @@ mod tests {
         let client = BitGarthClient::with_test_root(parsed, &certificate);
         assert!(client.is_ok());
         let Ok(client) = client else { return };
-        let started =
-            client.start_pairing("profile", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        let started = client.start_pairing(
+            "profile",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "full",
+        );
         assert!(
             started.is_ok(),
             "{}",
@@ -694,8 +751,11 @@ mod tests {
         let client = BitGarthClient::new(parsed);
         assert!(client.is_ok());
         let Ok(client) = client else { return };
-        let failure =
-            client.start_pairing("profile", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        let failure = client.start_pairing(
+            "profile",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "full",
+        );
         assert!(matches!(failure, Err(ClientError::Transport(_))));
         assert!(untrusted_server.join().is_ok());
     }
@@ -712,7 +772,11 @@ mod tests {
         let client = BitGarthClient::with_test_root(parsed, &certificate);
         assert!(client.is_ok());
         let Ok(client) = client else { return };
-        let result = client.start_pairing("profile", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        let result = client.start_pairing(
+            "profile",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "full",
+        );
         assert!(
             matches!(&result, Err(ClientError::Http { status, .. }) if status.as_u16() == 302),
             "{}",
@@ -740,7 +804,7 @@ mod tests {
         assert!(client.is_ok());
         let Ok(client) = client else { return };
         let key = SecretClientKey::from_bytes(&[0; 32]);
-        let result = client.claim_pairing("pairing", &key);
+        let result = client.claim_pairing("pairing", &key, "full");
         assert!(result.is_err());
         let Err(error) = result else { return };
         let diagnostic = error.to_string();
@@ -751,74 +815,102 @@ mod tests {
     }
 
     #[test]
-    fn wallet_balances_consumes_shared_fixture() {
-        let body = include_str!("../../../tests/fixtures/client_api/wallet-balances.json");
+    fn request_sends_key_path_query_and_body_and_decodes_json() {
+        let body = r#"{"ok":true}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{body}",
             body.len()
         );
         let (origin, _, server) = http_server([response]);
-        let parsed = ServerOrigin::parse(&origin, true);
-        assert!(parsed.is_ok());
-        let Ok(parsed) = parsed else { return };
-        let client = BitGarthClient::new(parsed);
-        assert!(client.is_ok());
-        let Ok(client) = client else { return };
+        let Ok(parsed) = ServerOrigin::parse(&origin, true) else {
+            return;
+        };
+        let Ok(client) = BitGarthClient::new(parsed) else {
+            return;
+        };
         let key = SecretClientKey::from_bytes(&[0; 32]);
-        let balances = client.wallet_balances(&key);
-        assert!(balances.is_ok());
-        let Ok(balances) = balances else { return };
-        assert!(balances.render().is_ok());
+        let result = client.request(
+            &key,
+            reqwest::Method::PATCH,
+            &["wallets", "a b"],
+            &[("from", "2026-01-01".to_owned())],
+            Some(&serde_json::json!({"label": "Cold"})),
+        );
+        assert_eq!(result.ok(), Some(serde_json::json!({"ok": true})));
         assert!(server.join().is_ok());
     }
 
     #[test]
-    fn wallet_auth_errors_ignore_response_content() {
-        for (status, expected) in [
-            (401, "Client Key was rejected"),
-            (403, "lacks balances_read permission"),
+    fn request_errors_surface_safe_server_messages_but_never_raw_bodies() {
+        let validation = r#"{"code":"validation","message":"Validation error","field_errors":{"label":["Label is required"]}}"#;
+        for (status, body, expected, hidden) in [
+            (
+                401,
+                "Authorization secret-private-response",
+                "rejected this profile's Client Key",
+                "secret-private-response",
+            ),
+            (
+                403,
+                r#"{"code":"forbidden","message":"This paired client does not have full permission."}"#,
+                "does not have full permission",
+                "Authorization",
+            ),
+            (422, validation, "Validation error", "Authorization"),
+            (
+                500,
+                "raw-private-body",
+                "failed with HTTP 500",
+                "raw-private-body",
+            ),
         ] {
-            let body = "Authorization secret-private-response";
             let response = format!(
                 "HTTP/1.1 {status} Error\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             );
             let (origin, _, server) = http_server([response]);
-            let parsed = ServerOrigin::parse(&origin, true);
-            assert!(parsed.is_ok());
-            let Ok(parsed) = parsed else { continue };
-            let client = BitGarthClient::new(parsed);
-            assert!(client.is_ok());
-            let Ok(client) = client else { continue };
+            let Ok(parsed) = ServerOrigin::parse(&origin, true) else {
+                continue;
+            };
+            let Ok(client) = BitGarthClient::new(parsed) else {
+                continue;
+            };
             let key = SecretClientKey::from_bytes(&[0; 32]);
-            let result = client.wallet_balances(&key);
-            assert!(result.is_err());
-            let Err(error) = result else { continue };
+            let result = client.request(&key, reqwest::Method::GET, &["me"], &[], None);
+            let Err(error) = result else {
+                continue;
+            };
             let diagnostic = error.to_string();
-            assert!(diagnostic.contains(expected));
+            assert!(diagnostic.contains(expected), "{diagnostic}");
+            assert!(!diagnostic.contains(hidden));
             assert!(!diagnostic.contains(key.as_str()));
-            assert!(!diagnostic.contains("Authorization"));
-            assert!(!diagnostic.contains("secret-private-response"));
+            if status == 422 {
+                assert!(matches!(
+                    &error,
+                    ClientError::Http { public: Some(public), .. }
+                        if public.field_messages() == ["label: Label is required"]
+                ));
+            }
             assert!(server.join().is_ok());
         }
     }
 
     #[test]
-    fn wallet_response_is_bounded_to_eight_mebibytes() {
+    fn responses_are_bounded_to_eight_mebibytes() {
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
-            super::BALANCES_BODY_LIMIT + 1
+            super::RESPONSE_BODY_LIMIT + 1
         );
         let (origin, _, server) = http_server([response]);
-        let parsed = ServerOrigin::parse(&origin, true);
-        assert!(parsed.is_ok());
-        let Ok(parsed) = parsed else { return };
-        let client = BitGarthClient::new(parsed);
-        assert!(client.is_ok());
-        let Ok(client) = client else { return };
+        let Ok(parsed) = ServerOrigin::parse(&origin, true) else {
+            return;
+        };
+        let Ok(client) = BitGarthClient::new(parsed) else {
+            return;
+        };
         let key = SecretClientKey::from_bytes(&[0; 32]);
         assert!(matches!(
-            client.wallet_balances(&key),
+            client.request(&key, reqwest::Method::GET, &["wallets"], &[], None),
             Err(ClientError::ResponseTooLarge(_))
         ));
         assert!(server.join().is_ok());

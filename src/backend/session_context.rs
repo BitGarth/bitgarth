@@ -40,13 +40,8 @@ fn invalidate_failed_session_best_effort(
     session_id: SessionId,
     user_id: UserId,
 ) {
-    if let Err(error) = session::invalidate_session(session_id, user_id) {
-        tracing::error!(
-            session_id = %session_id,
-            user_id = %user_id,
-            error = %error,
-            "{context}: failed to invalidate unrecoverable session"
-        );
+    if session::invalidate_session(session_id, user_id).is_err() {
+        tracing::error!("{context}: failed to invalidate unrecoverable session");
     }
 }
 
@@ -67,13 +62,7 @@ pub(crate) fn require_initialized_session<E>(
         }
     };
 
-    tracing::debug!(
-        user_id = %lookup_result.user_id,
-        session_id = %lookup_result.session_id,
-        expires_at = %lookup_result.expires_at,
-        context,
-        "session validated"
-    );
+    tracing::debug!(context, "session validated");
 
     let request_lease = lifecycle::acquire_session_request(lookup_result.user_id)
         .map_err(|error| internal_error(error.to_string()))?
@@ -108,11 +97,8 @@ pub(crate) fn require_initialized_session<E>(
                     lookup_result.session_id,
                     lookup_result.user_id,
                 )
-                .map_err(|e| {
+                .map_err(|_| {
                     tracing::warn!(
-                        user_id = %lookup_result.user_id,
-                        session_id = %lookup_result.session_id,
-                        error = %e,
                         "{context}: session wrapper unwrap failed, invalidating session"
                     );
                     invalidate_failed_session_best_effort(
@@ -143,8 +129,6 @@ pub(crate) fn require_initialized_session<E>(
             #[cfg(all(not(test), not(feature = "dev-config")))]
             {
                 tracing::error!(
-                    user_id = %lookup_result.user_id,
-                    session_id = %lookup_result.session_id,
                     "{context}: session row has NULL wrapper fields in production build"
                 );
                 return Err(internal_error(
@@ -154,8 +138,6 @@ pub(crate) fn require_initialized_session<E>(
             #[cfg(all(test, not(feature = "db-tests")))]
             {
                 tracing::error!(
-                    user_id = %lookup_result.user_id,
-                    session_id = %lookup_result.session_id,
                     "{context}: session row has NULL wrapper fields without db-tests feature"
                 );
                 return Err(internal_error(
@@ -164,11 +146,7 @@ pub(crate) fn require_initialized_session<E>(
             }
         }
         _ => {
-            tracing::error!(
-                user_id = %lookup_result.user_id,
-                session_id = %lookup_result.session_id,
-                "{context}: session row has inconsistent wrapper fields"
-            );
+            tracing::error!("{context}: session row has inconsistent wrapper fields");
             return Err(internal_error(
                 "Session row has inconsistent wrapper fields".to_string(),
             ));

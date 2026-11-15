@@ -13,13 +13,14 @@ use crate::models::{
 };
 use crate::settings::{SettingsState, common_currencies, defaults_for_locale};
 use crate::timezone::format_timestamp;
+use crate::timezone::timezone_choices;
 use crate::version;
 use crate::{AuthState, AuthStatus, BannerMessage, BannerState};
 use chrono::{DateTime, Utc};
-use chrono_tz::TZ_VARIANTS;
 use dioxus::logger::tracing;
 use dioxus::prelude::*;
 
+use super::coingecko_price_control::SYNC_HELP;
 use super::form_helpers::{
     begin_submit, field_errors_or_empty, finish_submit, is_form_field_error,
     primary_field_or_fallback,
@@ -131,11 +132,23 @@ pub fn Settings(section: Option<String>) -> Element {
     let mut update_check_status = use_signal(|| None::<String>);
     let mut update_check_error = use_signal(|| None::<String>);
     let mut update_check_enabled_override = use_signal(|| None::<bool>);
+    let browser_timezone = crate::timezone::use_timezone();
 
     let mut date_time_format = settings_state.date_time_format;
     let mut number_format = settings_state.number_format;
     let mut currency = settings_state.currency;
     let mut timezone = settings_state.timezone;
+    let mut timezone_search = use_signal(String::new);
+    let matching_timezones = use_memo(move || {
+        let query = timezone_search
+            .read()
+            .trim()
+            .replace(' ', "_")
+            .to_ascii_lowercase();
+        timezone_choices(timezone().into())
+            .filter(|tz| query.is_empty() || tz.name().to_ascii_lowercase().contains(&query))
+            .collect::<Vec<_>>()
+    });
     let mut mempool_base_url = settings_state.mempool_base_url;
     let mut etherscan_base_url = settings_state.etherscan_base_url;
     let mut price_fetching_enabled = settings_state.price_fetching_enabled;
@@ -329,10 +342,21 @@ pub fn Settings(section: Option<String>) -> Element {
     let update_latest_label = match update_status_snapshot.as_ref() {
         Some(status) if status.available && update_latest_version.is_some() => "Update available:",
         Some(status) if status.available => "Update available.",
-        Some(_) if update_latest_version.is_some() => "Latest seen:",
-        Some(_) => "Latest seen: Not checked yet",
-        None => "Latest seen: Loading...",
+        Some(_) if update_latest_version.is_some() => "You're up to date.",
+        Some(_) => "Not checked yet",
+        None => "Loading...",
     };
+    // Only link the latest version when it is newer; an older stale value reads
+    // as if the installed version were ahead of the latest release.
+    let update_latest_version = update_latest_version.filter(|_| {
+        update_status_snapshot
+            .as_ref()
+            .is_some_and(|status| status.available)
+    });
+    let build_id = version::version()
+        .strip_prefix(update_current_version.as_str())
+        .and_then(|rest| rest.strip_prefix('-'))
+        .map(str::to_string);
     let update_last_checked_label = update_time_label(
         update_status_snapshot
             .as_ref()
@@ -869,6 +893,18 @@ pub fn Settings(section: Option<String>) -> Element {
         .unwrap_or_default();
     let has_confirm_pw_error = !confirm_pw_errors.is_empty();
 
+    let mut apply_timezone = move |tz_value: UserTimezone| {
+        timezone_search.set(String::new());
+        timezone.set(tz_value);
+        if matches!(&*auth_state.read(), AuthStatus::Authenticated(_)) {
+            let mut guard = guard;
+            spawn(async move {
+                guard.check(save_timezone(tz_value).await);
+                *regional_save_tick.write() += 1;
+            });
+        }
+    };
+
     rsx! {
         div { class: "page-container",
             if is_logged_in {
@@ -918,37 +954,62 @@ pub fn Settings(section: Option<String>) -> Element {
                             }
                             div { class: "card-body",
                                 div { class: "form-group",
-                                    label { class: "form-label", "Timezone" }
-                                    select {
-                                        class: "selector",
-                                        id: "timezone-selector",
-                                        "aria-label": "Select timezone",
-                                        value: "{timezone.read().name()}",
-                                        onmounted: move |e| async move { let _ = e.set_focus(true).await; },
-                                        onchange: move |evt| {
-                                            if let Ok(tz) = evt.value().parse::<chrono_tz::Tz>() {
-                                                let tz_value = UserTimezone(tz);
-                                                timezone.set(tz_value);
-                                                if matches!(&*auth_state.read(), AuthStatus::Authenticated(_)) {
-                                                    let mut guard = guard;
-                                                    spawn(async move {
-                                                        guard.check(save_timezone(tz_value).await);
-                                                        *regional_save_tick.write() += 1;
-                                                    });
-                                                }
-                                            }
-                                        },
-                                        for tz in TZ_VARIANTS.iter() {
-                                            option {
-                                                value: "{UserTimezone(*tz).name()}",
-                                                selected: timezone() == UserTimezone(*tz),
-                                                "{UserTimezone(*tz).name()}"
+                                    label { class: "form-label", r#for: "timezone-search", "Search timezones" }
+                                    input {
+                                        id: "timezone-search",
+                                        class: "form-input",
+                                        r#type: "search",
+                                        placeholder: "City or region",
+                                        aria_controls: "timezone-selector",
+                                        value: "{timezone_search}",
+                                        oninput: move |evt| timezone_search.set(evt.value()),
+                                    }
+                                    div { role: "status", class: "form-help-text",
+                                        if !timezone_search.read().trim().is_empty() {
+                                            match matching_timezones.read().len() {
+                                                0 => rsx! { "No matching timezones." },
+                                                1 => rsx! { "1 matching timezone." },
+                                                count => rsx! { "{count} matching timezones." },
                                             }
                                         }
                                     }
                                 }
                                 div { class: "form-group",
-                                    label { class: "form-label", "Date & Time Format" }
+                                    label { class: "form-label", r#for: "timezone-selector", "Timezone" }
+                                    select {
+                                        class: "selector",
+                                        id: "timezone-selector",
+                                        "aria-label": "Select timezone",
+                                        value: "{timezone.read().name()}",
+                                        onchange: move |evt| {
+                                            if let Ok(tz) = evt.value().parse::<chrono_tz::Tz>() {
+                                                apply_timezone(UserTimezone(tz));
+                                            }
+                                        },
+                                        option {
+                                            value: "{timezone.read().name()}",
+                                            selected: true,
+                                            "{timezone.read().name()}"
+                                        }
+                                        for tz in matching_timezones.read().iter().copied().filter(|tz| *tz != timezone().0) {
+                                            option {
+                                                key: "{tz.name()}",
+                                                value: "{tz.name()}",
+                                                "{tz.name()}"
+                                            }
+                                        }
+                                    }
+                                    if let Some(detected) = browser_timezone().filter(|tz| UserTimezone(*tz) != timezone()) {
+                                        button {
+                                            class: "btn btn-secondary mt-sm",
+                                            r#type: "button",
+                                            onclick: move |_| apply_timezone(UserTimezone(detected)),
+                                            "Use browser timezone ({detected.name()})"
+                                        }
+                                    }
+                                }
+                                div { class: "form-group",
+                                    label { class: "form-label", "Date & time format" }
                                     select {
                                         class: "selector",
                                         id: "date-time-format-selector",
@@ -1012,7 +1073,7 @@ pub fn Settings(section: Option<String>) -> Element {
                                     }
                                 }
                                 div { class: "form-group",
-                                    label { class: "form-label", "Default Currency" }
+                                    label { class: "form-label", "Default currency" }
                                     select {
                                         class: "selector",
                                         id: "currency-selector",
@@ -1083,7 +1144,7 @@ pub fn Settings(section: Option<String>) -> Element {
                         PairedClients {}
                         div { class: "card",
                             div { class: "card-header",
-                                h3 { class: "card-title", "Change Password" }
+                                h3 { class: "card-title", "Change password" }
                             }
                             div { class: "card-body",
                                 form {
@@ -1098,7 +1159,6 @@ pub fn Settings(section: Option<String>) -> Element {
                                             placeholder: "Enter your current password".to_string(),
                                             autocomplete: "current-password",
                                             has_error: has_old_pw_error,
-                                            autofocus: true,
                                             on_change: move |_| {
                                                 change_pw_field_errors.set(FieldErrors::new());
                                                 change_pw_success.set(None);
@@ -1155,7 +1215,7 @@ pub fn Settings(section: Option<String>) -> Element {
                                             if change_pw_saving() {
                                                 "Changing password..."
                                             } else {
-                                                "Change Password"
+                                                "Change password"
                                             }
                                         }
                                     }
@@ -1172,7 +1232,7 @@ pub fn Settings(section: Option<String>) -> Element {
                     div { class: "settings-section",
                         div { class: "card",
                             div { class: "card-header",
-                                h3 { class: "card-title", "Market Prices" }
+                                h3 { class: "card-title", "CoinGecko prices" }
                             }
                             div { class: "card-body",
                                 div { class: "form-group",
@@ -1184,10 +1244,10 @@ pub fn Settings(section: Option<String>) -> Element {
                                             disabled: price_fetching_saving(),
                                             onchange: toggle_price_fetching,
                                         }
-                                        " Fetch current prices from CoinGecko"
+                                        " Fetch current prices and sync daily CoinGecko history"
                                     }
                                     p { class: "form-help-text",
-                                        "When enabled, BitGarth requests prices for your assets and selected currency."
+                                        "{SYNC_HELP}"
                                     }
                                 }
                                 if let Some(status) = price_fetching_status() {
@@ -1230,7 +1290,7 @@ pub fn Settings(section: Option<String>) -> Element {
                                         r#type: "button",
                                         disabled: coingecko_api_key_saving(),
                                         onclick: save_coingecko_key,
-                                        "Save API Key"
+                                        "Save API key"
                                     }
                                     button {
                                         class: "btn btn-secondary",
@@ -1287,7 +1347,7 @@ pub fn Settings(section: Option<String>) -> Element {
                                         r#type: "button",
                                         disabled: mempool_base_url_saving(),
                                         onclick: clear_mempool_override,
-                                        "Use Default (mempool.space)"
+                                        "Use default (mempool.space)"
                                     }
                                 }
                                 if let Some(status) = mempool_base_url_status() {
@@ -1343,7 +1403,7 @@ pub fn Settings(section: Option<String>) -> Element {
                                         r#type: "button",
                                         disabled: etherscan_base_url_saving(),
                                         onclick: clear_etherscan_override,
-                                        "Use Default (etherscan.io)"
+                                        "Use default (etherscan.io)"
                                     }
                                 }
                                 if let Some(status) = etherscan_base_url_status() {
@@ -1392,7 +1452,7 @@ pub fn Settings(section: Option<String>) -> Element {
                                         r#type: "button",
                                         disabled: etherscan_api_key_saving(),
                                         onclick: save_etherscan_key,
-                                        "Save API Key"
+                                        "Save API key"
                                     }
                                     button {
                                         class: "btn btn-secondary",
@@ -1415,19 +1475,6 @@ pub fn Settings(section: Option<String>) -> Element {
 
                 if active_section() == "system-info" {
                     div { class: "settings-section",
-                        div { class: "card",
-                            div { class: "card-header",
-                                h3 { class: "card-title", "Application" }
-                            }
-                            div { class: "card-body",
-                                div { class: "form-group",
-                                    label { class: "form-label", "Version" }
-                                    p { class: "form-value", {version::version()} }
-                                }
-                            }
-                        }
-                    }
-                    div { class: "settings-section",
                         div { class: "card settings-card",
                             div { class: "card-header",
                                 h3 { class: "card-title", "Software updates" }
@@ -1443,6 +1490,9 @@ pub fn Settings(section: Option<String>) -> Element {
                                             title: "Release notes for {update_current_version} (opens in a new tab)",
                                             "{update_current_version}"
                                             ExternalLinkIcon {}
+                                        }
+                                        if let Some(build_id) = build_id {
+                                            span { class: "muted", " (build {build_id})" }
                                         }
                                     }
                                 }

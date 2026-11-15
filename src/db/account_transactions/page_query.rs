@@ -418,3 +418,114 @@ pub(crate) fn load_account_transactions_pages(
         })
     })
 }
+
+/// One settled (confirmed or failed) ledger row, reduced to what a money-flow
+/// summary needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AccountTransactionFlowRow {
+    pub(crate) status: crate::transactions::ChainTransactionStatus,
+    pub(crate) direction: crate::transactions::AccountTransactionDirection,
+    pub(crate) occurred_at: chrono::DateTime<chrono::Utc>,
+    pub(crate) value: crate::amounts::UnsignedAmount,
+    pub(crate) fee: Option<crate::amounts::UnsignedAmount>,
+    pub(crate) closing_balance: Option<crate::amounts::UnsignedAmount>,
+    /// The closing balance of the settled row before this one in ledger order,
+    /// so a self-transfer's net effect can be read from the two balances.
+    pub(crate) previous_closing_balance: Option<crate::amounts::UnsignedAmount>,
+}
+
+/// Every settled row in the date range, regardless of the status filter.
+pub(crate) fn load_account_settled_transaction_flows(
+    user_id: UserId,
+    account_id: DigitalAssetAccountId,
+    filters: &TransactionFilters,
+) -> Result<Vec<AccountTransactionFlowRow>, DbError> {
+    with_user_db(user_id, |conn| {
+        let mut query = "SELECT status, tx_type, occurred_at,
+                    value_amount_hi, value_amount_lo, fee_amount_hi, fee_amount_lo,
+                    closing_balance_hi, closing_balance_lo, previous_hi, previous_lo
+                 FROM (
+                    SELECT *,
+                        LAG(closing_balance_hi) OVER ledger_order AS previous_hi,
+                        LAG(closing_balance_lo) OVER ledger_order AS previous_lo
+                    FROM account_transaction_ledger
+                    WHERE account_id = ?1
+                      AND status IN ('confirmed', 'failed')
+                    WINDOW ledger_order AS (ORDER BY
+                        occurred_at ASC,
+                        COALESCE(block_height, 9223372036854775807) ASC,
+                        COALESCE(nonce, 9223372036854775807) ASC,
+                        COALESCE(min_transfer_index, 9223372036854775807) ASC,
+                        tx_hash ASC)
+                 )
+                 WHERE 1 = 1"
+            .to_string();
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(account_id.to_string())];
+        if let Some(from_date) = &filters.from_date {
+            let idx = param_values.len() + 1;
+            query.push_str(&format!("\n                   AND occurred_at >= ?{idx}"));
+            param_values.push(Box::new(from_date.to_rfc3339()));
+        }
+        if let Some(to_date) = &filters.to_date {
+            let idx = param_values.len() + 1;
+            query.push_str(&format!("\n                   AND occurred_at <= ?{idx}"));
+            param_values.push(Box::new(to_date.to_rfc3339()));
+        }
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+
+        let mut stmt = conn
+            .prepare(&query)
+            .map_err(|err| DbError::new(format!("Failed to prepare settled flow query: {err}")))?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                Ok((
+                    (
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ),
+                    (row.get::<_, i64>(3)?, row.get::<_, i64>(4)?),
+                    (row.get::<_, Option<i64>>(5)?, row.get::<_, Option<i64>>(6)?),
+                    (row.get::<_, Option<i64>>(7)?, row.get::<_, Option<i64>>(8)?),
+                    (
+                        row.get::<_, Option<i64>>(9)?,
+                        row.get::<_, Option<i64>>(10)?,
+                    ),
+                ))
+            })
+            .map_err(|err| DbError::new(format!("Failed to query settled flows: {err}")))?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            let (
+                (status_raw, tx_type_raw, occurred_at_raw),
+                (value_hi, value_lo),
+                (fee_hi, fee_lo),
+                (closing_hi, closing_lo),
+                (previous_hi, previous_lo),
+            ) =
+                row.map_err(|err| DbError::new(format!("Failed to map settled flow row: {err}")))?;
+            result.push(AccountTransactionFlowRow {
+                status: parse_chain_status(&status_raw)?,
+                direction: parse_direction(&tx_type_raw)?,
+                occurred_at: parse_datetime(&occurred_at_raw)
+                    .map_err(|err| DbError::new(format!("Invalid occurred_at in DB: {err}")))?,
+                value: parse_split_amount(value_hi, value_lo, "value_amount")?,
+                fee: parse_optional_split_amount(fee_hi, fee_lo, "fee_amount")?,
+                closing_balance: parse_optional_split_amount(
+                    closing_hi,
+                    closing_lo,
+                    "closing_balance",
+                )?,
+                previous_closing_balance: parse_optional_split_amount(
+                    previous_hi,
+                    previous_lo,
+                    "previous_closing_balance",
+                )?,
+            });
+        }
+        Ok(result)
+    })
+}

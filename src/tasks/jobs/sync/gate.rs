@@ -459,7 +459,7 @@ pub(super) fn sync_single_address_with_controls(
                 )
                 .is_ok_and(|count| !transaction_fetch_policy.permits_transaction_page(count))
             {
-                tracing::info!(
+                tracing::debug!(
                     user_id = %run.user_id,
                     run_id = %run.run_id,
                     account_id = %account_id,
@@ -497,13 +497,7 @@ pub(super) fn sync_single_address_with_controls(
             Ok((false, true))
         }
         Err(err) => {
-            tracing::error!(
-                user_id = %run.user_id,
-                run_id = %run.run_id,
-                address_id = %address.address_id,
-                error = %err,
-                "transactions sync: per-address sync failed, continuing"
-            );
+            tracing::error!(target: "wallet_sync", run_id = %run.run_id, failure_kind = err.log_category(), "transactions sync: work item failed");
             accumulator.add_failed(
                 &err,
                 matches!(

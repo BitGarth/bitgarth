@@ -711,6 +711,27 @@ pub(crate) fn load_all_accounts_for_export(
     })
 }
 
+const EXPORT_TRANSACTION_SOURCE: &str = "FROM account_transaction_ledger atl
+JOIN digital_asset_accounts a
+  ON a.id = atl.account_id
+WHERE atl.status = 'confirmed'
+   OR (atl.status = 'failed'
+       AND atl.balance_delta_negative = 1
+       AND (atl.balance_delta_hi != 0 OR atl.balance_delta_lo != 0)
+       AND atl.fee_amount_hi IS NOT NULL AND atl.fee_amount_lo IS NOT NULL
+       AND (atl.fee_amount_hi != 0 OR atl.fee_amount_lo != 0))";
+
+pub(crate) fn count_transactions_for_export(user_id: UserId) -> Result<u32, DbError> {
+    with_user_db(user_id, |conn| {
+        conn.query_row(
+            &format!("SELECT COUNT(*) {EXPORT_TRANSACTION_SOURCE}"),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|err| DbError::from_rusqlite_error("Failed to count transactions for export", err))
+    })
+}
+
 #[cfg(any(
     test,
     all(
@@ -726,7 +747,7 @@ pub(crate) fn load_account_transaction_ledger_rows_for_export(
 ) -> Result<Vec<ExportAccountTransactionLedgerRow>, DbError> {
     with_user_db(user_id, |conn| {
         let mut stmt = conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT
                     atl.account_id,
                     atl.tx_hash,
@@ -743,23 +764,15 @@ pub(crate) fn load_account_transaction_ledger_rows_for_export(
                     atl.min_transfer_index,
                     atl.closing_balance_hi,
                     atl.closing_balance_lo
-                 FROM account_transaction_ledger atl
-                 JOIN digital_asset_accounts a
-                   ON a.id = atl.account_id
-                 WHERE atl.status = 'confirmed'
-                    OR (atl.status = 'failed'
-                        AND atl.balance_delta_negative = 1
-                        AND (atl.balance_delta_hi != 0 OR atl.balance_delta_lo != 0)
-                        AND atl.fee_amount_hi IS NOT NULL AND atl.fee_amount_lo IS NOT NULL
-                        AND (atl.fee_amount_hi != 0 OR atl.fee_amount_lo != 0))
+                 {EXPORT_TRANSACTION_SOURCE}
                  ORDER BY
                     a.id ASC,
                     atl.occurred_at ASC,
                     COALESCE(atl.block_height, 9223372036854775807) ASC,
                     COALESCE(atl.nonce, 9223372036854775807) ASC,
                     COALESCE(atl.min_transfer_index, 9223372036854775807) ASC,
-                    atl.tx_hash ASC",
-            )
+                    atl.tx_hash ASC"
+            ))
             .map_err(|err| {
                 DbError::new(format!(
                     "Failed to prepare export account ledger row query: {err}"
@@ -968,7 +981,6 @@ pub(crate) fn load_all_native_api_balance_assertion_rows_for_export(
             .prepare(
                 "SELECT
                     da.account_id,
-                    da.id,
                     tss.api_confirmed_balance_observed_at,
                     tss.api_confirmed_balance_hi,
                     tss.api_confirmed_balance_lo,
@@ -990,11 +1002,10 @@ pub(crate) fn load_all_native_api_balance_assertion_rows_for_export(
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
                     row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, Option<i64>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             })
             .map_err(|err| {
@@ -1008,18 +1019,12 @@ pub(crate) fn load_all_native_api_balance_assertion_rows_for_export(
             NativeApiBalanceAssertionAggregate,
         > = std::collections::HashMap::new();
         for row_result in rows {
-            let (
-                account_id_raw,
-                address_id_raw,
-                observed_at_raw,
-                balance_hi,
-                balance_lo,
-                last_result,
-            ) = row_result.map_err(|err| {
-                DbError::new(format!(
-                    "Failed to map native API balance export row: {err}"
-                ))
-            })?;
+            let (account_id_raw, observed_at_raw, balance_hi, balance_lo, last_result) = row_result
+                .map_err(|err| {
+                    DbError::new(format!(
+                        "Failed to map native API balance export row: {err}"
+                    ))
+                })?;
             let account_id = WalletAccountId::from_str(&account_id_raw).map_err(|err| {
                 DbError::new(format!(
                     "Invalid native API balance export account_id in DB: {err}"
@@ -1060,11 +1065,7 @@ pub(crate) fn load_all_native_api_balance_assertion_rows_for_export(
             )?;
             entry.asserted_at = Some(observed_at);
 
-            tracing::trace!(
-                account_id = %account_id,
-                address_id = %address_id_raw,
-                "exports: included API-derived balance assertion address"
-            );
+            tracing::trace!("exports: included API-derived balance assertion address");
         }
 
         let mut result = by_account

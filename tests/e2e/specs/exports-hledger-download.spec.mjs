@@ -26,6 +26,7 @@ test("incomplete Bitcoin hledger export keeps postings and omits closing asserti
   );
 
   await page.goto("/exports/hledger");
+  await expect(page.getByText(/account journals contain 2 transaction entries/)).toBeVisible();
   await page.getByTestId("hledger-export-encrypted-checkbox").uncheck();
   const downloadPromise = page.waitForEvent("download");
   await page.getByTestId("hledger-export-button").click();
@@ -55,6 +56,7 @@ test("hledger export downloads an unencrypted zip with the expected filename", a
   await registerViaUiAndExpectAuthenticated(page);
   await page.goto("/exports/hledger");
 
+  await expect(page.getByText(/account journals contain 0 transaction entries/)).toBeVisible();
   const encryptedCheckbox = page.getByTestId("hledger-export-encrypted-checkbox");
   await expect(encryptedCheckbox).toBeChecked();
   await encryptedCheckbox.uncheck();

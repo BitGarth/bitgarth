@@ -22,3 +22,5 @@
 !crates/
 !crates/bitgarth-cli/
 !crates/bitgarth-cli/Cargo.toml
+!crates/sqlcipher-src-compat/
+!crates/sqlcipher-src-compat/**

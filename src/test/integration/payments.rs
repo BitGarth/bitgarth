@@ -3155,6 +3155,39 @@ async fn catalog_endpoint_returns_central_tiers_and_options() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn invalid_catalog_preserves_saved_descriptions_without_checkout_options() {
+    let server = setup_test_server();
+    let _key_guard = set_signing_public_key_override_for_test(TEST_PUBLIC_KEY_B64);
+    let mock = MockCentral::start(expected_signing_key_hash().expect("hash should derive")).await;
+    let _central_guard = central_guard(&mock);
+    let _user_id = registered_user_id(&server).await;
+
+    let mut renamed = default_product_options_response();
+    renamed["tiers"][2]["display_name"] = json!("Orchard");
+    mock.set_product_options_response(renamed);
+    let response = server.get("/_app/user/payments/catalog").await;
+    response.assert_status_ok();
+    let live: crate::payments::views::PaymentCatalogView = response.json();
+    assert!(!live.showing_saved_descriptions);
+    assert_eq!(live.tiers[2].display_name, "Orchard");
+
+    mock.set_product_options_response(json!({ "tiers": [] }));
+    let response = server.get("/_app/user/payments/catalog").await;
+    response.assert_status_ok();
+    let saved: crate::payments::views::PaymentCatalogView = response.json();
+    assert!(saved.showing_saved_descriptions);
+    assert_eq!(saved.tiers, live.tiers);
+    assert_eq!(saved.pricing_summary, live.pricing_summary);
+    assert!(saved.options.is_empty());
+
+    let checkout = server
+        .post("/_app/user/payments/premium/start")
+        .json(&json!({ "product_option_id": live.options[0].id }))
+        .await;
+    assert!(!checkout.status_code().is_success());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn catalog_endpoint_reports_unavailable_when_central_down() {
     let server = setup_test_server();
     let _key_guard = set_signing_public_key_override_for_test(TEST_PUBLIC_KEY_B64);
@@ -3171,6 +3204,6 @@ async fn catalog_endpoint_reports_unavailable_when_central_down() {
     assert!(catalog.options.is_empty());
     assert_eq!(
         catalog.options_message.as_deref(),
-        Some("Price unavailable. Could not reach BitGarth payment service.")
+        Some("Price unavailable. Could not reach BitGarth's servers.")
     );
 }

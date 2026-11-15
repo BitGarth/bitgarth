@@ -1,3 +1,4 @@
+use crate::report_access::ReportAccessView;
 use crate::report_dates::{LocalReportDateRange, LocalReportDateRangeError};
 use crate::wallets::ReportDateParam;
 
@@ -208,6 +209,48 @@ impl DateRangeFilterState {
         &self.inputs.end
     }
 
+    pub(super) fn displayed_range(&self) -> Option<LocalReportDateRange> {
+        resolve_input_range(&self.inputs.start, &self.inputs.end)
+            .ok()
+            .flatten()
+    }
+
+    /// The range the year dial names: the applied selection, not the inputs.
+    /// A Free-window clamp shows the effective range in the inputs, but the
+    /// user chose (say) "This Year", so the dial must keep saying that.
+    pub(super) fn dial_range(&self) -> Option<LocalReportDateRange> {
+        match self.selection {
+            DateRangeSelection::Range(range) => Some(range),
+            DateRangeSelection::Empty => self.displayed_range(),
+        }
+    }
+
+    pub(super) fn report_access_event(
+        &self,
+        access: &ReportAccessView,
+        default_range: Option<LocalReportDateRange>,
+    ) -> Option<DateRangeFilterEvent> {
+        if self.sync_mode == DateRangeFilterSyncMode::DetachedFromRoute {
+            return None;
+        }
+        let requested =
+            LocalReportDateRange::new(access.requested_from, access.requested_to).ok()?;
+        match self.selection {
+            // Keep the requested default in the URL so the refetch still reports the clamp.
+            DateRangeSelection::Empty if Some(requested) == default_range => {
+                Some(DateRangeFilterEvent::ServerResolved(requested))
+            }
+            DateRangeSelection::Range(selected)
+                if selected == requested && access.range_clamped =>
+            {
+                LocalReportDateRange::new(access.effective_from, access.effective_to)
+                    .ok()
+                    .map(DateRangeFilterEvent::ClampedDisplay)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn validation_message(&self) -> Option<&str> {
         self.validation_message.as_deref()
     }
@@ -284,14 +327,9 @@ fn transition_clamped_display(
     state: &DateRangeFilterState,
     range: LocalReportDateRange,
 ) -> DateRangeFilterTransition {
-    let selection = DateRangeSelection::Range(range);
-
     DateRangeFilterTransition {
         state: DateRangeFilterState {
-            selection,
-            inputs: DateRangeInputs::from_selection(selection),
-            validation_message: None,
-            sync_mode: DateRangeFilterSyncMode::DetachedFromRoute,
+            inputs: DateRangeInputs::from_selection(range.into()),
             ..state.clone()
         },
         effect: DateRangeFilterEffect::None,
@@ -712,6 +750,72 @@ mod tests {
     }
 
     #[test]
+    fn clamped_default_keeps_requested_route_and_displays_free_window_after_refetch() {
+        let requested = range(2026, 1, 1, 2026, 11, 10);
+        let access = crate::report_access::decide_report_access(
+            requested,
+            requested.to(),
+            crate::report_access::ReportAccessEntitlements {
+                tax_reports: false,
+                exchange_rates_history: false,
+                price_overrides: false,
+            },
+        )
+        .access;
+        let event_for =
+            |state: &DateRangeFilterState| state.report_access_event(&access, Some(requested));
+        let policy = DateRangeFilterPolicy::RequiredCanonicalRange;
+        let initial = initialize_date_range_filter(policy, DateRangeRouteParams::new(None, None));
+        let first = transition_date_range_filter(
+            policy,
+            &initial.state,
+            event_for(&initial.state).expect("valid default"),
+        );
+        assert_eq!(
+            first.effect,
+            DateRangeFilterEffect::ReplaceRoute(requested.into())
+        );
+
+        let on_route = initialize_date_range_filter(
+            policy,
+            DateRangeRouteParams::new(
+                Some(requested.from().to_string()),
+                Some(requested.to().to_string()),
+            ),
+        );
+        let refetched = transition_date_range_filter(
+            policy,
+            &on_route.state,
+            event_for(&on_route.state).expect("valid Free window"),
+        );
+        assert_eq!(refetched.effect, DateRangeFilterEffect::None);
+        assert_eq!(refetched.state.route().selection(), requested.into());
+        assert_eq!(refetched.state.start_input_value(), "2026-02-10");
+        assert_eq!(refetched.state.end_input_value(), "2026-11-10");
+
+        // A rerender while the user is editing must not reapply the old window.
+        let draft = transition_date_range_filter(
+            policy,
+            &refetched.state,
+            DateRangeFilterEvent::EndEdited("2025-12-31".to_string()),
+        );
+        assert_eq!(draft.state.end_input_value(), "2025-12-31");
+        assert_eq!(draft.state.selection(), requested.into());
+        assert!(event_for(&draft.state).is_none());
+
+        // The last response can also remain visible while a different route loads.
+        let changed = transition_date_range_filter(
+            policy,
+            &draft.state,
+            DateRangeFilterEvent::RouteChanged(DateRangeRouteParams::new(
+                Some("2025-01-01".to_string()),
+                Some("2025-12-31".to_string()),
+            )),
+        );
+        assert!(event_for(&changed.state).is_none());
+    }
+
+    #[test]
     fn clamped_display_shows_effective_range_without_changing_route() {
         let state = initialize_date_range_filter(
             DateRangeFilterPolicy::RequiredCanonicalRange,
@@ -732,18 +836,20 @@ mod tests {
         assert_eq!(outcome.state.start_input_value(), "2025-10-03");
         assert_eq!(outcome.state.end_input_value(), "2026-07-03");
         assert_eq!(
-            outcome.state.selection(),
-            DateRangeSelection::Range(range(2025, 10, 3, 2026, 7, 3))
+            outcome.state.displayed_range(),
+            Some(range(2025, 10, 3, 2026, 7, 3))
+        );
+        // The year dial keeps naming the range the user chose.
+        assert_eq!(
+            outcome.state.dial_range(),
+            Some(range(2024, 1, 1, 2024, 12, 31))
         );
         // The requested route is untouched, so the fetch still reports a clamp.
         assert_eq!(outcome.state.route().start.as_deref(), Some("2024-01-01"));
         assert_eq!(outcome.state.route().end.as_deref(), Some("2024-12-31"));
         // No navigation is triggered by the display-only sync.
         assert_eq!(outcome.effect, DateRangeFilterEffect::None);
-        assert_eq!(
-            outcome.state.sync_mode,
-            DateRangeFilterSyncMode::DetachedFromRoute
-        );
+        assert_eq!(outcome.state.selection(), state.selection());
     }
 
     #[test]

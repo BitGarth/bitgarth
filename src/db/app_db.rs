@@ -118,7 +118,7 @@ fn initialize_connection_for_key(
             initialize_file_connection(&db_path)
         }
         AppDbConnectionKey::TestInMemory => {
-            tracing::info!("app db: opening in-memory database (test mode)");
+            tracing::debug!("app db: opening in-memory database (test mode)");
             let mut conn = rusqlite::Connection::open_in_memory()
                 .map_err(|e| DbError::from_app_sqlite_error(AppDbStage::Open, e))?;
             configure_and_migrate_connection(&mut conn)?;
@@ -129,7 +129,7 @@ fn initialize_connection_for_key(
 
 fn initialize_file_connection(db_path: &Path) -> Result<rusqlite::Connection, DbError> {
     ensure_parent_dir_exists(db_path)?;
-    tracing::info!("app db: opening database at {}", db_path.display());
+    tracing::debug!("app db: opening database");
 
     let mut conn = rusqlite::Connection::open(db_path)
         .map_err(|e| DbError::from_app_sqlite_error(AppDbStage::Open, e))?;
@@ -146,25 +146,17 @@ fn configure_and_migrate_connection(conn: &mut rusqlite::Connection) -> Result<(
         .map_err(|e| DbError::from_app_sqlite_error(AppDbStage::Migration, e))?;
     let report = runner
         .run(conn)
+        .inspect_err(|_| tracing::error!(database = "app db", "migration failed"))
         .map_err(|e| DbError::from_app_refinery_error(AppDbStage::Migration, e))?;
 
-    let applied_count = report.applied_migrations().len();
-    match runner
+    let last_migration = runner
         .get_last_applied_migration(conn)
-        .map_err(|e| DbError::from_app_refinery_error(AppDbStage::SchemaQuery, e))?
-    {
-        Some(migration) => {
-            tracing::info!(
-                "app db: migrations completed — schema version V{}__{}, applied {} new migration(s)",
-                migration.version(),
-                migration.name(),
-                applied_count,
-            );
-        }
-        None => {
-            tracing::info!("app db: migrations completed — no migrations applied (empty schema)");
-        }
-    }
+        .map_err(|e| DbError::from_app_refinery_error(AppDbStage::SchemaQuery, e))?;
+    super::sqlite_config::log_migration_result(
+        "app db",
+        last_migration,
+        report.applied_migrations().len(),
+    );
 
     Ok(())
 }

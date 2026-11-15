@@ -813,7 +813,7 @@ fn run_mempool_iteration(
 
         if let Some((completion, cursor_txid)) = strict_singleton_duplicate_completion {
             complete_strict_mempool_history_scan(state, context, completion, _tip_height, true)?;
-            tracing::warn!(
+            tracing::debug!(
                 user_id = %context.run.user_id,
                 run_id = %context.run.run_id,
                 address_id = %context.address.address_id,
@@ -972,7 +972,7 @@ fn update_cursor_after_paginated_page(
         state.cursor = Some(fetched_cursor.to_string());
         state.proof_publication_allowed = false;
         state.run_summary.duplicate_cursor_page_detected = true;
-        tracing::warn!(
+        tracing::debug!(
             user_id = %context.run.user_id,
             run_id = %context.run.run_id,
             address_id = %context.address.address_id,

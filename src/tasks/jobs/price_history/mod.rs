@@ -1,4 +1,7 @@
 pub(crate) mod executor;
+mod shared_executor;
+mod shared_planner;
+pub(crate) use shared_executor::{SharedPriceHistorySummary, run_shared_price_history};
 pub(crate) mod planner;
 pub(crate) mod work_selection;
 

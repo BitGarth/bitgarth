@@ -1,4 +1,4 @@
-use crate::Route;
+use crate::{AuthState, AuthStatus, Route};
 use dioxus::prelude::*;
 
 fn missing_path(segments: &[String]) -> String {
@@ -17,7 +17,10 @@ pub fn NotFound(segments: Vec<String>) -> Element {
         None,
     );
 
-    let navigator = use_navigator();
+    let signed_in = matches!(
+        *use_context::<AuthState>().read(),
+        AuthStatus::Authenticated(_)
+    );
     let path = missing_path(&segments);
 
     rsx! {
@@ -31,19 +34,11 @@ pub fn NotFound(segments: Vec<String>) -> Element {
                     code { "{path}" }
                 }
                 div { class: "not-found-actions",
-                    button {
-                        class: "btn btn-primary",
-                        onclick: move |_| {
-                            navigator.push(Route::HomeView);
-                        },
-                        "Go home"
-                    }
-                    button {
-                        class: "btn btn-secondary",
-                        onclick: move |_| {
-                            navigator.push(Route::Login);
-                        },
-                        "Open login"
+                    if signed_in {
+                        Link { class: "btn btn-primary", to: Route::Wallets, "Go to Wallets" }
+                    } else {
+                        Link { class: "btn btn-primary", to: Route::HomeView, "Go home" }
+                        Link { class: "btn btn-secondary", to: Route::Login, "Open login" }
                     }
                 }
             }

@@ -346,8 +346,17 @@ pub(crate) fn AddManualAssetFlow(
         "true"
     };
 
-    if let Some(Some(Ok(detail))) = detail_resource.value().read().as_ref()
-        && let Some(detail) = current_detail_for_selected_asset(selected_asset().as_ref(), detail)
+    let selected = selected_asset();
+    let details = detail_resource.value();
+    let detail_result = details.read();
+    let selected_detail = match detail_result.as_ref() {
+        Some(Some(Ok(detail))) => current_detail_for_selected_asset(selected.as_ref(), detail),
+        _ => None,
+    };
+    let needs_detail = selected.as_ref().is_some_and(|asset| {
+        asset.source == ManualAssetSearchSource::CoinGeckoCatalog && selected_detail.is_none()
+    });
+    if let Some(detail) = selected_detail
         && detail_prefill_coingecko_id.peek().as_deref() != Some(detail.coingecko_id.as_str())
     {
         prefill_coingecko_detail(
@@ -450,7 +459,7 @@ pub(crate) fn AddManualAssetFlow(
                             if asset.source == ManualAssetSearchSource::CoinGeckoCatalog {
                                 if !(settings_state.price_fetching_enabled)() && !allow_detail_lookup() {
                                     div { class: "manual-asset-consent",
-                                        p { "CoinGecko detail lookup is optional and sends only the selected CoinGecko asset id." }
+                                        p { "To add this asset, look up its details on CoinGecko. CoinGecko receives the asset ID for its details and your display currency for its price." }
                                         button {
                                             class: "btn btn-secondary",
                                             r#type: "button",
@@ -633,7 +642,6 @@ pub(crate) fn AddManualAssetFlow(
 
                         if let Some(error) = field_error() {
                             div { class: "alert alert-error",
-                                strong { "Validation error: " }
                                 "{error}"
                             }
                         }
@@ -654,7 +662,7 @@ pub(crate) fn AddManualAssetFlow(
                             }
                             button {
                                 class: "btn btn-primary",
-                                disabled: saving() || wallets_loading || wallet_choice().is_none(),
+                                disabled: saving() || wallets_loading || wallet_choice().is_none() || needs_detail,
                                 onclick: save,
                                 if saving() { "Adding..." } else { "Add Manual Asset" }
                             }

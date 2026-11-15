@@ -47,6 +47,13 @@ impl PaymentOrderId {
     pub(crate) fn to_storage_value(self) -> String {
         self.0.to_string()
     }
+
+    /// When the order was created, read from the ULID's timestamp.
+    pub(crate) fn created_at(self) -> Option<chrono::DateTime<chrono::Utc>> {
+        i64::try_from(self.0.timestamp_ms())
+            .ok()
+            .and_then(chrono::DateTime::from_timestamp_millis)
+    }
 }
 
 impl fmt::Display for PaymentOrderId {

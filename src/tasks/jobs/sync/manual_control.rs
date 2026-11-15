@@ -293,6 +293,33 @@ pub(crate) fn run_manual_sync_control(
     native_account_id: DigitalAssetAccountId,
     iteration_budget: u32,
 ) -> Result<crate::transactions::SyncControlInvocationResponse, UserTransactionMonitorError> {
+    let run_id = TransactionSyncRunId::new();
+    let started = std::time::Instant::now();
+    tracing::info!(target: "wallet_sync", %run_id, "manual_sync_started");
+    let result =
+        run_manual_sync_control_inner(user_id, native_account_id, iteration_budget, run_id);
+    let (outcome, failure_kind) = match &result {
+        Err(error) => ("failure", Some(error.log_category())),
+        Ok(response) if response.error_message.is_some() => ("partial", Some("work_item_failed")),
+        Ok(_) => ("success", None),
+    };
+    tracing::info!(
+        target: "wallet_sync",
+        %run_id,
+        duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        outcome,
+        failure_kind,
+        "manual_sync_completed"
+    );
+    result
+}
+
+fn run_manual_sync_control_inner(
+    user_id: crate::models::UserId,
+    native_account_id: DigitalAssetAccountId,
+    iteration_budget: u32,
+    run_id: TransactionSyncRunId,
+) -> Result<crate::transactions::SyncControlInvocationResponse, UserTransactionMonitorError> {
     use crate::db::{
         get_sync_addresses_for_account, load_address_ids_with_activity,
         load_address_ids_with_pending_txs, load_settings,
@@ -316,8 +343,6 @@ pub(crate) fn run_manual_sync_control(
     } else {
         Vec::new()
     };
-
-    let run_id = TransactionSyncRunId::new();
 
     let run = RunContext {
         user_id,
@@ -366,18 +391,15 @@ pub(crate) fn run_manual_sync_control(
     let retention = SyncHistoryRetentionDays::default();
     let cleanup_result = cleanup_raw_sync_history_with_compaction(user_id, completed_at, retention);
     match &cleanup_result {
-        Ok(cleanup_report) => tracing::info!(
+        Ok(cleanup_report) => tracing::debug!(
             user_id = %user_id,
             retention_days = retention.value(),
             deleted_sync_runs = cleanup_report.deletion.deleted_sync_runs,
             "manual_sync_history_cleanup_completed"
         ),
-        Err(err) => tracing::warn!(
-            user_id = %user_id,
-            retention_days = retention.value(),
-            error = %err,
-            "manual_sync_history_cleanup_failed"
-        ),
+        Err(_) => {
+            tracing::warn!(target: "wallet_sync", %run_id, "manual_sync_history_cleanup_failed")
+        }
     }
 
     result

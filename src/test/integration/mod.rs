@@ -12,6 +12,7 @@ const MAX_SERVER_FN_BODY_BYTES: usize = 12 * 1024 * 1024;
 
 pub(crate) mod auth;
 mod build;
+mod client_api;
 pub(crate) mod exports;
 pub(crate) mod fixtures;
 pub(crate) mod payments;

@@ -115,14 +115,14 @@ pub(crate) use bitcoin::BtcAddress;
 
 // requests — items used by both client and server
 pub(crate) use requests::{
-    AccountAddressRowResponse, AccountTransactionRowResponse, AccountTransactionTableResponse,
-    AddBtcAddressRequest, AddBtcAddressResponse, AddEthAddressRequest, AddEthAddressResponse,
-    AddManualAssetAccountAssetRequest, AddManualAssetAccountRequest, AddManualAssetAccountResponse,
-    AddXpubRequest, CoinGeckoManualAssetPrecisionSourceRequest,
-    CoinGeckoManualAssetSnapshotRequest, DeleteAccountRequest, DeleteAccountsChoice,
-    DeleteWalletRequest, GetAccountAddressesRequest, GetAccountAddressesResponse,
-    GetAccountTransactionsResponse, GetWalletByFingerprintRequest, LinkTrezorOutcome,
-    LinkTrezorRequest, LinkTrezorResponse, ManualAssetCatalogTotalResponse,
+    AccountAddressRowResponse, AccountFlowFiatView, AccountTransactionRowResponse,
+    AccountTransactionTableResponse, AddBtcAddressRequest, AddBtcAddressResponse,
+    AddEthAddressRequest, AddEthAddressResponse, AddManualAssetAccountAssetRequest,
+    AddManualAssetAccountRequest, AddManualAssetAccountResponse, AddXpubRequest,
+    CoinGeckoManualAssetPrecisionSourceRequest, CoinGeckoManualAssetSnapshotRequest,
+    DeleteAccountRequest, DeleteAccountsChoice, DeleteWalletRequest, GetAccountAddressesRequest,
+    GetAccountAddressesResponse, GetAccountTransactionsResponse, GetWalletByFingerprintRequest,
+    LinkTrezorOutcome, LinkTrezorRequest, LinkTrezorResponse, ManualAssetCatalogTotalResponse,
     ManualAssetDiscoveryDetailRequest, ManualAssetDiscoveryDetailResponse,
     ManualAssetDiscoveryPlatformRow, ManualAssetDiscoveryPriceRequest,
     ManualAssetDiscoveryPriceResponse, ManualAssetInstanceSearchRow, ManualAssetSearchSource,
@@ -134,7 +134,9 @@ pub(crate) use requests::{
 
 // requests — server-only items
 #[cfg(feature = "server")]
-pub(crate) use requests::GetAccountTransactionsRequest;
+pub(crate) use requests::{
+    AccountFlowSummaryView, GetAccountTransactionsRequest, TransactionFiatView,
+};
 
 // validation — server-only items
 #[cfg(feature = "server")]

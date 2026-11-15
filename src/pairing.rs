@@ -80,10 +80,15 @@ impl PairingStartRequest {
             }
         };
 
-        if self.permissions.as_slice() != [ClientPermission::BalancesRead.as_str()] {
+        let permission = match self.permissions.as_slice() {
+            [single] => ClientPermission::from_db(single).ok(),
+            _ => None,
+        };
+        if permission.is_none() {
             errors.add(
                 "permissions",
-                "Permissions must be exactly [\"balances_read\"]".to_owned(),
+                "Permissions must be exactly one of [\"read\"], [\"full\"] or [\"balances_read\"]"
+                    .to_owned(),
             );
         }
 
@@ -91,13 +96,13 @@ impl PairingStartRequest {
             return Err(errors);
         }
 
-        let Some(key_verifier) = verifier else {
+        let (Some(key_verifier), Some(permission)) = (verifier, permission) else {
             return Err(errors);
         };
         Ok(ValidatedPairingStart {
             client_name: self.client_name,
             key_verifier,
-            permission: ClientPermission::BalancesRead,
+            permission,
         })
     }
 }
@@ -383,6 +388,7 @@ impl PairingStore {
         capability_id: CapabilityId,
         display_code: &str,
         active_expires_at: Option<DateTime<Utc>>,
+        reviewed_permission: ClientPermission,
         bind: F,
     ) -> Result<(), PairingTransitionError>
     where
@@ -402,7 +408,9 @@ impl PairingStore {
         if entry.code != code {
             return Err(PairingTransitionError::NotFound);
         }
-        if !matches!(entry.status, PairingStatus::AwaitingApproval) {
+        if !matches!(entry.status, PairingStatus::AwaitingApproval)
+            || entry.permission != reviewed_permission
+        {
             return Err(PairingTransitionError::Conflict);
         }
         let binding = bind().map_err(|_| PairingTransitionError::Binding)?;
@@ -659,6 +667,18 @@ mod tests {
             .permissions
             .push("balances_read".to_owned());
         assert!(duplicate_permission.validate().is_err());
+        for (requested, expected) in [
+            ("read", ClientPermission::Read),
+            ("full", ClientPermission::Full),
+            ("balances_read", ClientPermission::BalancesRead),
+        ] {
+            let mut scoped = request("business", 1);
+            scoped.permissions = vec![requested.to_owned()];
+            assert_eq!(scoped.validate().unwrap().permission, expected);
+        }
+        let mut unknown = request("business", 1);
+        unknown.permissions = vec!["admin".to_owned()];
+        assert!(unknown.validate().is_err());
     }
 
     #[test]
@@ -734,6 +754,7 @@ mod tests {
                 started.capability_id,
                 &format_code(&started.code),
                 None,
+                crate::client_capabilities::ClientPermission::BalancesRead,
                 || {
                     Ok::<_, ()>(ApprovedPairingBinding {
                         user_id,
@@ -973,6 +994,7 @@ mod tests {
                 approved.capability_id,
                 &approved_code,
                 Some(now() + Duration::days(3650)),
+                crate::client_capabilities::ClientPermission::BalancesRead,
                 || {
                     Ok::<_, ()>(ApprovedPairingBinding {
                         user_id,
@@ -1037,6 +1059,7 @@ mod tests {
                 first.capability_id,
                 &format_code(&second.code),
                 None,
+                crate::client_capabilities::ClientPermission::BalancesRead,
                 || {
                     binding_called = true;
                     Err::<ApprovedPairingBinding, _>(())
@@ -1067,6 +1090,7 @@ mod tests {
                 started.capability_id,
                 &format_code(&started.code),
                 None,
+                crate::client_capabilities::ClientPermission::BalancesRead,
                 || {
                     Ok::<_, ()>(ApprovedPairingBinding {
                         user_id,
@@ -1132,15 +1156,22 @@ mod tests {
         let code = format_code(&started.code);
         let user_id = UserId::new();
         store
-            .approve(now(), started.capability_id, &code, None, || {
-                Ok::<_, ()>(ApprovedPairingBinding {
-                    user_id,
-                    dek: Some(Dek::from_bytes([3; 32])),
-                    lease: crate::auth::lifecycle::acquire_pending_pairing_lease(user_id)
-                        .unwrap()
-                        .unwrap(),
-                })
-            })
+            .approve(
+                now(),
+                started.capability_id,
+                &code,
+                None,
+                crate::client_capabilities::ClientPermission::BalancesRead,
+                || {
+                    Ok::<_, ()>(ApprovedPairingBinding {
+                        user_id,
+                        dek: Some(Dek::from_bytes([3; 32])),
+                        lease: crate::auth::lifecycle::acquire_pending_pairing_lease(user_id)
+                            .unwrap()
+                            .unwrap(),
+                    })
+                },
+            )
             .unwrap();
 
         let mut activations = 0;

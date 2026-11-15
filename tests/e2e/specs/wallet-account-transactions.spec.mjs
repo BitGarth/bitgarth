@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { expect, test } from "../helpers/mock-fixture.mjs";
+import { formatDefaultUtcTime, formatDefaultUtcTimestamp } from "../helpers/timestamps.mjs";
 import {
   TEST_BTC_ADDRESS,
   TEST_ETH_ADDRESS,
@@ -185,7 +186,9 @@ function truncateUiHash(value) {
 }
 
 function sectionTotals(section) {
-  return section.locator(".transactions-table-header .muted");
+  return section
+    .locator(".transactions-table-header .muted, .transactions-pagination-row .muted")
+    .first();
 }
 
 function formatLocalDate(date) {
@@ -193,25 +196,6 @@ function formatLocalDate(date) {
   const month = String(date.getUTCMonth() + 1).padStart(2, "0");
   const day = String(date.getUTCDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
-}
-
-function formatDefaultUtcTimestamp(rfc3339) {
-  const timestamp = new Date(rfc3339);
-  expect(timestamp.valueOf()).not.toBeNaN();
-  const date = timestamp.toLocaleDateString("en-US", {
-    timeZone: "UTC",
-    month: "short",
-    day: "2-digit",
-    year: "numeric",
-  });
-  const time = timestamp.toLocaleTimeString("en-US", {
-    timeZone: "UTC",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: true,
-    timeZoneName: "short",
-  });
-  return `${date} ${time}`;
 }
 
 function currentYearRangeForToday() {
@@ -563,6 +547,7 @@ test("wallet transactions page shows deterministic ordering and paging", async (
       .locator("xpath=ancestor::section[1]");
 
     await expect(confirmedSection).toBeVisible();
+    await expect(confirmedSection.getByText("1 - 50 of 55", { exact: true })).toHaveCount(1);
     await expect(sectionTotals(confirmedSection)).toHaveText("1 - 50 of 55");
 
     await expect(
@@ -730,13 +715,13 @@ test("failed Ethereum attempts stay in History with fee-only balances", async ({
     await expect(cards.first().getByText("Not transferred")).toBeVisible();
     await expect(cards.nth(1).getByText("Not transferred")).toBeVisible();
     await expect(cards.nth(1).locator(".tx-card-timestamp")).toHaveText(
-      formatDefaultUtcTimestamp(new Date(Number(transactions[1].timeStamp) * 1000).toISOString()),
+      formatDefaultUtcTime(new Date(Number(transactions[1].timeStamp) * 1000).toISOString()),
     );
     await expect(cards.nth(1).locator(".tx-fee-value")).toHaveText("-Ξ0.001");
     await expect(cards.nth(1).locator(".tx-balance-cell")).toHaveText("Ξ1.999");
     await expect(cards.first().locator(".tx-fee-value")).toHaveText("-");
     await expect(cards.first().locator(".tx-balance-cell")).toHaveText("Ξ1.999");
-    await expect(cards.first().locator(".tx-status-indicator")).toHaveText("failed");
+    await expect(cards.first().locator(".tx-status-indicator")).toHaveText("Failed");
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
     await testInfo.attach("failed-history-390px", {
       body: await history.screenshot(), contentType: "image/png",
@@ -891,7 +876,7 @@ test("Free first Ethereum account syncs both history and current balance", async
   });
   try {
     await page.goto(`/wallets/account/${accountId}/transactions`);
-    await expect(page.getByTestId("account-mode")).toHaveText("Transaction syncing");
+    await expect(page.getByTestId("account-mode")).toHaveText("Full history");
     await expect(page.locator(".transactions-list .tx-card").first()).toBeVisible();
     await expect(page.locator(".tx-header-current-balance")).toContainText(
       "Current balance as of",
@@ -924,11 +909,13 @@ test("upgrade moves a fourth Ethereum account from balances to transactions", as
 
     await activatePremiumForTransactionHistory(page.request);
     await page.reload();
-    await expect(page.getByTestId("account-mode")).toHaveText("Transaction syncing");
+    await expect(page.getByTestId("account-mode")).toHaveText("Full history");
     await expect(page.locator(".transactions-list .tx-card").first()).toBeVisible({
       timeout: 30_000,
     });
-    await expect(page.locator(".tx-header-opening-balance")).not.toContainText(
+    // A proven-zero opening balance is left out of the range summary.
+    await expect(page.locator(".tx-header-opening-balance")).toHaveCount(0);
+    await expect(page.locator(".tx-header-closing-balance")).not.toContainText(
       "Not available",
     );
   } finally {
@@ -1005,7 +992,7 @@ test("account identity section shows type, reference, and addresses", async ({
     await page.getByRole("button", { name: "Account actions" }).click();
     const menu = page.locator(".kebab-menu-dropdown.visible");
     await expect(menu.getByRole("menuitem", { name: "Rename" })).toBeVisible();
-    await expect(menu.getByRole("menuitem", { name: "View Addresses" })).toHaveCount(0);
+    await expect(menu.getByRole("menuitem", { name: "View addresses" })).toHaveCount(0);
     await expect(menu.getByRole("menuitem", { name: "Copy Address" })).toHaveCount(0);
   } finally {
     await denseEtherscan.close();
@@ -1134,6 +1121,11 @@ test("balance assertions header fits phone width", async ({ page, mockServers },
   }
 
   await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/wallets");
+  const account = page.locator(".account-row").filter({ has: page.locator(`a[href*="/account/${accountId}/"]`) });
+  const row = await account.boundingBox();
+  const badge = await account.locator(".account-asset-badge").boundingBox();
+  expect(Math.abs(badge.x - row.x)).toBeLessThan(1);
   await page.goto(`/wallets/account/${accountId}/transactions`);
   const section = page
     .getByRole("heading", { name: "Balance Assertions", exact: true })

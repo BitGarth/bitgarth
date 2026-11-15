@@ -1,7 +1,7 @@
 //! Contact affordances: a sidebar footer showing the developer's email as a
 //! copy-first control, plus a modal for the PGP public key.
 
-use super::{CheckIcon, CloseIcon, CopyIcon, copy_to_clipboard};
+use super::{CheckIcon, CloseIcon, CopyFeedback, CopyIcon, use_copy_feedback};
 use dioxus::prelude::*;
 
 /// Where mail is sent. Shown in the sidebar and used in the `mailto:` link.
@@ -24,7 +24,7 @@ fn pgp_fingerprint_from_armor(key: &str) -> Option<&str> {
 /// [`ContactModal`].
 #[component]
 pub fn SidebarContact(on_show_key: EventHandler<()>) -> Element {
-    let mut copied = use_signal(|| false);
+    let (feedback, copy) = use_copy_feedback(1600);
     let mailto = format!("mailto:{CONTACT_EMAIL}");
 
     rsx! {
@@ -36,21 +36,11 @@ pub fn SidebarContact(on_show_key: EventHandler<()>) -> Element {
                 r#type: "button",
                 "data-testid": "sidebar-contact-email",
                 "aria-live": "polite",
-                title: if copied() { "Copied" } else { "Copy email address" },
-                onclick: move |_| {
-                    copy_to_clipboard(CONTACT_EMAIL);
-                    copied.set(true);
-                    spawn(async move {
-                        let mut wait = dioxus::document::eval(
-                            "setTimeout(() => dioxus.send(true), 1600);",
-                        );
-                        let _ = wait.recv::<bool>().await;
-                        copied.set(false);
-                    });
-                },
+                title: feedback.label("Copy email address", "Copied"),
+                onclick: move |_| copy.call(CONTACT_EMAIL.to_owned()),
                 span { class: "sidebar-contact-addr", "{CONTACT_EMAIL}" }
                 span { class: "sidebar-contact-copy",
-                    if copied() {
+                    if feedback == CopyFeedback::Copied {
                         CheckIcon {}
                     } else {
                         CopyIcon {}
@@ -77,7 +67,7 @@ pub fn SidebarContact(on_show_key: EventHandler<()>) -> Element {
 /// already the explicit request, so there is nothing to hide behind a toggle).
 #[component]
 pub fn ContactModal(on_close: EventHandler<()>) -> Element {
-    let mut key_copied = use_signal(|| false);
+    let (feedback, copy) = use_copy_feedback(1600);
     let pgp_fingerprint = pgp_fingerprint_from_armor(PGP_PUBLIC_KEY);
 
     rsx! {
@@ -123,24 +113,13 @@ pub fn ContactModal(on_close: EventHandler<()>) -> Element {
                         r#type: "button",
                         "aria-live": "polite",
                         "aria-label": "Copy public key",
-                        onclick: move |_| {
-                            copy_to_clipboard(PGP_PUBLIC_KEY);
-                            key_copied.set(true);
-                            spawn(async move {
-                                let mut wait = dioxus::document::eval(
-                                    "setTimeout(() => dioxus.send(true), 1600);",
-                                );
-                                let _ = wait.recv::<bool>().await;
-                                key_copied.set(false);
-                            });
-                        },
-                        if key_copied() {
+                        onclick: move |_| copy.call(PGP_PUBLIC_KEY.to_owned()),
+                        if feedback == CopyFeedback::Copied {
                             CheckIcon {}
-                            span { "Copied" }
                         } else {
                             CopyIcon {}
-                            span { "Copy" }
                         }
+                        span { {feedback.label("Copy", "Copied")} }
                     }
                     pre { code { "{PGP_PUBLIC_KEY}" } }
                 }

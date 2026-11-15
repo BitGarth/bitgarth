@@ -14,7 +14,8 @@ use zeroize::Zeroizing;
 const STORE_VERSION: u32 = 1;
 const CLIENT_KEY_BYTES: usize = 32;
 const CLIENT_KEY_LENGTH: usize = 43;
-const REQUIRED_PERMISSION: &str = "balances_read";
+/// Access levels a profile may hold, from least to most.
+pub(crate) const PERMISSIONS: [&str; 3] = ["balances_read", "read", "full"];
 
 pub(crate) struct SecretClientKey(Zeroizing<String>);
 
@@ -146,6 +147,9 @@ impl<'de> Deserialize<'de> for Profile {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProfileStore {
     version: u32,
+    /// Profile used when neither `--profile` nor `BITGARTH_PROFILE` is given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default: Option<String>,
     profiles: Vec<Profile>,
 }
 
@@ -160,6 +164,7 @@ impl ProfileStore {
     pub(crate) fn empty() -> Self {
         Self {
             version: STORE_VERSION,
+            default: None,
             profiles: Vec::new(),
         }
     }
@@ -194,10 +199,20 @@ impl ProfileStore {
         Self::from_slice(&bytes)
     }
 
+    /// Create the private profile directory so a later save cannot fail.
+    pub(crate) fn prepare_saved() -> Result<(), ProfileError> {
+        ensure_profile_directory(&profile_store_path()?)
+    }
+
     pub(crate) fn insert_saved(profile: Profile) -> Result<(), ProfileError> {
         let path = profile_store_path()?;
         ensure_profile_directory(&path)?;
-        mutate_store_at(&path, |store| store.insert(profile))
+        mutate_store_at(&path, |store| {
+            let name = profile.name.clone();
+            store.insert(profile)?;
+            store.default = Some(name);
+            Ok(())
+        })
     }
 
     pub(crate) fn remove_saved(name: &str) -> Result<bool, ProfileError> {
@@ -240,7 +255,9 @@ impl ProfileStore {
             existing.canonical_origin == profile.canonical_origin
                 && existing.remote_user_id == profile.remote_user_id
         }) {
-            return Err(ProfileError::Invalid("duplicate remote profile identity"));
+            return Err(ProfileError::Invalid(
+                "this account already has a profile on this server. Run bitgarth auth status, log out of that profile, and pair again",
+            ));
         }
         self.profiles.push(profile);
         Ok(())
@@ -249,7 +266,29 @@ impl ProfileStore {
     pub(crate) fn remove(&mut self, name: &str) -> bool {
         let original_len = self.profiles.len();
         self.profiles.retain(|profile| profile.name != name);
+        if self.default.as_deref() == Some(name) {
+            self.default = None;
+        }
         self.profiles.len() != original_len
+    }
+
+    /// Make `name` the default profile. Returns false for an unknown profile.
+    pub(crate) fn set_default(&mut self, name: &str) -> bool {
+        if self.profile(name).is_none() {
+            return false;
+        }
+        self.default = Some(name.to_owned());
+        true
+    }
+
+    pub(crate) fn set_default_saved(name: &str) -> Result<bool, ProfileError> {
+        let path = profile_store_path()?;
+        ensure_profile_directory(&path)?;
+        mutate_store_at(&path, |store| Ok(store.set_default(name)))
+    }
+
+    pub(crate) fn default_name(&self) -> Option<&str> {
+        self.default.as_deref()
     }
 
     pub(crate) fn rename(&mut self, old: &str, new: &str) -> Result<RenameResult, ProfileError> {
@@ -262,6 +301,9 @@ impl ProfileStore {
             return Ok(RenameResult::Duplicate);
         }
         self.profiles[index].name = new.to_owned();
+        if self.default.as_deref() == Some(old) {
+            self.default = Some(new.to_owned());
+        }
         Ok(RenameResult::Renamed)
     }
 
@@ -282,13 +324,30 @@ impl ProfileStore {
                 ))
             });
         }
+        if let Some(profile) = self.default.as_deref().and_then(|name| self.profile(name)) {
+            return Ok(profile);
+        }
         match self.profiles.as_slice() {
             [profile] => Ok(profile),
             [] => Err(ProfileSelectionError(
-                "no profiles configured; run the `pair` command first".to_owned(),
+                "not logged in to any BitGarth server".to_owned(),
             )),
             _ => Err(ProfileSelectionError(self.selection_guidance())),
         }
+    }
+
+    /// Move the selected profile out of the store.
+    pub(crate) fn into_selected(
+        mut self,
+        name: Option<&str>,
+    ) -> Result<Profile, ProfileSelectionError> {
+        let selected = self.select(name)?.name.clone();
+        let index = self
+            .profiles
+            .iter()
+            .position(|profile| profile.name == selected)
+            .ok_or_else(|| ProfileSelectionError(self.selection_guidance()))?;
+        Ok(self.profiles.swap_remove(index))
     }
 
     fn selection_guidance(&self) -> String {
@@ -302,7 +361,7 @@ impl ProfileStore {
             "no profiles are configured".to_owned()
         } else {
             format!(
-                "choose one with --profile <NAME>; available profiles: {}",
+                "choose one with --profile <NAME> or set a default with `bitgarth auth switch <NAME>`; available profiles: {}",
                 names.join(", ")
             )
         }
@@ -311,6 +370,9 @@ impl ProfileStore {
     fn validate(&self) -> Result<(), ProfileError> {
         if self.version != STORE_VERSION {
             return Err(ProfileError::Invalid("unsupported profile store version"));
+        }
+        if let Some(default) = &self.default {
+            validate_profile_name(default)?;
         }
 
         let mut names = HashSet::new();
@@ -349,6 +411,7 @@ impl Profile {
         canonical_origin: Url,
         remote_user_id: String,
         client_key: SecretClientKey,
+        permission: &str,
         allow_insecure_http: bool,
     ) -> Result<Self, ProfileError> {
         let profile = Self {
@@ -356,7 +419,7 @@ impl Profile {
             canonical_origin,
             remote_user_id,
             client_key,
-            granted_permissions: vec![REQUIRED_PERMISSION.to_owned()],
+            granted_permissions: vec![permission.to_owned()],
             allow_insecure_http,
         };
         validate_profile(&profile)?;
@@ -377,6 +440,13 @@ impl Profile {
 
     pub(crate) fn allows_insecure_http(&self) -> bool {
         self.allow_insecure_http
+    }
+
+    /// The single access level granted to this profile.
+    pub(crate) fn permission(&self) -> &str {
+        self.granted_permissions
+            .first()
+            .map_or("balances_read", String::as_str)
     }
 }
 
@@ -453,7 +523,7 @@ fn validate_profile(profile: &Profile) -> Result<(), ProfileError> {
 }
 
 fn validate_permissions(permissions: &[String]) -> Result<(), ProfileError> {
-    if permissions.len() != 1 || permissions[0] != REQUIRED_PERMISSION {
+    if permissions.len() != 1 || !PERMISSIONS.contains(&permissions[0].as_str()) {
         return Err(ProfileError::Invalid("unsupported profile permissions"));
     }
     Ok(())
@@ -477,6 +547,10 @@ fn ensure_profile_directory(path: &Path) -> Result<(), ProfileError> {
     let bitgarth_dir = cli_dir
         .parent()
         .ok_or(ProfileError::Invalid("invalid profile store path"))?;
+    // The OS config directory (such as ~/.config) may not exist yet.
+    if let Some(config_dir) = bitgarth_dir.parent() {
+        std::fs::create_dir_all(config_dir).map_err(ProfileError::Io)?;
+    }
     platform::ensure_secure_directory(bitgarth_dir).map_err(ProfileError::Io)?;
     platform::ensure_secure_directory(cli_dir).map_err(ProfileError::Io)
 }
@@ -1258,8 +1332,38 @@ mod tests {
         let error = one.select(None).err().map(|error| error.to_string());
         assert_eq!(
             error.as_deref(),
-            Some("choose one with --profile <NAME>; available profiles: alpha, business")
+            Some(
+                "choose one with --profile <NAME> or set a default with `bitgarth auth switch <NAME>`; available profiles: alpha, business"
+            )
         );
+
+        assert!(one.set_default("alpha"));
+        assert!(!one.set_default("missing"));
+        assert_eq!(
+            one.select(None).ok().map(|profile| profile.name.as_str()),
+            Some("alpha")
+        );
+        assert!(matches!(
+            one.rename("alpha", "primary"),
+            Ok(RenameResult::Renamed)
+        ));
+        assert_eq!(one.default_name(), Some("primary"));
+        assert!(one.remove("primary"));
+        assert_eq!(one.default_name(), None);
+    }
+
+    #[test]
+    fn profiles_accept_each_known_permission_and_reject_others() {
+        for permission in super::PERMISSIONS {
+            let mut store = ProfileStore::empty();
+            let mut candidate = profile("business", "https://example.com/", "user-1");
+            candidate.granted_permissions = vec![permission.to_owned()];
+            assert!(store.insert(candidate).is_ok(), "{permission}");
+        }
+        let mut store = ProfileStore::empty();
+        let mut candidate = profile("business", "https://example.com/", "user-1");
+        candidate.granted_permissions = vec!["admin".to_owned()];
+        assert!(store.insert(candidate).is_err());
     }
 
     #[cfg(unix)]

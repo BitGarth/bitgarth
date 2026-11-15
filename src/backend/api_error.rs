@@ -15,6 +15,7 @@ pub(crate) enum ApiErrorCode {
     Conflict,
     NotFound,
     TooManyRequests,
+    ServiceUnavailable,
     Internal,
 }
 
@@ -28,6 +29,7 @@ impl ApiErrorCode {
             ApiErrorCode::Conflict => StatusCode::CONFLICT,
             ApiErrorCode::NotFound => StatusCode::NOT_FOUND,
             ApiErrorCode::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
+            ApiErrorCode::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             ApiErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

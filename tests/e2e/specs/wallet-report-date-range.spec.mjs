@@ -1,4 +1,5 @@
 import { expect, test } from "../helpers/mock-fixture.mjs";
+import { formatDefaultUtcTimestamp } from "../helpers/timestamps.mjs";
 import {
   TEST_ETH_ADDRESS,
   addAndSyncLimitedBitcoinAccount,
@@ -10,37 +11,70 @@ import {
   markTestBoundary,
 } from "../helpers/diagnostics.mjs";
 
-test("limited Bitcoin report stays unavailable without fiat on desktop and mobile", async ({
+async function expectLastConfirmation(note, observedAt) {
+  await expect(note).toBeVisible();
+  await expect(note).toContainText("Last confirmed 0.00095 BTC");
+  const time = note.locator("time");
+  await expect(time).toBeVisible();
+  await expect(time).toHaveText(formatDefaultUtcTimestamp(observedAt));
+  expect(Date.parse(await time.getAttribute("datetime"))).toBe(Date.parse(observedAt));
+}
+
+test("limited Bitcoin reports show the last confirmation beside an unknown closing value on desktop and mobile", async ({
   page,
   mockServers,
 }, testInfo) => {
   await markTestBoundary(testInfo, "START limited-bitcoin-report");
   const diagnostics = await attachBrowserDiagnostics(page, testInfo);
   await registerViaUiAndExpectAuthenticated(page);
-  const { wallet_id: walletId } = await addAndSyncLimitedBitcoinAccount(
+  const walletLabel = "E2E Limited Bitcoin Report";
+  const { wallet_id: walletId, account_id: accountId } = await addAndSyncLimitedBitcoinAccount(
     page,
     mockServers,
-    "E2E Limited Bitcoin Report",
+    walletLabel,
   );
+  const response = await page.request.get(`/_app/user/wallets/${walletId}/report?timezone=UTC`);
+  expect(response.ok()).toBeTruthy();
+  const { accounts } = await response.json();
+  const accountReport = accounts.find((account) => account.account_id === accountId);
+  const observedAt = accountReport?.last_confirmed_bitcoin?.observed_at;
+  expect(Date.parse(observedAt)).not.toBeNaN();
 
-  await page.goto(`/wallets/${walletId}`);
-  const desktopRow = page.locator(".wr-row").filter({ hasText: "Limited Bitcoin" });
-  await expect(desktopRow).toContainText("History coverage: Coverage limited");
-  await expect(desktopRow.locator(".wr-crypto-value")).toHaveText([
-    "Not available",
-    "Not available",
-  ]);
-  await expect(desktopRow.locator(".wr-fiat-value")).toHaveCount(0);
+  for (const mobile of [false, true]) {
+    if (mobile) {
+      await page.setViewportSize({ width: 390, height: 844 });
+    }
+    const row = page.locator(mobile ? ".wr-card" : ".wr-row");
+    const valueCell = mobile ? ".wr-card-side" : ".wr-td-value";
+    const fiat = mobile ? ".wr-card-fiat-value" : ".wr-fiat-value";
+    await page.goto(`/wallets/${walletId}`);
+    const account = row.filter({ hasText: "Limited Bitcoin" });
+    await expect(account).toBeVisible();
+    await expect(account).toContainText("History coverage: Coverage limited");
+    await expect(account.locator(mobile ? ".wr-card-crypto" : ".wr-crypto-value")).toHaveText([
+      "Not available", "Not available",
+    ]);
+    await expect(account.locator(fiat)).toHaveCount(0);
+    const accountNote = account.locator(valueCell).nth(1).locator(".wr-last-confirmed");
+    await expectLastConfirmation(accountNote, observedAt);
 
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.reload();
-  const mobileCard = page.locator(".wr-card").filter({ hasText: "Limited Bitcoin" });
-  await expect(mobileCard).toContainText("History coverage: Coverage limited");
-  await expect(mobileCard.locator(".wr-card-crypto")).toHaveText([
-    "Not available",
-    "Not available",
+    await page.goto("/reports/holdings");
+    const wallet = row.filter({ hasText: walletLabel });
+    await expect(wallet).toBeVisible();
+    await expect(wallet.locator(fiat)).toHaveText(["—", "—"]);
+    const walletNote = wallet.locator(valueCell).nth(1).locator(".wr-last-confirmed");
+    await expect(walletNote).toContainText("Limited Bitcoin");
+    await expectLastConfirmation(walletNote, observedAt);
+    await expect(page.getByRole("button", { name: /§ Prices/ })).toHaveCount(0);
+  }
+
+  const summary = page.locator(".wr-mobile-view .wr-summary-card");
+  await expect(summary).toBeVisible();
+  await expect(summary.locator(".wr-summary-value")).toHaveText(["—", "—"]);
+  await expect(summary.locator(".wr-gap-note")).toHaveText([
+    "Not every wallet has a value for this date",
+    "Not every wallet has a value for this date",
   ]);
-  await expect(mobileCard.locator(".wr-card-fiat-value")).toHaveCount(0);
 
   assertNoBrowserDiagnostics(diagnostics);
   await markTestBoundary(testInfo, "END limited-bitcoin-report");
@@ -85,8 +119,11 @@ test("wallet report canonicalizes missing route and keeps the selected range", a
   const canonicalUrl = new URL(reportPage.url());
   const canonicalStart = canonicalUrl.searchParams.get("start");
   const canonicalEnd = canonicalUrl.searchParams.get("end");
-  expect(canonicalStart).toBeTruthy();
-  expect(canonicalEnd).toBeTruthy();
+  const report = await reportPage.request.get(`/_app/user/wallets/${walletId}/report?timezone=UTC`);
+  expect(report.ok()).toBeTruthy();
+  const { access } = await report.json();
+  expect(canonicalStart).toBe(access.requested_from);
+  expect(canonicalEnd).toBe(access.requested_to);
   expect(canonicalUrl.searchParams.get("from")).toBeNull();
   expect(canonicalUrl.searchParams.get("to")).toBeNull();
 
@@ -98,8 +135,8 @@ test("wallet report canonicalizes missing route and keeps the selected range", a
 
   const startInput = reportPage.locator("#wallet-report-start");
   const endInput = reportPage.locator("#wallet-report-end");
-  await expect(startInput).toHaveValue(canonicalStart);
-  await expect(endInput).toHaveValue(canonicalEnd);
+  await expect(startInput).toHaveValue(access.effective_from);
+  await expect(endInput).toHaveValue(access.effective_to);
 
   const previousYear = Number(canonicalStart.slice(0, 4)) - 1;
   const previousYearStart = `${previousYear}-01-01`;
@@ -120,7 +157,8 @@ test("wallet report canonicalizes missing route and keeps the selected range", a
   await expect(reportPage.locator(".wr-free-window-badge")).toContainText(
     "Free window applied",
   );
-  await expect(reportPage.locator(".date-range-year-value")).toHaveText("Custom range");
+  // The dial names the year the user chose, even though the Free window clamps it.
+  await expect(reportPage.locator(".date-range-year-value")).toHaveText(String(previousYear));
 
   assertNoBrowserDiagnostics(diagnostics);
   await reportPage.close();
@@ -129,13 +167,16 @@ test("wallet report canonicalizes missing route and keeps the selected range", a
 
 test("holdings report canonicalizes a missing range", async ({ page }) => {
   await registerViaUiAndExpectAuthenticated(page);
+  const report = await page.request.get("/_app/user/reports/holdings?timezone=UTC");
+  expect(report.ok()).toBeTruthy();
+  const { access } = await report.json();
   await page.goto("/reports/holdings");
-  await expect(page.getByRole("heading", { name: "Holdings Report", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^Holdings Report\b/, level: 1 })).toBeVisible();
 
   await expect
     .poll(() => {
       const url = new URL(page.url());
-      return Boolean(url.searchParams.get("start") && url.searchParams.get("end"));
+      return [url.searchParams.get("start"), url.searchParams.get("end")];
     })
-    .toBe(true);
+    .toEqual([access.requested_from, access.requested_to]);
 });

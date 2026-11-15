@@ -1,5 +1,5 @@
 use super::helpers::{
-    handle_session_expired, prevalidate_bitcoin_address_input,
+    focus_mounted, handle_session_expired, prevalidate_bitcoin_address_input,
     prevalidate_wallet_label_for_new_wallet,
 };
 use super::wallet_dropdown::{
@@ -32,6 +32,8 @@ pub(crate) fn AddBitcoinAddressFlow(
     let mut account_label_input = use_signal(String::new);
     let mut account_label_error = use_signal(|| None::<String>);
     let mut field_error = use_signal(|| None::<String>);
+    let mut address_error = use_signal(|| None::<String>);
+    let mut address_input_el = use_signal(|| None::<std::rc::Rc<MountedData>>);
     let mut save_error = use_signal(|| None::<String>);
     let saving = use_signal(|| false);
 
@@ -60,13 +62,15 @@ pub(crate) fn AddBitcoinAddressFlow(
         }
 
         field_error.set(None);
+        address_error.set(None);
         wallet_label_error.set(None);
         account_label_error.set(None);
         save_error.set(None);
 
         let address_raw = address_input().trim().to_string();
         if let Err(err) = prevalidate_bitcoin_address_input(&address_raw) {
-            field_error.set(Some(err));
+            address_error.set(Some(err));
+            focus_mounted(address_input_el());
             finish_submit(saving);
             return;
         }
@@ -142,6 +146,9 @@ pub(crate) fn AddBitcoinAddressFlow(
                         first_matching_field_error(&err, &["account_label", "label"])
                     {
                         account_label_error.set(Some(message));
+                    } else if let Some(message) = first_matching_field_error(&err, &["address"]) {
+                        address_error.set(Some(message));
+                        focus_mounted(address_input_el());
                     } else {
                         let message = primary_field_or_message(&err, &["address", "wallet_label"]);
                         field_error.set(Some(message));
@@ -168,15 +175,27 @@ pub(crate) fn AddBitcoinAddressFlow(
                             "Useful for paper wallets or individual addresses."
                         }
 
-                        label { class: "form-label", "Bitcoin address" }
+                        label { class: "form-label", r#for: "bitcoin-address-input", "Bitcoin address" }
                         input {
                             class: "xpub-input",
+                            id: "bitcoin-address-input",
                             r#type: "text",
                             autocomplete: "off",
+                            "aria-invalid": address_error().is_some(),
+                            "aria-describedby": "bitcoin-address-input-error",
                             placeholder: "bc1q... / 1... / 3...",
                             value: "{address_input}",
-                            oninput: move |e| address_input.set(e.value()),
-                            onmounted: move |e| async move { let _ = e.set_focus(true).await; },
+                            oninput: move |e| {
+                                address_input.set(e.value());
+                                address_error.set(None);
+                            },
+                            onmounted: move |e| async move {
+                                address_input_el.set(Some(e.data()));
+                                let _ = e.set_focus(true).await;
+                            },
+                        }
+                        if let Some(error) = address_error() {
+                            p { class: "error-text", id: "bitcoin-address-input-error", role: "alert", "{error}" }
                         }
 
                         if wallets_loading {
@@ -221,7 +240,6 @@ pub(crate) fn AddBitcoinAddressFlow(
 
                         if let Some(error) = field_error() {
                             div { class: "alert alert-error",
-                                strong { "Validation error: " }
                                 "{error}"
                             }
                         }

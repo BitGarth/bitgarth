@@ -498,3 +498,183 @@ async fn test_delete_malformed_json_returns_bad_request() {
         "Expected 400 for malformed JSON"
     );
 }
+
+fn seed_daily_price(asset_id: &str, currency: &str, date: &str, price: &str) {
+    let conn = crate::db::initialize_prices_db().expect("prices db");
+    let date_utc = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").expect("date");
+    let at = date_utc.and_time(chrono::NaiveTime::MIN).and_utc();
+    crate::db::upsert_daily_price_points(
+        &conn,
+        &[crate::db::DailyPricePointUpsert {
+            asset_id: asset_id.to_string(),
+            quote_currency: crate::models::CurrencyCode::from_code(currency).expect("currency"),
+            price_time_utc: at,
+            date_utc,
+            price: price.parse().expect("price"),
+            provider_asset_id: asset_id.to_string(),
+            provider_quote_id: Some(currency.to_lowercase()),
+            license_scope: "coingecko_pro_key".to_string(),
+            retrieved_at: at,
+        }],
+    )
+    .expect("seed daily price");
+}
+
+async fn assert_report_price_source_toggle(endpoint: impl FnOnce(&str) -> String) {
+    let server = setup_test_server();
+    register_user(&server).await;
+    let user_id = super::fixtures::current_user_id(&server).await;
+    let _entitlement_guard = activate_signed_full_report_entitlements(&server).await;
+    save_currency(&server, "USD").await;
+    let wallet = add_ethereum_wallet_account(&server, ETH_ADDRESS, "Report prices").await;
+    let ada = add_manual_asset_account(&server, Some(wallet.wallet_id.as_str()), "ADA").await;
+    server
+        .post("/_app/user/manual-asset-assertions/add")
+        .json(&json!({"request": {
+            "account_id": ada["account_id"], "asserted_on": "2025-01-01", "balance": "5"
+        }}))
+        .await
+        .assert_status_ok();
+    seed_daily_price("cardano", "USD", "2025-01-02", "1.25");
+    seed_daily_price("cardano", "USD", "2025-01-03", "1.50");
+    server
+        .post("/_app/user/prices/overrides")
+        .json(&upsert_body(
+            "catalog_asset",
+            "cardano",
+            "USD",
+            "2025-01-03T12:00:00",
+            "2",
+        ))
+        .await
+        .assert_status_ok();
+
+    let url = format!(
+        "{}?from=2025-01-02&to=2025-01-03&timezone=UTC",
+        endpoint(wallet.wallet_id.as_str())
+    );
+    for enabled in [false, true] {
+        crate::db::set_price_fetching_enabled(user_id, enabled).expect("set price toggle");
+        let response = server.get(&url).await;
+        response.assert_status_ok();
+        let rows: Vec<Value> = response.json();
+        let boundary = |kind| {
+            rows.iter()
+                .find(|row| row["subject"]["id"] == "cardano" && row["boundary"] == kind)
+                .expect("Cardano boundary")
+        };
+        let opening = boundary("Opening");
+        let closing = boundary("Closing");
+        assert_eq!(closing["price"], "2");
+        assert_eq!(closing["source"]["kind"], "user_override");
+        if enabled {
+            assert_eq!(opening["price"], "1.25");
+            assert_eq!(
+                opening["source"],
+                json!({"kind": "provider_price", "provider": "coingecko"})
+            );
+        } else {
+            assert_eq!(opening["price"], Value::Null);
+            assert_eq!(opening["source"], Value::Null);
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn wallet_report_price_source_toggle() {
+    assert_report_price_source_toggle(|id| {
+        format!("/_app/user/wallets/{id}/report/resolved-prices")
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn holdings_report_price_source_toggle() {
+    assert_report_price_source_toggle(|_| {
+        "/_app/user/reports/holdings/resolved-prices".to_string()
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_price_history_shows_own_prices_always_and_coingecko_only_when_enabled() {
+    let server = setup_test_server();
+    register_user(&server).await;
+    let user_id = super::fixtures::current_user_id(&server).await;
+    save_currency(&server, "USD").await;
+    add_ethereum_wallet_account(&server, ETH_ADDRESS, "Price History").await;
+    seed_daily_price("ethereum", "USD", "2025-01-02", "3300.5");
+    seed_daily_price("ethereum", "USD", "2025-01-05", "3400");
+    seed_daily_price("ethereum", "EUR", "2025-01-03", "3100");
+    // Held only by someone else on the instance.
+    seed_daily_price("bitcoin", "USD", "2025-01-03", "95000");
+    let own_at = chrono::DateTime::parse_from_rfc3339("2025-01-03T12:00:00Z")
+        .expect("instant")
+        .with_timezone(&chrono::Utc);
+    crate::db::upsert_price_override(
+        user_id,
+        crate::services::price_overrides::NewPriceOverride {
+            subject: crate::services::price_overrides::PriceSubject::CatalogAsset(
+                crate::asset_views::CatalogAssetKey::from_trusted("ethereum"),
+            ),
+            quote_currency: crate::models::CurrencyCode::from_code("USD").expect("currency"),
+            price_time_utc: own_at,
+            price: "3350".parse().expect("price"),
+            source_note: None,
+        },
+        own_at,
+    )
+    .expect("seed own price");
+    let own =
+        json!({ "YourPrice": { "at": "2025-01-03T12:00:00Z", "price": "3350", "note": null } });
+    let url =
+        "/_app/user/prices/history?asset=bitcoin&from=2025-01-01&to=2025-01-05&sort=OldestFirst";
+
+    // CoinGecko off on a Free plan: own prices only, never limited by the window.
+    let off: Value = server.get(url).await.json();
+    assert_eq!(off["prices_enabled"], false);
+    assert_eq!(off["resolved_from"], "2025-01-01");
+    assert_eq!(off["entries"], json!([own.clone()]));
+
+    // A shared quote within the Free window must not leak into the old selection.
+    let inside_window = off["access"]["effective_to"].as_str().expect("window end");
+    seed_daily_price("ethereum", "USD", inside_window, "4200");
+    crate::db::set_price_fetching_enabled(user_id, true).expect("enable price fetching");
+    let free: Value = server.get(url).await.json();
+    assert_eq!(free["access"]["range_clamped"], true);
+    assert_eq!(free["entries"], json!([own.clone()]));
+
+    let _entitlement_guard = activate_signed_full_report_entitlements(&server).await;
+    let response = server.get(url).await;
+    response.assert_status_ok();
+    let body: Value = response.json();
+
+    assert_eq!(body["prices_enabled"], true);
+    assert_eq!(body["source"], "All");
+    assert_eq!(
+        body["assets"],
+        json!([{ "key": "ethereum", "name": "Ethereum" }])
+    );
+    assert_eq!(body["selected"], "ethereum");
+    assert_eq!(
+        body["entries"],
+        json!([
+            { "Daily": { "date_utc": "2025-01-02", "price": "3300.5" } },
+            own.clone(),
+            { "Gap": { "from": "2025-01-04", "to": "2025-01-04" } },
+            { "Daily": { "date_utc": "2025-01-05", "price": "3400" } },
+        ])
+    );
+    let raw = body.to_string();
+    assert!(!raw.contains("license_scope") && !raw.contains("retrieved_at"));
+
+    let coingecko_only: Value = server.get(&format!("{url}&source=CoinGecko")).await.json();
+    assert_eq!(
+        coingecko_only["entries"],
+        json!([
+            { "Daily": { "date_utc": "2025-01-02", "price": "3300.5" } },
+            { "Gap": { "from": "2025-01-03", "to": "2025-01-04" } },
+            { "Daily": { "date_utc": "2025-01-05", "price": "3400" } },
+        ])
+    );
+}

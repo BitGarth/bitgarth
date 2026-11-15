@@ -3303,8 +3303,8 @@ p + p { margin-top: var(--app-space-3); }
   position: absolute;
   top: 0.6rem;
   left: 0.6rem;
-  width: 3.6rem;
-  height: 3.6rem;
+  width: 4rem;
+  height: 4rem;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -3314,7 +3314,7 @@ p + p { margin-top: var(--app-space-3); }
   font-family: var(--display);
   font-style: italic;
   text-transform: uppercase;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.08em;
   font-weight: 500;
   line-height: 1;
   color: color-mix(in srgb, var(--moss) 78%, transparent);
@@ -3329,6 +3329,12 @@ p + p { margin-top: var(--app-space-3); }
   z-index: 2;
 }
 
+/* The stamp owns the top-left corner; move the plan name clear of it on
+   the same line so both tier cards keep their names aligned. */
+.payments-tier-card:has(.payments-tier-current-stamp) .payments-tier-name {
+  padding-left: 3.6rem;
+}
+
 /* Inner ring — gives the double-line rubber-stamp silhouette. */
 .payments-tier-current-stamp::before {
   content: "";
@@ -3341,15 +3347,15 @@ p + p { margin-top: var(--app-space-3); }
 
 .payments-tier-current-stamp-line {
   display: block;
-  text-indent: 0.14em; /* compensates for letter-spacing on last char */
+  text-indent: 0.08em; /* compensates for letter-spacing on last char */
 }
 
 .payments-tier-current-stamp-line--top {
-  font-size: 0.74rem;
+  font-size: 0.6rem;
 }
 
 .payments-tier-current-stamp-line--bottom {
-  font-size: 0.66rem;
+  font-size: 0.6rem;
   opacity: 0.88;
 }
 
@@ -3754,6 +3760,10 @@ p + p { margin-top: var(--app-space-3); }
   gap: var(--space-3);
   margin-bottom: var(--space-6);
 }
+/* A section opens with room above it, not flush against the previous card. */
+.card + .section-head {
+  margin-top: var(--space-7);
+}
 .section-num {
   flex-shrink: 0;
   font-family: var(--display);
@@ -3804,4 +3814,31 @@ p + p { margin-top: var(--app-space-3); }
   font-style: italic;
   font-weight: 500;
   letter-spacing: -0.02em;
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--app-space-2);
+}
+
+/* Hidden until focused: the first Tab stop skips the navigation. */
+.skip-link {
+  position: absolute;
+  left: var(--app-space-2);
+  top: -100px;
+  z-index: 1000;
+  padding: var(--app-space-2) var(--app-space-3);
+  background: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--moss);
+  border-radius: var(--radius-sm);
+}
+
+.skip-link:focus {
+  top: var(--app-space-2);
+}
+
+main:focus {
+  outline: none;
 }

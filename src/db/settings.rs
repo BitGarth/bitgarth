@@ -150,12 +150,31 @@ pub(crate) fn save_coingecko_api_key(
 pub(crate) fn save_etherscan_base_url(
     user_id: UserId,
     etherscan_base_url: Option<&EtherscanBaseUrl>,
-) -> Result<(), DbError> {
-    upsert_optional_setting(
-        user_id,
-        "etherscan_base_url",
-        etherscan_base_url.map(EtherscanBaseUrl::as_str),
-    )
+    approve: impl FnOnce(Option<RawEtherscanBaseUrl>) -> bool,
+) -> Result<bool, DbError> {
+    with_user_db_mut(user_id, |conn| {
+        let tx = conn
+            .transaction()
+            .map_err(|err| DbError::from_rusqlite_error("change Etherscan URL", err))?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT (SELECT etherscan_base_url FROM settings WHERE settings_id = ?1)",
+                [SETTINGS_ROW_ID],
+                |row| row.get(0),
+            )
+            .map_err(|err| DbError::from_rusqlite_error("read current Etherscan URL", err))?;
+        if !approve(parse_etherscan_base_url(current.as_deref())) {
+            return Ok(false);
+        }
+        upsert_optional_setting_in(
+            &tx,
+            "etherscan_base_url",
+            etherscan_base_url.map(EtherscanBaseUrl::as_str),
+        )?;
+        tx.commit()
+            .map_err(|err| DbError::from_rusqlite_error("commit Etherscan URL", err))?;
+        Ok(true)
+    })
 }
 
 pub(crate) fn save_hledger_account_prefix(
@@ -178,17 +197,25 @@ fn upsert_optional_setting(
     column: &str,
     value: Option<&str>,
 ) -> Result<(), DbError> {
+    with_user_db_mut(user_id, |conn| {
+        upsert_optional_setting_in(conn, column, value)
+    })
+}
+
+fn upsert_optional_setting_in(
+    conn: &rusqlite::Connection,
+    column: &str,
+    value: Option<&str>,
+) -> Result<(), DbError> {
     let now = Utc::now().to_rfc3339();
     let sql = format!(
         "INSERT INTO settings (settings_id, {column}, updated_at) VALUES (?1, ?2, ?3) \
          ON CONFLICT(settings_id) DO UPDATE SET {column} = excluded.{column}, updated_at = excluded.updated_at"
     );
 
-    with_user_db_mut(user_id, |conn| {
-        conn.execute(&sql, rusqlite::params![SETTINGS_ROW_ID, value, now])
-            .map_err(|e| DbError::new(format!("Failed to save setting: {}", e)))?;
-        Ok(())
-    })
+    conn.execute(&sql, rusqlite::params![SETTINGS_ROW_ID, value, now])
+        .map_err(|e| DbError::new(format!("Failed to save setting: {}", e)))?;
+    Ok(())
 }
 
 fn parse_language(value: Option<&str>) -> Option<Locale> {
@@ -196,7 +223,7 @@ fn parse_language(value: Option<&str>) -> Option<Locale> {
         Some(value) => match Locale::try_from_code(value) {
             Some(language) => Some(language),
             None => {
-                tracing::warn!("settings: unknown language '{}', ignoring", value);
+                tracing::warn!("settings: ignoring unknown language");
                 None
             }
         },
@@ -209,7 +236,7 @@ fn parse_date_time_format(value: Option<&str>) -> Option<DateTimeFormat> {
         Some(value) => match DateTimeFormat::from_code(value) {
             Some(format) => Some(format),
             None => {
-                tracing::warn!("settings: unknown date_time_format '{}', ignoring", value);
+                tracing::warn!("settings: ignoring unknown date_time_format");
                 None
             }
         },
@@ -222,7 +249,7 @@ fn parse_number_format(value: Option<&str>) -> Option<NumberFormat> {
         Some(value) => match NumberFormat::from_code(value) {
             Some(format) => Some(format),
             None => {
-                tracing::warn!("settings: unknown number_format '{}', ignoring", value);
+                tracing::warn!("settings: ignoring unknown number_format");
                 None
             }
         },
@@ -235,7 +262,7 @@ fn parse_currency(value: Option<&str>) -> Option<CurrencyCode> {
         Some(value) => match CurrencyCode::from_code(value) {
             Some(currency) => Some(currency),
             None => {
-                tracing::warn!("settings: unknown currency '{}', ignoring", value);
+                tracing::warn!("settings: ignoring unknown currency");
                 None
             }
         },
@@ -248,7 +275,7 @@ fn parse_timezone(value: Option<&str>) -> Option<UserTimezone> {
         Some(value) => match value.parse() {
             Ok(tz) => Some(UserTimezone(tz)),
             Err(_) => {
-                tracing::warn!("settings: unknown timezone '{}', ignoring", value);
+                tracing::warn!("settings: ignoring unknown timezone");
                 None
             }
         },
@@ -261,7 +288,7 @@ fn parse_session_duration(value: Option<&str>) -> Option<SessionDuration> {
         Some(value) => match SessionDuration::from_code(value) {
             Some(duration) => Some(duration),
             None => {
-                tracing::warn!("settings: unknown session_duration '{}', ignoring", value);
+                tracing::warn!("settings: ignoring unknown session_duration");
                 None
             }
         },
@@ -287,12 +314,8 @@ fn parse_hledger_account_prefix(value: Option<&str>) -> Option<HledgerAccountPre
     match value {
         Some(value) => match HledgerAccountPrefix::parse(value) {
             Ok(prefix) => Some(prefix),
-            Err(err) => {
-                tracing::warn!(
-                    "settings: invalid hledger_account_prefix '{}': {}, ignoring",
-                    value,
-                    err
-                );
+            Err(_) => {
+                tracing::warn!("settings: ignoring invalid hledger_account_prefix");
                 None
             }
         },

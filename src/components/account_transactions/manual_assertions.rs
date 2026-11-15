@@ -424,6 +424,8 @@ mod tests {
             symbol: None,
             asset_name: None,
             network_name: None,
+            catalog_asset_key: crate::asset_views::CatalogAssetKey::try_new("cardano")
+                .expect("asset key"),
             opening_balance_state: crate::backend::AccountBalanceStateView::Known {
                 amount: balance_amount("1.00000000"),
             },

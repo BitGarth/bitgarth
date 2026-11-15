@@ -13,7 +13,6 @@ use crate::{
 };
 use dioxus::logger::tracing;
 use dioxus::prelude::*;
-use dioxus::router::Navigator;
 
 use super::form_helpers::{
     begin_submit, field_errors_or_empty, finish_submit, is_form_field_error,
@@ -109,19 +108,25 @@ fn apply_auth_error(
     }
 }
 
-fn navigate_after_login(navigator: Navigator, destination: Route) {
+/// Full page load after sign-in so SSR renders the destination with its data.
+/// A client-side push leaves the screen blank while the page's server futures
+/// resolve, because no suspense boundary covers the routed content. Callers
+/// skip the client-side auth update when this returns true: SSR resolves the
+/// session from the new cookie, and rendering the destination here would only
+/// start requests the unloading page then aborts.
+fn reload_into(destination: &Route) -> bool {
     #[cfg(target_arch = "wasm32")]
-    if matches!(destination, Route::PairingApproval { .. }) {
+    {
         let path = destination.to_string();
-        if web_sys::window()
+        web_sys::window()
             .and_then(|window| window.location().set_href(&path).ok())
             .is_some()
-        {
-            return;
-        }
     }
-
-    navigator.push(destination);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = destination;
+        false
+    }
 }
 
 #[component]
@@ -210,6 +215,9 @@ pub fn AuthShell(mode: AuthEntryMode, pairing_code: Option<String>) -> Element {
                     let destination = pairing_code
                         .map(|code| Route::PairingApproval { code: Some(code) })
                         .unwrap_or(Route::Wallets);
+                    if reload_into(&destination) {
+                        return;
+                    }
                     finish_submit(is_loading);
                     apply_authenticated_response(
                         response,
@@ -220,10 +228,11 @@ pub fn AuthShell(mode: AuthEntryMode, pairing_code: Option<String>) -> Element {
                     );
                     username.set(String::new());
                     password.set(String::new());
-                    navigate_after_login(navigator, destination);
+                    navigator.push(destination);
                 }
                 Err(e) => {
                     finish_submit(is_loading);
+                    password.set(String::new());
                     apply_auth_error("login", e, field_errors, banner_state);
                 }
             }
@@ -297,6 +306,9 @@ pub fn AuthShell(mode: AuthEntryMode, pairing_code: Option<String>) -> Element {
                         user_id = %user_id,
                         "auth ui: register succeeded"
                     );
+                    if reload_into(&Route::Wallets) {
+                        return;
+                    }
                     apply_authenticated_response(
                         response,
                         &settings_state_register,
@@ -349,7 +361,7 @@ pub fn AuthShell(mode: AuthEntryMode, pairing_code: Option<String>) -> Element {
         "privately."
     };
     let lede = if is_pairing_login {
-        "Sign in to review this CLI pairing request. Signing in does not approve it; verify the code and requested balances_read permission on the next screen."
+        "Sign in to review this CLI pairing request. Signing in does not approve it; verify the code and requested permission on the next screen."
     } else if is_login {
         "Your wallets are exactly where you left them. Password-locked, and yours alone."
     } else {

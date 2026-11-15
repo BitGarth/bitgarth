@@ -217,7 +217,7 @@ pub(super) fn WalletsSection(
                                 div { class: "card-body",
                                     super::super::EmptyWalletIllustration {}
                                     p { class: "empty-state-heading", "data-testid": "wallets-empty-state-title", "No wallets linked yet." }
-                                    p { class: "empty-state-body", "data-testid": "wallets-empty-state-body", "Use the + Add button above to get started." }
+                                    p { class: "empty-state-body", "data-testid": "wallets-empty-state-body", "Add a Bitcoin xpub, an address, or a manual asset with + Add to start." }
                                 }
                             }
                         }
@@ -246,6 +246,8 @@ pub(super) fn WalletsSection(
                                         }
                                     }
                                 }
+                                // Collapse/expand only helps once there is more than one wallet.
+                                if wallets.len() > 1 {
                                 div { class: "wallet-list-controls",
                                     button {
                                         class: "btn ghost wallet-list-control-btn",
@@ -265,6 +267,7 @@ pub(super) fn WalletsSection(
                                         onclick: move |_| collapsed_wallets.with_mut(|ids| ids.clear()),
                                         "Expand all"
                                     }
+                                }
                                 }
                             }
                             div { class: "wallet-list",

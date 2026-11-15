@@ -331,47 +331,40 @@ fn load_native_account_ids_conn(
 
 pub(crate) fn run_pending_user_data_repairs_conn(
     conn: &mut rusqlite::Connection,
-    user_id: UserId,
     now: DateTime<Utc>,
 ) -> Result<(), DbError> {
     run_registered_user_data_repair_conn(
         conn,
-        user_id,
         BTC_LEDGER_VALUE_EXCLUDES_FEE_REPAIR,
         now,
         repair_btc_ledger_value_excludes_fee_conn,
     )?;
     run_registered_user_data_repair_conn(
         conn,
-        user_id,
         BTC_LEDGER_SELF_TRANSFER_DIRECTION_REPAIR,
         now,
         repair_btc_ledger_value_excludes_fee_conn,
     )?;
     run_registered_user_data_repair_conn(
         conn,
-        user_id,
         NATIVE_LEDGER_BALANCE_DELTA_REPAIR,
         now,
         repair_native_ledger_balance_delta_conn,
     )?;
     run_registered_user_data_repair_conn(
         conn,
-        user_id,
         ETHERSCAN_PROVIDER_TRANSFER_KEY_REPAIR,
         now,
         repair_etherscan_provider_transfer_keys_conn,
     )?;
     run_registered_user_data_repair_conn(
         conn,
-        user_id,
         FAILED_TRANSACTION_ACCOUNTING_REPAIR,
         now,
         repair_failed_transaction_accounting_conn,
     )?;
     run_registered_user_data_repair_conn(
         conn,
-        user_id,
         ACCOUNT_ADMISSION_ORDER_REPAIR,
         now,
         backfill_account_admission_conn,
@@ -384,7 +377,6 @@ fn elapsed_millis(started_at: Instant) -> u64 {
 
 fn run_registered_user_data_repair_conn(
     conn: &mut rusqlite::Connection,
-    user_id: UserId,
     repair_key: &str,
     now: DateTime<Utc>,
     repair: fn(&mut rusqlite::Connection, DateTime<Utc>) -> Result<(), DbError>,
@@ -395,14 +387,13 @@ fn run_registered_user_data_repair_conn(
         return Ok(());
     }
 
-    tracing::info!(user_id = %user_id, repair_key, "user data repair started");
+    tracing::info!(repair_key, "user data repair started");
     let started_at = Instant::now();
     match repair(conn, now)
         .and_then(|()| mark_user_data_repair_completed_conn(conn, repair_key, now))
     {
         Ok(()) => {
             tracing::info!(
-                user_id = %user_id,
                 repair_key,
                 duration_ms = elapsed_millis(started_at),
                 "user data repair completed"
@@ -413,9 +404,7 @@ fn run_registered_user_data_repair_conn(
             let repair_error = truncate_repair_error(&err.to_string());
             let _ = record_user_data_repair_failure_conn(conn, repair_key, now, &repair_error);
             tracing::error!(
-                user_id = %user_id,
                 repair_key,
-                error = %repair_error,
                 duration_ms = elapsed_millis(started_at),
                 "user data repair failed"
             );
@@ -1138,7 +1127,7 @@ mod tests {
                 seed_internal_head(conn, &competing_source, network, &hash, "1", raw_internal_payload(&hash, "1", &address.checksummed(), "888"), now - Duration::seconds(1));
                 conn.execute("INSERT INTO chain_transactions (id, asset_id, network, tx_hash, status, created_at, updated_at) VALUES ('unrelated', 'ethereum', ?1, ?2, 'confirmed', ?3, ?3)", params![network.as_str(), "89".repeat(32), now.to_rfc3339()]).unwrap();
                 let raw_before = accounting_snapshot(conn, &["raw_etherscan_normal_transaction_versions", "raw_etherscan_internal_transaction_versions"]);
-                run_pending_user_data_repairs_conn(conn, user, now + Duration::days(1))?;
+                run_pending_user_data_repairs_conn(conn, now + Duration::days(1))?;
                 let row: (String, i64, i64, String, String) = conn.query_row("SELECT status, value_amount_lo, closing_balance_lo, occurred_at, (SELECT updated_at FROM chain_transactions WHERE tx_hash = ?1) FROM account_transaction_ledger WHERE tx_hash = ?1", [&hash], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))).unwrap();
                 assert_eq!(row, ("confirmed".into(), 33, 33, dt("2023-11-14T22:13:20Z").to_rfc3339(), now.to_rfc3339()));
                 assert_eq!(conn.query_row("SELECT COUNT(*) FROM chain_transactions WHERE id = 'unrelated'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
@@ -1146,7 +1135,7 @@ mod tests {
                 assert_eq!(load_user_data_repair_status_conn(conn, "failed_transaction_accounting_v1")?, Some(UserDataRepairStatus::Completed));
                 let tables = ["chain_transactions", "account_transfers", "account_transaction_ledger", "user_data_repairs", "wallets", "digital_asset_accounts"];
                 let first = accounting_snapshot(conn, &tables);
-                run_pending_user_data_repairs_conn(conn, user, now + Duration::days(2))?;
+                run_pending_user_data_repairs_conn(conn, now + Duration::days(2))?;
                 assert_eq!(first, accounting_snapshot(conn, &tables));
                 Ok::<(), DbError>(())
             }).unwrap();
@@ -1197,9 +1186,10 @@ mod tests {
                 let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
                 let writer = RepairLogWriter(logs.clone());
                 let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false).with_writer(move || writer.clone()).finish();
-                let error = tracing::subscriber::with_default(subscriber, || run_pending_user_data_repairs_conn(conn, user, now)).unwrap_err().to_string();
+                let error = tracing::subscriber::with_default(subscriber, || run_pending_user_data_repairs_conn(conn, now)).unwrap_err().to_string();
                 let logged = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
                 assert!(logged.contains("user data repair failed"));
+                assert!(!logged.contains(&user.to_string()));
                 assert!(!logged.contains("secret"));
                 assert!(!logged.contains(&address.checksummed()));
                 assert!(!logged.contains(&"78".repeat(32)));
@@ -1214,7 +1204,7 @@ mod tests {
                 conn.execute_batch("DROP TRIGGER IF EXISTS fail_replay").unwrap();
                 conn.execute("DELETE FROM raw_etherscan_normal_transaction_versions", []).unwrap();
                 seed_normal_head(conn, &source, Network::Mainnet, &"78".repeat(32), &address.checksummed(), "33", now);
-                run_pending_user_data_repairs_conn(conn, user, now + Duration::days(1))?;
+                run_pending_user_data_repairs_conn(conn, now + Duration::days(1))?;
                 assert_eq!(load_user_data_repair_status_conn(conn, "failed_transaction_accounting_v1")?, Some(UserDataRepairStatus::Completed));
                 Ok::<(), DbError>(())
             }).unwrap();
@@ -1266,7 +1256,7 @@ mod tests {
             conn.execute("UPDATE raw_etherscan_normal_transaction_versions SET payload_bytes = ?1", [serde_json::to_vec(&payload).unwrap()]).unwrap();
             conn.execute("DELETE FROM raw_etherscan_internal_transaction_versions", []).unwrap();
             conn.execute("DELETE FROM account_transfers WHERE provider_transfer_key = 'internal:1'", []).unwrap();
-            run_pending_user_data_repairs_conn(conn, user, now + Duration::days(1))?;
+            run_pending_user_data_repairs_conn(conn, now + Duration::days(1))?;
             let row: (String, String, i64, i64, i64, i64) = conn.query_row("SELECT status, occurred_at, value_amount_lo, balance_delta_lo, balance_delta_negative, closing_balance_lo FROM account_transaction_ledger WHERE tx_hash = ?1", [hash], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).unwrap();
             assert_eq!(row, ("failed".into(), now.to_rfc3339(), 33, 21000, 1, 29000));
             Ok::<(), DbError>(())
@@ -1291,7 +1281,7 @@ mod tests {
                 [],
             )
             .unwrap();
-            run_pending_user_data_repairs_conn(conn, user, now + Duration::days(1))?;
+            run_pending_user_data_repairs_conn(conn, now + Duration::days(1))?;
             let row: (String, i64) = conn
                 .query_row(
                     "SELECT status, value_amount_lo FROM account_transaction_ledger",
@@ -1341,7 +1331,7 @@ mod tests {
                 [serde_json::to_vec(&payload).unwrap()],
             )
             .unwrap();
-            run_pending_user_data_repairs_conn(conn, user, now + Duration::days(1))?;
+            run_pending_user_data_repairs_conn(conn, now + Duration::days(1))?;
             assert_eq!(
                 conn.query_row(
                     "SELECT COUNT(*) FROM account_transaction_ledger WHERE account_id = ?1",
@@ -1387,10 +1377,10 @@ mod tests {
             payload["isError"] = "1".into();
             seed_internal_head(conn, &source, Network::Mainnet, &hash, "1", serde_json::to_vec(&payload).unwrap(), now);
             conn.execute_batch("CREATE TEMP TRIGGER fail_later BEFORE UPDATE ON account_transfers BEGIN SELECT RAISE(FAIL, 'synthetic failure'); END;").unwrap();
-            assert!(run_pending_user_data_repairs_conn(conn, user, now).is_err());
+            assert!(run_pending_user_data_repairs_conn(conn, now).is_err());
             assert_eq!(conn.query_row("SELECT COUNT(*) FROM chain_transactions WHERE tx_hash = ?1", [&hash], |r| r.get::<_, i64>(0)).unwrap(), 0);
             conn.execute_batch("DROP TRIGGER fail_later").unwrap();
-            run_pending_user_data_repairs_conn(conn, user, now + Duration::days(1))?;
+            run_pending_user_data_repairs_conn(conn, now + Duration::days(1))?;
             assert_eq!(conn.query_row("SELECT COUNT(*) FROM chain_transactions WHERE tx_hash = ?1", [&hash], |r| r.get::<_, i64>(0)).unwrap(), 0);
             assert_eq!(conn.query_row("SELECT COUNT(*) FROM raw_etherscan_internal_transaction_versions WHERE tx_hash = ?1", [&hash], |r| r.get::<_, i64>(0)).unwrap(), 1);
             Ok::<(), DbError>(())
@@ -1418,14 +1408,14 @@ mod tests {
             let mut payload: serde_json::Value = serde_json::from_slice(&raw_internal_payload(&hash, "1", &address.checksummed(), "11")).unwrap();
             payload["timeStamp"] = "".into();
             conn.execute("UPDATE raw_etherscan_internal_transaction_versions SET payload_bytes = ?1", [serde_json::to_vec(&payload).unwrap()]).unwrap();
-            run_pending_user_data_repairs_conn(conn, user, now + Duration::days(1))?;
+            run_pending_user_data_repairs_conn(conn, now + Duration::days(1))?;
             let metadata = conn.query_row("SELECT status, fee_amount_hi, fee_amount_lo, nonce, block_height, block_hash, block_time FROM chain_transactions WHERE tx_hash = ?1", [&hash], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<i64>>(2)?, r.get::<_, Option<i64>>(3)?, r.get::<_, Option<i64>>(4)?, r.get::<_, Option<String>>(5)?, r.get::<_, Option<String>>(6)?))).unwrap();
             assert_eq!(metadata, ("confirmed".into(), Some(0), Some(21000), Some(7), Some(10), Some("retained-block".into()), Some(now.to_rfc3339())));
             let ledger: (Option<i64>, i64, i64, i64) = conn.query_row("SELECT fee_amount_lo, balance_delta_lo, balance_delta_negative, closing_balance_lo FROM account_transaction_ledger WHERE tx_hash = ?1", [&hash], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
             assert_eq!(ledger, (Some(21000), 21022, 1, 28978));
             let tables = ["chain_transactions", "account_transfers", "account_transaction_ledger", "user_data_repairs"];
             let snapshot = accounting_snapshot(conn, &tables);
-            run_pending_user_data_repairs_conn(conn, user, now + Duration::days(2))?;
+            run_pending_user_data_repairs_conn(conn, now + Duration::days(2))?;
             assert_eq!(snapshot, accounting_snapshot(conn, &tables));
             Ok::<(), DbError>(())
         }).unwrap();
@@ -1448,12 +1438,12 @@ mod tests {
                 conn.execute("INSERT INTO account_transfers (id, chain_transaction_id, asset_id, network, tx_hash, transfer_index, provider_transfer_key, transfer_kind, from_address_id, to_address_id, value_amount_hi, value_amount_lo, created_at, updated_at) VALUES (?1, ?1, 'ethereum', 'mainnet', ?2, 0, 'legacy:0', 'normal', ?3, ?4, 0, ?5, ?6, ?6)", params![id, hash, sender.then(|| account.address_id.to_string()), (!sender).then(|| account.address_id.to_string()), amount, time.to_rfc3339()]).unwrap();
             }
             reset_accounting_repair(conn);
-            run_pending_user_data_repairs_conn(conn, user, now)?;
+            run_pending_user_data_repairs_conn(conn, now)?;
             let ledger = conn.query_row("SELECT fee_amount_lo, balance_delta_lo, balance_delta_negative, closing_balance_lo FROM account_transaction_ledger WHERE chain_transaction_id = 'send'", [], |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?))).unwrap();
             assert_eq!(ledger, (Some(1), 401, 1, 1599));
             conn.execute("UPDATE account_transfers SET transfer_kind = 'internal' WHERE id = 'send'", []).unwrap();
             reset_accounting_repair(conn);
-            run_pending_user_data_repairs_conn(conn, user, now)?;
+            run_pending_user_data_repairs_conn(conn, now)?;
             let ledger = conn.query_row("SELECT fee_amount_lo, balance_delta_lo, closing_balance_lo FROM account_transaction_ledger WHERE chain_transaction_id = 'send'", [], |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))).unwrap();
             assert_eq!(ledger, (None, 400, 1600), "legacy internal participation must not pay normal gas");
             Ok::<(), DbError>(())
@@ -1508,7 +1498,6 @@ mod tests {
         let result = with_user_db_mut(user_id, |conn| {
             run_registered_user_data_repair_conn(
                 conn,
-                user_id,
                 repair_key,
                 fixed_now,
                 failing_user_data_repair_conn,
@@ -1853,7 +1842,7 @@ mod tests {
                 .map_err(|err| DbError::new(format!("Failed to reset repair status: {err}")))?;
             assert_eq!(rows, 1, "repair status should be reset");
 
-            run_pending_user_data_repairs_conn(conn, user_id, fixed_now)?;
+            run_pending_user_data_repairs_conn(conn, fixed_now)?;
 
             conn.query_row(
                 "SELECT tx_type, value_amount_lo, fee_amount_lo, closing_balance_lo
@@ -2007,7 +1996,7 @@ mod tests {
             )
             .map_err(|err| DbError::new(format!("Failed to reset native repair status: {err}")))?;
 
-            run_pending_user_data_repairs_conn(conn, user_id, fixed_now)
+            run_pending_user_data_repairs_conn(conn, fixed_now)
         })?;
 
         let zero_delta_count = with_user_db(user_id, |conn| {

@@ -382,7 +382,6 @@ pub(crate) fn AddXpubFlow(
 
                                                 if let Some(error) = field_error() {
                                                     div { class: "alert alert-error",
-                                                        strong { "Validation error: " }
                                                         "{error}"
                                                     }
                                                 }

@@ -303,6 +303,14 @@ pub(crate) struct HoldingsReportResponse {
     pub(crate) subject_labels: Vec<(crate::services::price_overrides::PriceSubject, String)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct BitcoinBalanceObservationView {
+    pub(crate) account_label: String,
+    pub(crate) amount: BalanceAmountView,
+    pub(crate) observed_at: chrono::DateTime<chrono::Utc>,
+    pub(crate) latest_observed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct HoldingsReportWalletRow {
     pub(crate) wallet_id: crate::wallets::WalletId,
@@ -311,6 +319,21 @@ pub(crate) struct HoldingsReportWalletRow {
     pub(crate) closing_fiat: Option<FiatAmountView>,
     pub(crate) change_fiat: Option<FiatAmountView>,
     pub(crate) change_percent: Option<String>,
+    #[serde(default)]
+    pub(crate) last_confirmed_bitcoin: Vec<BitcoinBalanceObservationView>,
+    /// Why `opening_fiat` is missing, when it is.
+    pub(crate) opening_gap: Option<HoldingsValueGapView>,
+    /// Why `closing_fiat` is missing, when it is.
+    pub(crate) closing_gap: Option<HoldingsValueGapView>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HoldingsValueGapView {
+    /// An account's balance at the boundary is unknown (history incomplete).
+    BalanceUnknown,
+    /// Balances are known, but a price for the boundary day is missing.
+    PriceMissing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -332,6 +355,8 @@ pub(crate) struct WalletReportAccountRow {
     #[serde(default)]
     pub(crate) bitcoin_history_coverage:
         Option<crate::balance_reliability::BitcoinHistoryCoverageView>,
+    #[serde(default)]
+    pub(crate) last_confirmed_bitcoin: Option<BitcoinBalanceObservationView>,
     pub(crate) opening_balance_state: WalletReportBalanceStateView,
     pub(crate) opening_balance: Option<BalanceAmountView>,
     pub(crate) opening_balance_date: Option<NaiveDate>,

@@ -54,6 +54,23 @@ for service management, the per-service environment file, and platform details.
 
 For amd64 Ubuntu, see the [Snap installation guide](docs/user/snap.md).
 
+## Verify a release download
+
+For releases marked **Immutable** on GitHub, open a terminal in the directory
+where you downloaded the CLI or web archive. Before extracting it, run the
+GitHub CLI commands in that version’s release notes:
+
+- `gh release verify` checks GitHub’s signed record of the release tag and commit.
+- `gh release verify-asset` checks that your archive matches the published file.
+- `gh attestation verify` checks the archive’s build provenance against BitGarth’s
+  release workflow, tag, and source commit.
+
+Use the filename you downloaded and keep the tag and commit shown in the
+example for that release. If verification fails, stop before running the program.
+
+For older releases, including v0.4.4, download `SHA256SUMS` from the same
+release and compare the digest listed for your archive with its SHA-256 hash.
+
 ## Web server downloads
 
 Download the `bitgarth-web` archive for your platform from
@@ -312,25 +329,54 @@ the Internet" prompt; afterwards it launches normally from anywhere, including
 from Finder. The macOS download is signed and notarized by FernTrail B.V. —
 Finder refuses every bare command-line binary regardless of notarization.
 
-Pair interactively, or provide every value for scripts:
+Log in once; the command prints a link and a code to approve in the web app:
 
 ```shell
-bitgarth pair
-bitgarth --profile personal pair https://your-bitgarth.example.com/
-bitgarth --profile personal balancesheet
-# Short alias:
-bitgarth --profile personal bs
+bitgarth auth login https://my.bitgarth.app/
+bitgarth auth login https://your-bitgarth.example.com/ --profile home --read-only
 ```
 
-`pair` accepts a browser URL and uses its scheme, host, and port. Paths, query
-parameters, and fragments are ignored. List or rename local profiles with
-`bitgarth profile list` and `bitgarth profile rename personal primary`.
-Remove only the local profile with `bitgarth profile remove primary`; revoke
-the server-side capability from **Settings → Paired Clients** when access must
-end.
+Then work with your portfolio:
+
+```shell
+bitgarth balance                                   # alias: bs, balancesheet
+bitgarth account add bitcoin <ADDRESS_OR_XPUB> --new-wallet "Cold storage"
+bitgarth account add ethereum <ADDRESS> --wallet "Cold storage"
+bitgarth account add manual usd-coin@ethereum-mainnet --new-wallet Exchange
+bitgarth account set-balance "USDC on Exchange" 1500
+bitgarth settings set price-fetching on
+bitgarth secret set etherscan-api-key              # prompts without echo, or reads stdin
+bitgarth sync run --wait
+bitgarth report holdings --from 2026-01-01
+bitgarth export wallet-data backup.zip
+bitgarth import wallet-data backup.zip
+```
+
+An existing balance-only profile can still run `bitgarth balance` against a
+server with the original pairing API. Upgrade the server before creating a
+new read-only or full-access profile or using the new portfolio commands.
+
+Wallet-data transfers require a full-access profile and a BitGarth server with
+the wallet-data CLI endpoints. Export writes a new password-encrypted ZIP.
+Import merges wallets, accounts, addresses and manual balance entries from
+an encrypted CLI or web export. Settings, saved API keys and subscription
+transfers stay outside the CLI transfer. Enter the archive password at the
+hidden prompt or supply one line on standard input. The archive and its
+uncompressed wallet-data file must each fit within 10 MiB.
+
+`bitgarth --help` lists every command, and every command has examples in its
+own `--help`. Add `--json` to any command for complete machine-readable output;
+`bitgarth api <PATH>` sends raw requests to the `/api/v1` endpoints.
+
+A login is either full access (the default) or read-only (`--read-only`), and
+the web app shows which one is being requested before you approve it. Saved
+logins are profiles: list them with `bitgarth auth status`, pick the default
+with `bitgarth auth switch <NAME>`, and select one per command with `--profile`
+or `BITGARTH_PROFILE`. `bitgarth auth logout` revokes the Client Key on the
+server and forgets it locally.
 
 HTTPS is required by default. For a trusted plain-HTTP URL, either pass
-`--allow-insecure-http` or type `yes` after the interactive warning.
+`--allow-insecure-http` or confirm the interactive warning.
 See [Security & Privacy](docs/user/security.md#paired-cli-access) for the full
 security model.
 

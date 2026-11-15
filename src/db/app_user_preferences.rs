@@ -3,6 +3,18 @@ use crate::models::UserId;
 use chrono::Utc;
 use rusqlite::{OptionalExtension, params};
 
+pub(crate) fn any_price_fetching_enabled() -> Result<bool, DbError> {
+    super::with_db(|conn| {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM app_user_preferences JOIN users USING(user_id)
+                           WHERE price_fetching_enabled = 1)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| DbError::from_rusqlite_error("read instance price consent", e))
+    })
+}
+
 /// Read the price-fetching consent flag. Missing row = disabled.
 pub(crate) fn get_price_fetching_enabled(user_id: UserId) -> Result<bool, DbError> {
     super::with_db(|conn| {
@@ -90,6 +102,10 @@ mod tests {
     fn setup_user() -> UserId {
         enable_test_mode();
         reset_test_db();
+        insert_user()
+    }
+
+    fn insert_user() -> UserId {
         let user_id = UserId::new();
         let now = Utc::now().to_rfc3339();
         with_db_mut(|conn| {
@@ -103,6 +119,25 @@ mod tests {
         })
         .expect("seed app user");
         user_id
+    }
+
+    #[test]
+    fn aggregate_consent_uses_registered_users() {
+        let first = setup_user();
+        assert!(!any_price_fetching_enabled().unwrap());
+        set_price_fetching_enabled(first, true).unwrap();
+        assert!(any_price_fetching_enabled().unwrap());
+        let second = insert_user();
+        set_price_fetching_enabled(second, true).unwrap();
+        set_price_fetching_enabled(first, false).unwrap();
+        assert!(any_price_fetching_enabled().unwrap());
+        with_db_mut(|conn| {
+            conn.execute("DELETE FROM users WHERE user_id=?1", [second.to_string()])
+                .map_err(|e| DbError::from_rusqlite_error("delete test user", e))?;
+            Ok::<(), DbError>(())
+        })
+        .unwrap();
+        assert!(!any_price_fetching_enabled().unwrap());
     }
 
     #[test]

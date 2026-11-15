@@ -917,6 +917,7 @@ fn automatic_add_trigger_request_uses_auto_add_source_and_narrow_address_scope()
                 TriggerParams::SessionCleanup(_)
                 | TriggerParams::TraceCleanup(_)
                 | TriggerParams::InactiveUserCleanup(_)
+                | TriggerParams::SharedPriceHistory
                 | TriggerParams::PriceHistoryReconciliation(_) => {
                     panic!("expected sync params")
                 }
@@ -941,6 +942,7 @@ fn automatic_add_trigger_request_uses_user_scope_for_multi_account_imports() {
         TriggerParams::SessionCleanup(_)
         | TriggerParams::TraceCleanup(_)
         | TriggerParams::InactiveUserCleanup(_)
+        | TriggerParams::SharedPriceHistory
         | TriggerParams::PriceHistoryReconciliation(_) => {
             panic!("expected sync params")
         }
@@ -970,6 +972,7 @@ fn automatic_add_trigger_request_uses_auto_add_source_and_narrow_account_scope()
         TriggerParams::SessionCleanup(_)
         | TriggerParams::TraceCleanup(_)
         | TriggerParams::InactiveUserCleanup(_)
+        | TriggerParams::SharedPriceHistory
         | TriggerParams::PriceHistoryReconciliation(_) => {
             panic!("expected sync params")
         }
@@ -1421,6 +1424,7 @@ fn report_row(asset_id: Option<AssetId>, unit_code: &str, label: &str) -> Wallet
         unit_code: unit_code.to_string(),
         symbol: None,
         bitcoin_history_coverage: None,
+        last_confirmed_bitcoin: None,
         opening_balance_state: WalletReportBalanceStateView::Unknown,
         opening_balance: None,
         opening_balance_date: None,
@@ -1435,15 +1439,17 @@ fn older_wallet_report_row_without_bitcoin_coverage_deserializes() {
     let mut older_payload =
         serde_json::to_value(report_row(Some(AssetId::BITCOIN), "BTC", "Bitcoin"))
             .expect("report row should serialize");
-    older_payload
+    let object = older_payload
         .as_object_mut()
-        .expect("report row should serialize as an object")
-        .remove("bitcoin_history_coverage");
+        .expect("report row should serialize as an object");
+    object.remove("bitcoin_history_coverage");
+    object.remove("last_confirmed_bitcoin");
 
     let decoded: WalletReportAccountRow =
         serde_json::from_value(older_payload).expect("older report row should deserialize");
 
     assert_eq!(decoded.bitcoin_history_coverage, None);
+    assert_eq!(decoded.last_confirmed_bitcoin, None);
 }
 
 #[test]

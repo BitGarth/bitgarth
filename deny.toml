@@ -36,6 +36,11 @@ allow = [
 [licenses.private]
 ignore = true
 
+# SQLite's public-domain dedication and the bundled libtomcrypt sources.
+[[licenses.exceptions]]
+crate = "sqlcipher-src@=420.0.0"
+allow = ["blessing", "WTFPL"]
+
 [bans]
 multiple-versions = "warn"
 

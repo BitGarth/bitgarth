@@ -203,8 +203,18 @@ pub(crate) fn format_current_value_for_display(
     currency: CurrencyCode,
     number_format: NumberFormat,
 ) -> String {
+    let decimals = currency.decimal_places();
     let canonical = match converted_value.parse::<f64>() {
-        Ok(value) if value.is_finite() => format_fiat_value(value, currency.decimal_places()),
+        Ok(value) if value.is_finite() => {
+            // Dust must not read as nothing: show "<€0.01" instead of "€0.00".
+            let minor_unit = 10f64.powi(i32::try_from(decimals).unwrap_or(0));
+            if value > 0.0 && (value * minor_unit).round() == 0.0 {
+                let smallest = format_fiat_value(1.0 / minor_unit, decimals);
+                let localized = format_number_for_display(&smallest, number_format);
+                return format!("<{}{localized}", currency.symbol());
+            }
+            format_fiat_value(value, decimals)
+        }
         _ => converted_value.to_string(),
     };
     let localized = format_number_for_display(&canonical, number_format);
@@ -254,9 +264,54 @@ fn group_whole_digits(whole: &str, separator: char) -> String {
     grouped
 }
 
+/// One price for display: cents from 1 upward, otherwise five significant
+/// digits so sub-cent assets keep their meaningful figures. Grouped digits.
+pub(crate) fn format_price_figure(
+    price: rust_decimal::Decimal,
+    number_format: NumberFormat,
+) -> String {
+    use rust_decimal::{Decimal, RoundingStrategy};
+    let canonical = if price.abs() >= Decimal::ONE {
+        // `{:.2}` truncates a Decimal, so round first.
+        let cents = price.round_dp_with_strategy(2, RoundingStrategy::MidpointAwayFromZero);
+        format!("{cents:.2}")
+    } else {
+        price
+            .round_sf_with_strategy(5, RoundingStrategy::MidpointAwayFromZero)
+            .unwrap_or(price)
+            .normalize()
+            .to_string()
+    };
+    format_number_for_display(&canonical, number_format)
+}
+
 #[cfg(all(test, not(bitgarth_db_unit_only)))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn price_figure_uses_cents_above_one_and_significant_digits_below() {
+        let price = |value: &str| value.parse::<rust_decimal::Decimal>().unwrap();
+        assert_eq!(
+            format_price_figure(price("57853.8084594864"), NumberFormat::DotComma),
+            "57,853.81"
+        );
+        assert_eq!(
+            format_price_figure(price("1698.2"), NumberFormat::DotComma),
+            "1,698.20"
+        );
+        assert_eq!(
+            format_price_figure(price("0.02410247524881808"), NumberFormat::DotComma),
+            "0.024102"
+        );
+        assert_eq!(
+            format_price_figure(
+                price("0.000000000024758315446978628"),
+                NumberFormat::DotComma
+            ),
+            "0.000000000024758"
+        );
+    }
 
     #[test]
     fn display_amount_with_symbol_uses_prefix_without_space() {
@@ -449,6 +504,34 @@ mod tests {
             NumberFormat::CommaSpace,
         );
         assert_eq!(result, "€52 197,20");
+    }
+
+    #[test]
+    fn format_current_value_for_display_marks_dust_below_the_minor_unit() {
+        assert_eq!(
+            format_current_value_for_display(
+                "0.0012",
+                CurrencyCode::from_code("EUR").unwrap(),
+                NumberFormat::DotComma
+            ),
+            "<€0.01"
+        );
+        assert_eq!(
+            format_current_value_for_display(
+                "0",
+                CurrencyCode::from_code("EUR").unwrap(),
+                NumberFormat::DotComma
+            ),
+            "€0.00"
+        );
+        assert_eq!(
+            format_current_value_for_display(
+                "0.4",
+                CurrencyCode::from_code("JPY").unwrap(),
+                NumberFormat::DotComma
+            ),
+            "<¥1"
+        );
     }
 
     #[test]

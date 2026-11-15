@@ -51,6 +51,33 @@ fn pairing_completion_decision(
     })
 }
 
+struct RequestedAccess {
+    title: &'static str,
+    grants: &'static str,
+    limits: &'static str,
+}
+
+fn describe_requested_access(permissions: &[String]) -> Option<RequestedAccess> {
+    Some(match permissions {
+        [permission] if permission == "full" => RequestedAccess {
+            title: "Full access (read and change)",
+            grants: "Anyone holding the Client Key can read your portfolio, change wallets, accounts, balances, prices, settings and API keys, and import or export encrypted wallet data.",
+            limits: "It cannot read stored API keys back, change your password, manage payments, or create a browser session.",
+        },
+        [permission] if permission == "read" => RequestedAccess {
+            title: "Read only",
+            grants: "Anyone holding the Client Key can read your wallets, accounts, balances, transactions, reports, prices, and settings.",
+            limits: "It cannot change anything, start sync, read stored API keys, or create a browser session.",
+        },
+        [permission] if permission == "balances_read" => RequestedAccess {
+            title: "Wallet names and balances",
+            grants: "Anyone holding the Client Key can read wallet names and balances.",
+            limits: "It cannot read transactions, export data, change settings, write financial data, start sync, or create a browser session.",
+        },
+        _ => return None,
+    })
+}
+
 #[component]
 pub fn PairingApproval(code: Option<String>) -> Element {
     let mut code_matches = use_signal(|| false);
@@ -107,6 +134,13 @@ pub fn PairingApproval(code: Option<String>) -> Element {
             let approve_pairing_expires_at = pairing.expires_at.clone();
             let deny_pairing_id = pairing.pairing_id.clone();
             let deny_code = pairing.code.clone();
+            let approve_permissions = pairing.permissions.clone();
+            let Some(access) = describe_requested_access(&pairing.permissions) else {
+                return rsx! { main { class: "page-container",
+                    h1 { "Review Client Key pairing" }
+                    p { role: "alert", "This version of BitGarth cannot describe the requested access. Refresh the page before approving." }
+                } };
+            };
             rsx! {
                 main { class: "page-container",
                     section { class: "settings-section", aria_labelledby: "pairing-title",
@@ -114,13 +148,11 @@ pub fn PairingApproval(code: Option<String>) -> Element {
                         p { class: "text-muted", "Code" }
                         p { class: "pairing-code", "{pairing.code}" }
                         p { "Client: " strong { "{pairing.client_name}" } }
-                        p { "Requested permission: read wallet names and balances." }
+                        p { "Requested permission: " strong { "{access.title}" } }
                         p {
-                            "This creates a second unlock capability that does not require your normal password after approval. Anyone holding the Client Key can read wallet names and balances."
+                            "This creates a second unlock capability that does not require your normal password after approval. {access.grants}"
                         }
-                        p {
-                            "It cannot read transactions, export data, change settings, write financial data, start sync, or create a browser session. You can revoke it from Paired Clients in Settings."
-                        }
+                        p { "{access.limits} You can revoke it from Paired clients in Settings." }
 
                         if let Some(error) = action_error() {
                             p { role: "alert", class: "form-error", "{error}" }
@@ -141,7 +173,7 @@ pub fn PairingApproval(code: Option<String>) -> Element {
                                     let request = ApprovePairingRequest {
                                         pairing_id: approve_pairing_id.clone(),
                                         code: approve_code.clone(),
-                                        permissions: vec!["balances_read".to_owned()],
+                                        permissions: approve_permissions.clone(),
                                         code_matches: code_matches(),
                                         expires_at: (!expiry.is_empty()).then(|| format!("{expiry}:00Z")),
                                     };
@@ -186,7 +218,7 @@ pub fn PairingApproval(code: Option<String>) -> Element {
                                                         Ok(PairingCompletionDecision::Waiting) => {}
                                                         Err(()) => {
                                                             completion_warning.set(Some(
-                                                                "Pairing was approved, but BitGarth could not read its completion deadline. Check the CLI or Paired Clients."
+                                                                "Pairing was approved, but BitGarth could not read its completion deadline. Check the CLI or Paired clients."
                                                                     .to_owned(),
                                                             ));
                                                             page_state.set(PairingPageState::NotConfirmed);
@@ -286,7 +318,7 @@ pub fn PairingApproval(code: Option<String>) -> Element {
                                 p { role: "alert", "{error}" }
                             } else {
                                 p { role: "status",
-                                    "Pairing could not be confirmed before it expired. Check the CLI or Paired Clients. If it did not finish, run bitgarth pair again."
+                                    "Pairing could not be confirmed before it expired. Check the CLI or Paired clients. If it did not finish, run bitgarth auth login again."
                                 }
                             }
                             a {
@@ -316,6 +348,23 @@ mod tests {
             last_used_at: None,
             revoked_at: None,
         }
+    }
+
+    #[test]
+    fn requested_access_copy_matches_each_permission() {
+        assert!(describe_requested_access(&["unknown".to_owned()]).is_none());
+        assert_eq!(
+            describe_requested_access(&["full".to_owned()]).map(|access| access.title),
+            Some("Full access (read and change)")
+        );
+        assert_eq!(
+            describe_requested_access(&["read".to_owned()]).map(|access| access.title),
+            Some("Read only")
+        );
+        assert_eq!(
+            describe_requested_access(&["balances_read".to_owned()]).map(|access| access.title),
+            Some("Wallet names and balances")
+        );
     }
 
     #[test]

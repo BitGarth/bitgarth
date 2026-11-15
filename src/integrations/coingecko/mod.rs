@@ -72,7 +72,15 @@ pub(crate) struct CoingeckoMarketChartRangeResponse {
 
 #[cfg(any(feature = "server", test))]
 impl CoingeckoMarketChartRangeResponse {
+    #[cfg(test)]
     pub(crate) fn into_daily_prices(self) -> Result<Vec<CoinGeckoDailyPrice>, String> {
+        self.into_daily_prices_at(NaiveDate::MAX)
+    }
+
+    pub(crate) fn into_daily_prices_at(
+        self,
+        today: NaiveDate,
+    ) -> Result<Vec<CoinGeckoDailyPrice>, String> {
         let mut prices = self.prices;
         prices.sort_by_key(|(millis, _)| *millis);
 
@@ -80,6 +88,11 @@ impl CoingeckoMarketChartRangeResponse {
         for (millis, raw_price) in prices {
             let price_time = DateTime::<Utc>::from_timestamp_millis(millis)
                 .ok_or_else(|| format!("invalid CoinGecko price timestamp: {millis}"))?;
+            if price_time.date_naive() > today
+                || (price_time.date_naive() == today && price_time.time() != chrono::NaiveTime::MIN)
+            {
+                continue;
+            }
             let price = MarketPrice::parse_json_raw(raw_price.get())?;
             daily_prices.insert(
                 price_time.date_naive(),
@@ -133,7 +146,15 @@ pub(crate) struct CoingeckoCoinDetail {
     pub(crate) detail_platforms: std::collections::HashMap<String, CoingeckoPlatformDetail>,
 }
 
-/// Error envelope returned by CoinGecko on non-2xx responses.
+/// CoinGecko sends the status either directly or wrapped under `error`.
+#[cfg(feature = "server")]
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum CoingeckoApiErrorEnvelope {
+    Direct(CoingeckoApiErrorBody),
+    Nested { error: CoingeckoApiErrorBody },
+}
+
 #[cfg(any(feature = "server", test))]
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub(crate) struct CoingeckoApiErrorBody {
@@ -278,6 +299,15 @@ mod tests {
         assert_eq!(prices[0].price.as_decimal().to_string(), "20.0");
         assert_eq!(prices[1].date_utc.to_string(), "2024-06-10");
         assert_eq!(prices[1].price.as_decimal().to_string(), "30.0");
+    }
+
+    #[test]
+    fn current_day_live_sample_cannot_replace_midnight() {
+        let raw = r#"{"prices":[[1717891200000,10],[1717934400000,20]]}"#;
+        let today = NaiveDate::from_ymd_opt(2024, 6, 9).unwrap();
+        let response: CoingeckoMarketChartRangeResponse = serde_json::from_str(raw).unwrap();
+        let rows = response.into_daily_prices_at(today).unwrap();
+        assert_eq!(rows[0].price.as_decimal().to_string(), "10");
     }
 
     #[test]

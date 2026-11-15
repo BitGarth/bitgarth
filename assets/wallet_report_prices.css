@@ -65,6 +65,8 @@
   border-radius: var(--radius-card);
   padding: var(--space-4);
   margin-top: var(--space-3);
+  /* A wide price table scrolls inside the panel instead of widening the page. */
+  overflow-x: auto;
 }
 
 .wr-prices-timezone {
@@ -108,6 +110,14 @@
   align-items: center;
   gap: var(--space-2);
   font-weight: 500;
+}
+
+a.wr-prices-asset-cell {
+  color: var(--moss);
+}
+
+a.wr-prices-asset-cell:hover {
+  color: var(--moss-bright);
 }
 
 .wr-prices-boundary-eyebrow {

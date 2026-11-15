@@ -13,9 +13,7 @@ import { parseArgs } from "node:util";
 import { mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { startMockServers } from "../helpers/mock-servers.mjs";
 import { startMockCentralServer } from "../helpers/mock-central.mjs";
@@ -26,12 +24,17 @@ import {
   writeRunMetadata,
 } from "../helpers/run-artifacts.mjs";
 import {
+  loginViaUi,
   registerViaUiAndExpectAuthenticated,
   configureMockServers,
   TEST_BTC_ADDRESS,
   TEST_ETH_ADDRESS,
 } from "../helpers/auth.mjs";
-import { HOLDINGS_REPORT_OTHER_BTC_ADDRESS, pages } from "./pages.mjs";
+import { pages } from "./pages.mjs";
+import {
+  fixtureHash, OTHER_BTC_ADDRESS, OTHER_BTC, SHOWCASE_BTC, SHOWCASE_NOW,
+  SHOWCASE_TIP, SHOWCASE_USERNAME, SHOWCASE_ZONE, seedShowcasePrices, seedShowcaseUser,
+} from "./showcase.mjs";
 import {
   fetchProductionProductOptions,
   seedMockCentralProductOptions,
@@ -42,113 +45,6 @@ import {
 const PAYMENT_SIGNING_PUBLIC_KEY_B64 =
   "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik";
 
-// Realistic BTC holding for the showcase wallet: one confirmed receive in
-// 2023, then a confirmed send of a smaller amount in 2025 with a small fee.
-// The send spends the receive's output and returns change to TEST_BTC_ADDRESS.
-// Net on-chain balance = 0.30407540 BTC. Served by the mock mempool as a
-// per-address override so the shared fixture is left untouched.
-//
-//   receive  +0.42910000 BTC (42,910,000 sats), 2023-08-17
-//   send     -0.12500000 BTC out + 0.30407540 change back, fee 2,460 sats, 2025-09-22
-const SCREENSHOT_BTC_RECEIVE_TXID =
-  "c0ffee00000000000000000000000000000000000000000000000000000000a1";
-const SCREENSHOT_BTC_TRANSACTIONS = [
-  {
-    txid: SCREENSHOT_BTC_RECEIVE_TXID,
-    vin: [
-      {
-        txid: "1111111111111111111111111111111111111111111111111111111111111111",
-        vout: 0,
-        prevout: {
-          scriptpubkey_address: "bc1q40s4njz45yfr3q0maqh2pjzk5fxfnpmzqqrz09",
-          value: 42_915_400,
-        },
-      },
-    ],
-    vout: [
-      {
-        scriptpubkey: "00144be229a5c18db975e60f9d932eb0cb3bda4d0b2c",
-        scriptpubkey_address: TEST_BTC_ADDRESS,
-        value: 42_910_000,
-      },
-    ],
-    fee: 5_400,
-    status: {
-      confirmed: true,
-      block_height: 886_000,
-      block_hash:
-        "00000000000000000000aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff0",
-      block_time: Math.floor(Date.UTC(2023, 7, 17, 12, 0, 0) / 1000),
-    },
-  },
-  {
-    txid: "c0ffee00000000000000000000000000000000000000000000000000000000a2",
-    vin: [
-      {
-        txid: SCREENSHOT_BTC_RECEIVE_TXID,
-        vout: 0,
-        prevout: {
-          scriptpubkey_address: TEST_BTC_ADDRESS,
-          value: 42_910_000,
-        },
-      },
-    ],
-    vout: [
-      {
-        scriptpubkey: "0014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        scriptpubkey_address: "bc1q4w5h7l2c0xq2m7v9n8s3k6f4d5g8h0j2p3r5t7",
-        value: 12_500_000,
-      },
-      {
-        scriptpubkey: "00144be229a5c18db975e60f9d932eb0cb3bda4d0b2c",
-        scriptpubkey_address: TEST_BTC_ADDRESS,
-        value: 30_407_540,
-      },
-    ],
-    fee: 2_460,
-    status: {
-      confirmed: true,
-      block_height: 910_000,
-      block_hash:
-        "00000000000000000000bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa1",
-      block_time: Math.floor(Date.UTC(2025, 8, 22, 12, 0, 0) / 1000),
-    },
-  },
-];
-
-const OTHER_WALLET_BTC_RECEIVE_TXID =
-  "d0ffee00000000000000000000000000000000000000000000000000000000b1";
-const OTHER_WALLET_BTC_TRANSACTIONS = [
-  {
-    txid: OTHER_WALLET_BTC_RECEIVE_TXID,
-    vin: [
-      {
-        txid: "2222222222222222222222222222222222222222222222222222222222222222",
-        vout: 0,
-        prevout: {
-          scriptpubkey_address: "1BoatSLRHtKNngkdXEeobR76b53LETtpyT",
-          value: 20_003_100,
-        },
-      },
-    ],
-    vout: [
-      {
-        scriptpubkey: "76a91462e907b15cbf27d5425399ebf6f0fb50ebb88f1888ac",
-        scriptpubkey_address: HOLDINGS_REPORT_OTHER_BTC_ADDRESS,
-        value: 20_000_000,
-      },
-    ],
-    fee: 3_100,
-    status: {
-      confirmed: true,
-      block_height: 882_000,
-      block_hash:
-        "00000000000000000000cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb2",
-      block_time: Math.floor(Date.UTC(2023, 6, 10, 12, 0, 0) / 1000),
-    },
-  },
-];
-
 // Showcase ETH account: one confirmed 2023 receive and one 2025 send. The
 // final live balance matches the transfer value minus the gas fee:
 // 1.847259 - 0.65 - (21000 * 12 gwei) = 1.197007 ETH.
@@ -158,9 +54,9 @@ const SCREENSHOT_ETH_SEND_VALUE_WEI = "650000000000000000";
 const SCREENSHOT_ETH_TRANSACTIONS = [
   {
     blockNumber: "21650000",
-    timeStamp: String(Math.floor(Date.UTC(2023, 8, 6, 12, 0, 0) / 1000)),
-    hash: "0xabc0000000000000000000000000000000000000000000000000000000000001",
-    from: "0x1111111111111111111111111111111111111111",
+    timeStamp: String(Math.floor(Date.UTC(2023, 8, 6, 9, 38) / 1000)),
+    hash: "0x" + fixtureHash("eth/receive"),
+    from: "0x" + fixtureHash("eth/deposit-account").slice(-40),
     to: TEST_ETH_ADDRESS,
     value: SCREENSHOT_ETH_RECEIVE_VALUE_WEI,
     gasPrice: "12000000000",
@@ -171,10 +67,10 @@ const SCREENSHOT_ETH_TRANSACTIONS = [
   },
   {
     blockNumber: "23150000",
-    timeStamp: String(Math.floor(Date.UTC(2025, 7, 12, 12, 0, 0) / 1000)),
-    hash: "0xabc0000000000000000000000000000000000000000000000000000000000002",
+    timeStamp: String(Math.floor(Date.UTC(2025, 7, 12, 18, 26) / 1000)),
+    hash: "0x" + fixtureHash("eth/send"),
     from: TEST_ETH_ADDRESS,
-    to: "0x2222222222222222222222222222222222222222",
+    to: "0x" + fixtureHash("eth/withdrawal-account").slice(-40),
     value: SCREENSHOT_ETH_SEND_VALUE_WEI,
     gasPrice: "12000000000",
     gasUsed: "21000",
@@ -184,14 +80,13 @@ const SCREENSHOT_ETH_TRANSACTIONS = [
   },
 ];
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_OUTPUT_DIR = path.resolve("test-results", "screenshots");
 const DEFAULT_STABILIZE_MS = 200;
 
 // Viewport sizes aligned to the primary desktop and mobile layouts.
 const LAYOUT_TIERS = [
-  { name: "desktop", viewport: { width: 1280, height: 720 } },
-  { name: "mobile", viewport: { width: 390, height: 844 } },
+  { name: "desktop", viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 },
+  { name: "mobile", viewport: { width: 390, height: 844 }, deviceScaleFactor: 1 },
 ];
 
 const { values: args } = parseArgs({
@@ -228,6 +123,7 @@ const {
 
 // Build output dir map: tier -> path (screenshots live under runDir/screenshots/)
 const screenshotsDir = path.join(artifactsDir, "screenshots");
+const marketingDir = path.join(screenshotsDir, "marketing");
 const outputDirMap = {};
 for (const tier of LAYOUT_TIERS) {
   outputDirMap[tier.name] = path.join(screenshotsDir, tier.name);
@@ -331,10 +227,37 @@ if (targetPages.length === 0) {
   process.exit(1);
 }
 
-async function capturePage(page, pageDef, stabilize) {
+async function newCaptureContext(browser, tier, storageState) {
+  const context = await browser.newContext({
+    baseURL: baseUrl, viewport: tier.viewport, deviceScaleFactor: tier.deviceScaleFactor,
+    timezoneId: SHOWCASE_ZONE, locale: "en-US", storageState,
+  });
+  await context.clock.setFixedTime(new Date(SHOWCASE_NOW));
+  return context;
+}
+
+async function capturePage(page, pageDef, tier, outputPath) {
   await page.goto(pageDef.path, { waitUntil: "load" });
   await page.waitForSelector(pageDef.waitFor, { state: "visible", timeout: 15_000 });
-  await page.waitForTimeout(stabilize);
+  await page.waitForTimeout(stabilizeMs);
+  if (pageDef.interact) await pageDef.interact(page);
+  await page.evaluate(() => document.fonts.ready);
+  await page.mouse.move(1, 1);
+  if (tier.name === "desktop") {
+    if (pageDef.frameMarketing) await pageDef.frameMarketing(page);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.mouse.move(1, 1);
+    await page.screenshot({
+      path: path.join(marketingDir, `${pageDef.name}.png`),
+      animations: "disabled", caret: "hide",
+    });
+    if (pageDef.frameMarketing) {
+      await page.goto(pageDef.path);
+      await page.waitForSelector(pageDef.waitFor);
+    }
+  }
+  await prepareFullPageScreenshot(page, tier);
+  await screenshotFullPage(page, tier, outputPath, stabilizeMs);
 }
 
 async function prepareFullPageScreenshot(page, tier) {
@@ -354,6 +277,23 @@ async function prepareFullPageScreenshot(page, tier) {
   });
 }
 
+// Grow the viewport to the page height instead of using `fullPage`, which
+// stitches beyond the viewport and leaves fixed layers (sidebar, paper
+// texture) ending at the original fold.
+async function screenshotFullPage(page, tier, outputPath, stabilizeMs) {
+  const height = await page.evaluate(() => document.documentElement.scrollHeight);
+  await page.setViewportSize({
+    width: tier.viewport.width,
+    height: Math.max(tier.viewport.height, height),
+  });
+  // Park the pointer on the navbar so no row keeps a hover state from an
+  // earlier interaction.
+  await page.mouse.move(1, 1);
+  await page.waitForTimeout(stabilizeMs);
+  await page.screenshot({ path: outputPath, animations: "disabled", caret: "hide" });
+  await page.setViewportSize(tier.viewport);
+}
+
 async function main() {
   await writeRunMetadata(runOutputDir, {
     test_type: "screenshots",
@@ -371,6 +311,7 @@ async function main() {
     await mkdir(outputDirMap[tier.name], { recursive: true });
   }
 
+  await mkdir(marketingDir, { recursive: true });
   const results = [];
   let mockServers;
   let mockCentral;
@@ -382,6 +323,8 @@ async function main() {
       // Central + CoinGecko base URLs are env-only (not per-user settings), so
       // their mocks must be up before the app server starts.
       mockCentral = await startMockCentralServer({ port: 0 });
+      // Keep the mock's simulated upgrade out of web screenshots.
+      mockCentral.setScenario({ latestAppVersions: { channels: { web: { latest: "0.0.0" } } } });
       mockCoingecko = await startMockCoingeckoServer({ port: 0 });
       console.log(`  Central:   ${mockCentral.baseUrl}`);
       console.log(`  CoinGecko: ${mockCoingecko.baseUrl}`);
@@ -416,8 +359,7 @@ async function main() {
       appServer = await startAppServer({
         BITGARTH_CENTRAL_BASE_URL: mockCentral.baseUrl,
         BITGARTH_COINGECKO_BASE_URL: mockCoingecko.baseUrl,
-        // Hosted suppresses software-update notices in showcase captures.
-        BITGARTH_CHANNEL: "hosted",
+        BITGARTH_CHANNEL: "web",
         BITGARTH_PAYMENT_SIGNING_PUBLIC_KEY_B64: PAYMENT_SIGNING_PUBLIC_KEY_B64,
       });
       baseUrl = appServer.url;
@@ -425,26 +367,10 @@ async function main() {
 
     console.log("Starting mock servers...");
     mockServers = await startMockServers({
+      mempoolChainTipHeight: SHOWCASE_TIP,
       mempoolAddressData: {
-        [TEST_BTC_ADDRESS]: {
-          // funded = receive 42,910,000 + change 30,407,540 = 73,317,540
-          // spent  = receive output spent by the send = 42,910,000
-          // balance = 30,407,540 sats (0.30407540 BTC)
-          stats: {
-            funded_txo_sum: 73_317_540,
-            spent_txo_sum: 42_910_000,
-            tx_count: SCREENSHOT_BTC_TRANSACTIONS.length,
-          },
-          txs: SCREENSHOT_BTC_TRANSACTIONS,
-        },
-        [HOLDINGS_REPORT_OTHER_BTC_ADDRESS]: {
-          stats: {
-            funded_txo_sum: 20_000_000,
-            spent_txo_sum: 0,
-            tx_count: OTHER_WALLET_BTC_TRANSACTIONS.length,
-          },
-          txs: OTHER_WALLET_BTC_TRANSACTIONS,
-        },
+        [TEST_BTC_ADDRESS]: SHOWCASE_BTC,
+        [OTHER_BTC_ADDRESS]: OTHER_BTC,
       },
       etherscanNativeBalanceWei: SCREENSHOT_ETH_BALANCE_WEI,
       etherscanKnownAddressTransactions: SCREENSHOT_ETH_TRANSACTIONS,
@@ -452,7 +378,9 @@ async function main() {
     console.log(`  Etherscan: ${mockServers.etherscan.baseUrl}`);
     console.log(`  Mempool:   ${mockServers.mempool.baseUrl}`);
 
-    const browser = await chromium.launch();
+    // Repaint the whole surface after viewport changes. Reusing partial tiles
+    // can round a handful of gradient pixels differently on tall pages.
+    const browser = await chromium.launch({ args: ["--disable-partial-raster", "--num-raster-threads=1"] });
 
     try {
       const unauthPages = targetPages.filter((p) => !p.auth);
@@ -461,10 +389,7 @@ async function main() {
       // Unauthenticated pages — one context per (page, tier)
       for (const tier of LAYOUT_TIERS) {
         for (const pageDef of unauthPages) {
-          const context = await browser.newContext({
-            baseURL: baseUrl,
-            viewport: tier.viewport,
-          });
+          const context = await newCaptureContext(browser, tier);
           const page = await context.newPage();
 
           try {
@@ -473,13 +398,7 @@ async function main() {
               outputDirMap[tier.name],
               `${pageDef.name}.png`,
             );
-            await capturePage(page, pageDef, stabilizeMs);
-            if (pageDef.interact) {
-              await pageDef.interact(page);
-            }
-            await prepareFullPageScreenshot(page, tier);
-            await page.waitForTimeout(stabilizeMs);
-            await page.screenshot({ path: outputPath, fullPage: true });
+            await capturePage(page, pageDef, tier, outputPath);
             results.push({
               name: pageDef.name,
               tier: tier.name,
@@ -504,27 +423,28 @@ async function main() {
       }
 
       if (authPages.length > 0) {
-        // Authenticated pages — register once, resize for tiers
-        const desktopTier = LAYOUT_TIERS[0];
-        const context = await browser.newContext({
-          baseURL: baseUrl,
-          viewport: desktopTier.viewport,
-        });
+        const [desktop, mobile] = LAYOUT_TIERS;
+        const context = await newCaptureContext(browser, desktop);
         const page = await context.newPage();
+        let mobileContext;
 
         try {
-          console.log("Registering fresh user...");
-          await registerViaUiAndExpectAuthenticated(page, undefined, {
-            useGeneratedUsername: true,
-          });
-          console.log("  User registered.");
-
+          if (isSelfContained) {
+            await seedShowcaseUser(dataDir);
+            seedShowcasePrices(dataDir);
+            await page.goto("/login");
+            await loginViaUi(page, SHOWCASE_USERNAME);
+          } else {
+            await registerViaUiAndExpectAuthenticated(page, undefined, { useGeneratedUsername: true });
+          }
+          mobileContext = await newCaptureContext(browser, mobile, await context.storageState());
+          const mobilePage = await mobileContext.newPage();
           await configureMockServers(page.request, mockServers);
           console.log("  Mock servers configured.");
 
           // Share the mock-central handle so showcase setup can configure the
           // paid scenario. Null under --base-url (external) runs.
-          const setupContext = { mockCentral: mockCentral ?? null };
+          const setupContext = { mockCentral: mockCentral ?? null, seededPrices: isSelfContained };
 
           // Process each page in order: run its setup, then capture at all tiers.
           // Order matters — wallets-empty must be captured before wallets-populated's
@@ -567,7 +487,6 @@ async function main() {
 
             for (const tier of LAYOUT_TIERS) {
               try {
-                await page.setViewportSize(tier.viewport);
                 const outputPath = path.join(
                   outputDirMap[tier.name],
                   `${pageDef.name}.png`,
@@ -576,13 +495,7 @@ async function main() {
                 console.log(
                   `Capturing ${pageDef.name} (${tier.name})...`,
                 );
-                await capturePage(page, effectiveDef, stabilizeMs);
-                if (effectiveDef.interact) {
-                  await effectiveDef.interact(page);
-                }
-                await prepareFullPageScreenshot(page, tier);
-                await page.waitForTimeout(stabilizeMs);
-                await page.screenshot({ path: outputPath, fullPage: true });
+                await capturePage(tier === desktop ? page : mobilePage, effectiveDef, tier, outputPath);
                 results.push({
                   name: pageDef.name,
                   tier: tier.name,
@@ -623,6 +536,7 @@ async function main() {
             }
           }
         } finally {
+          await mobileContext?.close();
           await context.close();
         }
       }
@@ -658,7 +572,8 @@ async function main() {
     console.log(`  FAILED ${r.tier}/${r.name}: ${r.error}`);
   }
 
-  console.log(`\n${ok.length} captured, ${failed.length} failed.`);
+  const frames = ok.filter((result) => result.tier === "desktop").length;
+  console.log(`\n${ok.length} full-page checks and ${frames} marketing frames captured, ${failed.length} failed.`);
 
   if (failed.length > 0) {
     process.exit(1);

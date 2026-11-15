@@ -7,12 +7,49 @@ use crate::payments::types::{
     PaymentSecret, ProductTier, SubscriptionSubjectId, TokenId,
     capability_schema_version_from_storage_json, entitlement_capabilities_storage_json,
 };
+use crate::payments::views::PlanDescriptions;
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{OptionalExtension, params};
 use std::collections::HashSet;
 use std::str::FromStr;
 
 const PAYMENT_SUBJECT_ROW_ID: &str = "premium";
+
+pub(crate) fn save_plan_descriptions(
+    descriptions: &PlanDescriptions,
+    fetched_at: DateTime<Utc>,
+) -> Result<(), DbError> {
+    let json = serde_json::to_string(descriptions)
+        .map_err(|err| DbError::new(format!("serialize payment plan descriptions: {err}")))?;
+    super::with_db_mut(|conn| {
+        conn.execute(
+            "INSERT INTO payment_plan_descriptions (id, fetched_at_micros, descriptions_json)
+             VALUES (1, ?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET fetched_at_micros = excluded.fetched_at_micros,
+                 descriptions_json = excluded.descriptions_json
+             WHERE excluded.fetched_at_micros >= payment_plan_descriptions.fetched_at_micros",
+            params![fetched_at.timestamp_micros(), json],
+        )
+        .map_err(|err| DbError::from_rusqlite_error("save payment plan descriptions", err))?;
+        Ok(())
+    })
+}
+
+pub(crate) fn load_plan_descriptions() -> Result<Option<PlanDescriptions>, DbError> {
+    super::with_db(|conn| {
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT descriptions_json FROM payment_plan_descriptions WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|err| DbError::from_rusqlite_error("load payment plan descriptions", err))?;
+        json.map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(|err| DbError::new(format!("invalid payment plan descriptions: {err}")))
+    })
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PaymentSubjectRecord {

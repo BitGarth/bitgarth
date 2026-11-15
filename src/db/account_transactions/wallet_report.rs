@@ -1,6 +1,6 @@
 use super::balance::{
     BalanceResolutionInputs, NativeBalanceBoundaryRequest, load_first_transaction_date,
-    resolve_balance_dates, resolve_native_balance_at_boundary,
+    resolve_balance_dates, resolve_native_balance_at_boundary, unknown_balance_resolution,
 };
 use super::types::*;
 use crate::amounts::UnsignedAmount;
@@ -16,9 +16,16 @@ use crate::report_dates::{
     local_report_date_to_utc_boundary,
 };
 use crate::wallets::{DigitalAssetAccountId, WalletId};
-use chrono::{Datelike, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use rusqlite::{OptionalExtension, params};
 use std::str::FromStr;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BitcoinBalanceObservation {
+    pub(crate) amount: UnsignedAmount,
+    pub(crate) observed_at: DateTime<Utc>,
+    pub(crate) latest_observed_at: Option<DateTime<Utc>>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WalletReportAccountRow {
@@ -27,6 +34,7 @@ pub(crate) struct WalletReportAccountRow {
     pub(crate) asset_id: crate::wallets::SyncedAssetId,
     pub(crate) bitcoin_history_coverage:
         Option<crate::db::transaction_sync::BitcoinAccountHistoryCoverage>,
+    pub(crate) last_confirmed_bitcoin: Option<BitcoinBalanceObservation>,
     pub(crate) opening_balance_state: WalletReportBalanceState,
     pub(crate) opening_balance: Option<UnsignedAmount>,
     pub(crate) opening_balance_reliability: BalanceReliability,
@@ -286,6 +294,56 @@ pub(super) fn wallet_report_balance_state_from_native(
     }
 }
 
+// The tip can be read before a sync finishes, including on the previous day.
+// Every address must have completed a run which started at or after the close.
+fn bitcoin_report_coverage_through(
+    conn: &rusqlite::Connection,
+    account_id: DigitalAssetAccountId,
+) -> Result<Option<DateTime<Utc>>, DbError> {
+    let earliest_start: Option<String> = conn
+        .query_row(
+            "SELECT CASE WHEN COUNT(tss.last_started_at) = COUNT(*)
+                         THEN MIN(tss.last_started_at) END
+             FROM digital_asset_addresses da
+             LEFT JOIN transaction_sync_state tss
+               ON tss.address_id = da.id AND tss.scope = 'address'
+              AND tss.last_result = 'success' AND tss.last_tip_height IS NOT NULL
+              AND tss.last_completed_at >= tss.last_started_at
+             WHERE da.account_id = ?1",
+            [account_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(|err| DbError::new(format!("Failed to query Bitcoin report coverage: {err}")))?;
+    earliest_start
+        .map(|raw| {
+            crate::models::parse_datetime(&raw)
+                .map_err(|err| DbError::new(format!("Invalid Bitcoin sync start time: {err}")))
+        })
+        .transpose()
+}
+
+fn load_last_confirmed_bitcoin(
+    conn: &rusqlite::Connection,
+    account_id: DigitalAssetAccountId,
+) -> Result<Option<BitcoinBalanceObservation>, DbError> {
+    let rows = crate::db::transaction_sync::load_api_confirmed_balances_for_account_conn(
+        conn, account_id,
+    )?;
+    Ok(
+        crate::db::transactions::complete_api_confirmed_balance_with_as_of(&rows)?.map(
+            |(balance, observed_at)| BitcoinBalanceObservation {
+                amount: balance.amount(),
+                observed_at,
+                latest_observed_at: rows
+                    .iter()
+                    .filter_map(|row| row.observed_at)
+                    .max()
+                    .filter(|latest| *latest != observed_at),
+            },
+        ),
+    )
+}
+
 pub(crate) fn load_wallet_report(
     user_id: UserId,
     wallet_id: WalletId,
@@ -360,24 +418,42 @@ pub(crate) fn load_wallet_report(
                 },
                 &reliability_context,
             )?;
-            let closing_balance = resolve_native_balance_at_boundary(
-                conn,
-                account.account_id,
-                &native_account_meta,
-                NativeBalanceBoundaryRequest {
-                    boundary_kind: NativeBalanceBoundaryKind::Closing,
-                    requested_boundary_date: resolved.closing_balance_date,
-                    first_transaction_date,
-                    transaction_history_pending: false,
-                },
-                &reliability_context,
-            )?;
+            let is_bitcoin = account.asset_id == crate::wallets::SyncedAssetId::Bitcoin;
+            let closing_balance = if is_bitcoin
+                && bitcoin_report_coverage_through(conn, account.account_id)?
+                    .is_none_or(|through| through < closing_boundary)
+            {
+                unknown_balance_resolution(
+                    Some(closing_boundary),
+                    &reliability_context.balance_reliability,
+                )
+            } else {
+                resolve_native_balance_at_boundary(
+                    conn,
+                    account.account_id,
+                    &native_account_meta,
+                    NativeBalanceBoundaryRequest {
+                        boundary_kind: NativeBalanceBoundaryKind::Closing,
+                        requested_boundary_date: resolved.closing_balance_date,
+                        first_transaction_date,
+                        transaction_history_pending: false,
+                    },
+                    &reliability_context,
+                )?
+            };
+            let last_confirmed_bitcoin =
+                if is_bitcoin && closing_balance.state == NativeBalanceState::Unknown {
+                    load_last_confirmed_bitcoin(conn, account.account_id)?
+                } else {
+                    None
+                };
 
             accounts.push(WalletReportAccountRow {
                 account_id: account.account_id,
                 account_label: account.account_label,
                 asset_id: account.asset_id,
                 bitcoin_history_coverage: reliability_context.bitcoin_history_coverage,
+                last_confirmed_bitcoin,
                 opening_balance_state: wallet_report_balance_state_from_native(
                     opening_balance.state,
                 ),

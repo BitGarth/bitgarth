@@ -86,14 +86,8 @@ fn failed_run_summary_json(
 ) -> Option<OpaqueJsonText> {
     match integration.current_run_summary_json() {
         Ok(summary_json) => summary_json,
-        Err(err) => {
-            tracing::error!(
-                user_id = %request.run.user_id,
-                run_id = %request.run.run_id,
-                address_id = %request.address.address_id,
-                error = %err,
-                "transactions sync: failed to serialize raw sync run summary after {context}"
-            );
+        Err(_) => {
+            tracing::error!(target: "wallet_sync", run_id = %request.run.run_id, "transactions sync: failed to serialize raw summary after {context}");
             None
         }
     }
@@ -284,14 +278,8 @@ impl AddressSyncExecutor for LiveAddressSyncExecutor {
 
         let (result, secondary_completion_error) =
             resolve_iteration_completion(sync_result, raw_sync_completion);
-        if let Some(error) = secondary_completion_error {
-            tracing::error!(
-                user_id = %request.run.user_id,
-                run_id = %request.run.run_id,
-                address_id = %request.address.address_id,
-                error = %error,
-                "transactions sync: failed to complete raw sync run after iteration failure"
-            );
+        if secondary_completion_error.is_some() {
+            tracing::error!(target: "wallet_sync", run_id = %request.run.run_id, "transactions sync: failed to persist completion after failure");
         }
         result
     }

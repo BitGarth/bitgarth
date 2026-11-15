@@ -26,13 +26,15 @@ sudo snap unset bitgarth-web port
 
 The CLI can pair with this service, the hosted service at
 `https://my.bitgarth.app`, or another BitGarth instance that you choose.
-`login` works as another name for `pair`. The local service uses plain HTTP,
-so pairing with it needs `--allow-insecure-http`:
+The local service uses plain HTTP, so pairing with it needs `--allow-insecure-http`:
 
 ```sh
-bitgarth-cli pair http://127.0.0.1:8080/ --allow-insecure-http
-bitgarth-cli balancesheet
+bitgarth-cli auth login http://127.0.0.1:8080/ --allow-insecure-http
+bitgarth-cli balance
 ```
+
+For encrypted wallet archives, choose a path the Snap can access, such as
+`~/snap/bitgarth-cli/common/wallet-data.zip`.
 
 The package provides `bitgarth-cli`. If you want the shorter `bitgarth`
 command, enable a local alias:

@@ -84,23 +84,37 @@ impl fmt::Debug for ClientKeyVerifier {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a paired client may do. Each level includes everything below it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ClientPermission {
+    /// Legacy v1 pairing: wallet names and balances only.
     BalancesRead,
+    /// Read every portfolio view, report and setting (never secret values).
+    Read,
+    /// Read plus change wallets, accounts, settings and secrets.
+    Full,
 }
 
 impl ClientPermission {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::BalancesRead => "balances_read",
+            Self::Read => "read",
+            Self::Full => "full",
         }
     }
 
     pub(crate) fn from_db(value: &str) -> Result<Self, String> {
         match value {
             "balances_read" => Ok(Self::BalancesRead),
+            "read" => Ok(Self::Read),
+            "full" => Ok(Self::Full),
             _ => Err(format!("unknown client permission: {value}")),
         }
+    }
+
+    pub(crate) fn satisfies(self, required: Self) -> bool {
+        self >= required
     }
 }
 
@@ -111,11 +125,22 @@ pub(crate) struct ClientCapabilityRecord {
     pub(crate) key_verifier: ClientKeyVerifier,
     pub(crate) wrapped_dek: Option<Vec<u8>>,
     pub(crate) wrap_nonce: Option<Vec<u8>>,
+    /// Granted at pairing and bound into the wrapped key. Authorize requests
+    /// with [`Self::effective_permission`] instead.
     pub(crate) permission: ClientPermission,
+    /// Optional lower limit set later by the user; never raises access.
+    pub(crate) permission_cap: Option<ClientPermission>,
     pub(crate) created_at: DateTime<Utc>,
     pub(crate) expires_at: Option<DateTime<Utc>>,
     pub(crate) last_used_at: Option<DateTime<Utc>>,
     pub(crate) revoked_at: Option<DateTime<Utc>>,
+}
+
+impl ClientCapabilityRecord {
+    pub(crate) fn effective_permission(&self) -> ClientPermission {
+        self.permission_cap
+            .map_or(self.permission, |cap| cap.min(self.permission))
+    }
 }
 
 impl fmt::Debug for ClientCapabilityRecord {
@@ -124,6 +149,7 @@ impl fmt::Debug for ClientCapabilityRecord {
             .field("capability_id", &self.capability_id)
             .field("user_id", &self.user_id)
             .field("permission", &self.permission)
+            .field("permission_cap", &self.permission_cap)
             .field("created_at", &self.created_at)
             .field("expires_at", &self.expires_at)
             .field("last_used_at", &self.last_used_at)
@@ -173,6 +199,24 @@ mod tests {
     #[test]
     fn v1_permission_and_wrap_domain_are_immutable() {
         assert_eq!(ClientPermission::BalancesRead.as_str(), "balances_read");
+        for permission in [
+            ClientPermission::BalancesRead,
+            ClientPermission::Read,
+            ClientPermission::Full,
+        ] {
+            assert_eq!(
+                ClientPermission::from_db(permission.as_str()),
+                Ok(permission)
+            );
+        }
         assert_eq!(WRAP_DOMAIN, b"bitgarth-client-key-wrap-v1\0");
+    }
+
+    #[test]
+    fn permissions_are_ordered_from_least_to_most_access() {
+        assert!(ClientPermission::Full.satisfies(ClientPermission::Read));
+        assert!(ClientPermission::Read.satisfies(ClientPermission::BalancesRead));
+        assert!(!ClientPermission::Read.satisfies(ClientPermission::Full));
+        assert!(!ClientPermission::BalancesRead.satisfies(ClientPermission::Read));
     }
 }

@@ -155,23 +155,21 @@ pub(crate) fn delete_wallet(user_id: UserId, wallet_id: WalletId) -> Result<(), 
             })?;
             deactivate_source_connection_for_address_tx(&tx, address_id, Utc::now())?;
         }
-        let deleted_accounts = tx
-            .execute(
-                "DELETE FROM digital_asset_accounts WHERE wallet_id = ?1",
-                params![wallet_id.to_string()],
-            )
-            .map_err(|e| DbError::new(format!("Failed to delete wallet accounts: {e}")))?;
+        tx.execute(
+            "DELETE FROM digital_asset_accounts WHERE wallet_id = ?1",
+            params![wallet_id.to_string()],
+        )
+        .map_err(|e| DbError::new(format!("Failed to delete wallet accounts: {e}")))?;
 
-        let deleted_wallets = tx
-            .execute(
-                "DELETE FROM wallets WHERE id = ?1",
-                params![wallet_id.to_string()],
-            )
-            .map_err(|e| DbError::new(format!("Failed to delete wallet: {e}")))?;
+        tx.execute(
+            "DELETE FROM wallets WHERE id = ?1",
+            params![wallet_id.to_string()],
+        )
+        .map_err(|e| DbError::new(format!("Failed to delete wallet: {e}")))?;
         let delete_ms = delete_started.elapsed().as_millis() as u64;
 
         let cleanup_started = Instant::now();
-        let cleanup_stats = execute_chain_cleanup_for_marked_candidates(&tx)?;
+        execute_chain_cleanup_for_marked_candidates(&tx)?;
         let cleanup_ms = cleanup_started.elapsed().as_millis() as u64;
 
         tx.commit().map_err(|e| {
@@ -179,13 +177,7 @@ pub(crate) fn delete_wallet(user_id: UserId, wallet_id: WalletId) -> Result<(), 
         })?;
 
         let total_ms = transaction_started.elapsed().as_millis() as u64;
-        tracing::info!(
-            wallet_id = %wallet_id,
-            deleted_accounts,
-            deleted_wallets,
-            candidate_chain_tx_count = cleanup_stats.candidate_chain_tx_count,
-            deleted_unowned_transfers = cleanup_stats.deleted_unowned_transfers,
-            deleted_orphan_chain_transactions = cleanup_stats.deleted_orphan_chain_transactions,
+        tracing::debug!(
             candidate_scan_ms,
             delete_ms,
             cleanup_ms,

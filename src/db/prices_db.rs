@@ -2,6 +2,9 @@
 //!
 //! This database is unencrypted and must not store user-private wallet data.
 
+pub(crate) mod history_view;
+pub(crate) mod shared_history;
+
 use super::error::DbError;
 use super::sqlite_config::configure_connection;
 use crate::models::CurrencyCode;
@@ -207,6 +210,18 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "V2__historical_price_attempts",
         include_str!("../../migrations/prices/V2__historical_price_attempts.sql"),
     ),
+    (
+        "V3__shared_history_work",
+        include_str!("../../migrations/prices/V3__shared_history_work.sql"),
+    ),
+    (
+        "V4__coingecko_pair_interest",
+        include_str!("../../migrations/prices/V4__coingecko_pair_interest.sql"),
+    ),
+    (
+        "V5__drop_coingecko_pair_interest",
+        include_str!("../../migrations/prices/V5__drop_coingecko_pair_interest.sql"),
+    ),
 ];
 
 fn migrations_runner() -> Result<refinery::Runner, DbError> {
@@ -223,6 +238,23 @@ fn migrations_runner() -> Result<refinery::Runner, DbError> {
 
 pub(crate) fn initialize_prices_db() -> Result<rusqlite::Connection, DbError> {
     initialize_prices_db_at_path(&get_price_database_path()?)
+}
+
+/// Opens the existing prices DB after startup has applied its migrations.
+pub(crate) fn open_migrated_prices_db() -> Result<rusqlite::Connection, DbError> {
+    let db_path = get_price_database_path()?;
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .map_err(|err| {
+        DbError::new(format!(
+            "Failed to open prices database at {}: {err}",
+            db_path.display()
+        ))
+    })?;
+    configure_connection(&conn, "prices db", true);
+    Ok(conn)
 }
 
 fn initialize_prices_db_at_path(db_path: &Path) -> Result<rusqlite::Connection, DbError> {
@@ -242,25 +274,17 @@ fn configure_and_migrate_connection(conn: &mut rusqlite::Connection) -> Result<(
     let runner = migrations_runner()?;
     let report = runner
         .run(conn)
+        .inspect_err(|_| tracing::error!(database = "prices db", "migration failed"))
         .map_err(|err| DbError::new(format!("Failed to run prices migrations: {err}")))?;
 
-    let applied_count = report.applied_migrations().len();
-    match runner
+    let last_migration = runner
         .get_last_applied_migration(conn)
-        .map_err(|err| DbError::new(format!("Failed to query prices schema version: {err}")))?
-    {
-        Some(migration) => {
-            tracing::info!(
-                "prices db: migrations completed - schema version V{}__{}, applied {} new migration(s)",
-                migration.version(),
-                migration.name(),
-                applied_count,
-            );
-        }
-        None => {
-            tracing::info!("prices db: migrations completed - no migrations applied");
-        }
-    }
+        .map_err(|e| DbError::new(format!("Failed to query prices schema version: {e}")))?;
+    super::sqlite_config::log_migration_result(
+        "prices db",
+        last_migration,
+        report.applied_migrations().len(),
+    );
 
     Ok(())
 }
@@ -374,20 +398,12 @@ fn parse_prices_db_date(raw: &str, context: &str) -> Result<NaiveDate, DbError> 
         .map_err(|err| DbError::new(format!("{context}: invalid date {raw}: {err}")))
 }
 
-fn parse_current_price_cache_utc(
-    raw: &str,
-    field: &str,
-    asset_id: &str,
-    provider: &str,
-) -> Option<DateTime<Utc>> {
+fn parse_current_price_cache_utc(raw: &str, field: &'static str) -> Option<DateTime<Utc>> {
     match DateTime::parse_from_rfc3339(raw) {
         Ok(value) => Some(value.with_timezone(&Utc)),
-        Err(err) => {
+        Err(_) => {
             tracing::warn!(
-                asset_id = %asset_id,
-                provider = %provider,
-                field = %field,
-                error = %err,
+                field,
                 "prices db: invalid current price cache timestamp; treating row as cache miss"
             );
             None
@@ -395,14 +411,11 @@ fn parse_current_price_cache_utc(
     }
 }
 
-fn parse_current_price_cache_decimal(raw: &str, asset_id: &str, provider: &str) -> Option<Decimal> {
+fn parse_current_price_cache_decimal(raw: &str) -> Option<Decimal> {
     match Decimal::from_str(raw) {
         Ok(value) => Some(value),
-        Err(err) => {
+        Err(_) => {
             tracing::warn!(
-                asset_id = %asset_id,
-                provider = %provider,
-                error = %err,
                 "prices db: invalid current price cache decimal; treating row as cache miss"
             );
             None
@@ -415,27 +428,16 @@ fn raw_current_price_cache_to_record(
     quote_currency: CurrencyCode,
     cutoff: DateTime<Utc>,
 ) -> Option<CurrentPriceCacheRecord> {
-    let price = parse_current_price_cache_decimal(&raw.price, &raw.asset_id, &raw.provider)?;
+    let price = parse_current_price_cache_decimal(&raw.price)?;
     let observed_at = match raw.observed_at.as_deref() {
-        Some(value) => Some(parse_current_price_cache_utc(
-            value,
-            "observed_at",
-            &raw.asset_id,
-            &raw.provider,
-        )?),
+        Some(value) => Some(parse_current_price_cache_utc(value, "observed_at")?),
         None => None,
     };
-    let retrieved_at = parse_current_price_cache_utc(
-        &raw.retrieved_at,
-        "retrieved_at",
-        &raw.asset_id,
-        &raw.provider,
-    )?;
+    let retrieved_at = parse_current_price_cache_utc(&raw.retrieved_at, "retrieved_at")?;
     if retrieved_at < cutoff {
         return None;
     }
-    let updated_at =
-        parse_current_price_cache_utc(&raw.updated_at, "updated_at", &raw.asset_id, &raw.provider)?;
+    let updated_at = parse_current_price_cache_utc(&raw.updated_at, "updated_at")?;
 
     Some(CurrentPriceCacheRecord {
         asset_id: raw.asset_id,
@@ -568,8 +570,6 @@ pub(crate) fn load_fresh_current_price_cache(
             })?;
             if raw.quote_currency != quote_currency.code() {
                 tracing::warn!(
-                    asset_id = %raw.asset_id,
-                    quote_currency = %raw.quote_currency,
                     "prices db: invalid current price cache quote currency; treating row as cache miss"
                 );
                 continue;
@@ -870,6 +870,7 @@ pub(crate) fn lookup_daily_price_point(
              WHERE asset_id = ?1
                AND quote_currency = ?2
                AND date_utc = ?3
+               AND provider = 'coingecko'
                AND granularity = 'daily'
                AND price_kind = 'daily_point'",
         )
@@ -903,12 +904,22 @@ fn provider_preference_rank(provider: &str) -> u8 {
     }
 }
 
+fn is_final_daily_price_point(row: &DailyPricePointRecord) -> bool {
+    // Match shared_history::covered_dates when choosing between legacy rows.
+    row.retrieved_at.date_naive() > row.date_utc
+        || row.price_time_utc == row.date_utc.and_time(chrono::NaiveTime::MIN).and_utc()
+}
+
 pub(crate) fn select_daily_price_point(
     mut rows: Vec<DailyPricePointRecord>,
 ) -> Option<DailyPricePointRecord> {
     rows.sort_by(|left, right| {
-        provider_preference_rank(&left.provider)
-            .cmp(&provider_preference_rank(&right.provider))
+        is_final_daily_price_point(right)
+            .cmp(&is_final_daily_price_point(left))
+            .then_with(|| {
+                provider_preference_rank(&left.provider)
+                    .cmp(&provider_preference_rank(&right.provider))
+            })
             .then_with(|| left.provider.cmp(&right.provider))
             .then_with(|| right.retrieved_at.cmp(&left.retrieved_at))
             .then_with(|| left.id.cmp(&right.id))
@@ -924,25 +935,32 @@ pub(crate) fn upsert_daily_price_points(
         return Ok(());
     }
 
-    conn.execute("BEGIN IMMEDIATE", [])
-        .map_err(|err| DbError::from_rusqlite_error("begin daily price upsert", err))?;
-    let result = upsert_daily_price_points_in_transaction(conn, rows);
-    match result {
-        Ok(()) => conn
-            .execute("COMMIT", [])
-            .map(|_| ())
-            .map_err(|err| DbError::from_rusqlite_error("commit daily price upsert", err)),
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", []);
-            Err(err)
-        }
+    write_daily_points(conn, rows, None).map(|_| ())
+}
+
+pub(crate) fn write_daily_points(
+    conn: &rusqlite::Connection,
+    rows: &[DailyPricePointUpsert],
+    pair: Option<&shared_history::SharedPricePair>,
+) -> Result<usize, DbError> {
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|err| DbError::from_rusqlite_error("begin daily price write", err))?;
+    if let Some(pair) = pair
+        && !shared_history::still_current(&tx, pair)
+            .map_err(|err| DbError::from_rusqlite_error("validate price pair", err))?
+    {
+        return Ok(0);
     }
+    let written = upsert_daily_price_points_in_transaction(&tx, rows)?;
+    tx.commit()
+        .map_err(|err| DbError::from_rusqlite_error("commit daily price write", err))?;
+    Ok(written)
 }
 
 fn upsert_daily_price_points_in_transaction(
     conn: &rusqlite::Connection,
     rows: &[DailyPricePointUpsert],
-) -> Result<(), DbError> {
+) -> Result<usize, DbError> {
     let now = Utc::now();
     let mut stmt = conn
         .prepare(
@@ -951,21 +969,20 @@ fn upsert_daily_price_points_in_transaction(
                 provider, provider_asset_id, provider_quote_id, granularity,
                 price_kind, license_scope, retrieved_at, created_at, updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'coingecko', ?7, ?8, 'daily',
-                    'daily_point', ?9, ?10, ?11, ?12)
+            SELECT ?1, ?2, ?3, ?4, ?5, ?6, 'coingecko', ?7, ?8, 'daily',
+                    'daily_point', ?9, ?10, ?11, ?12
+            WHERE NOT EXISTS (SELECT 1 FROM price_points
+                WHERE asset_id=?2 AND quote_currency=?3 AND date_utc=?5
+                  AND provider='coingecko' AND granularity='daily' AND price_kind='daily_point'
+                  AND (TRIM(provider_asset_id)=?7 OR NULLIF(TRIM(provider_asset_id),'') IS NULL)
+                  AND (date_utc < substr(retrieved_at,1,10) OR price_time_utc = ?5 || 'T00:00:00Z'))
             ON CONFLICT(asset_id, quote_currency, provider, price_time_utc, granularity, price_kind)
-            DO UPDATE SET
-                date_utc = excluded.date_utc,
-                price = excluded.price,
-                provider_asset_id = excluded.provider_asset_id,
-                provider_quote_id = excluded.provider_quote_id,
-                license_scope = excluded.license_scope,
-                retrieved_at = excluded.retrieved_at,
-                updated_at = excluded.updated_at",
+            DO NOTHING",
         )
         .map_err(|err| DbError::from_rusqlite_error("prepare daily price upsert", err))?;
 
     let now = cache_time_text(now);
+    let mut written = 0;
     for row in rows {
         let price_time_utc = cache_time_text(row.price_time_utc);
         let id = format!(
@@ -976,24 +993,25 @@ fn upsert_daily_price_points_in_transaction(
         );
         let price = row.price.to_string();
         let retrieved_at = cache_time_text(row.retrieved_at);
-        stmt.execute(params![
-            id,
-            &row.asset_id,
-            row.quote_currency.code(),
-            price_time_utc,
-            date_text(row.date_utc),
-            price,
-            &row.provider_asset_id,
-            row.provider_quote_id.as_deref(),
-            &row.license_scope,
-            retrieved_at,
-            &now,
-            &now,
-        ])
-        .map_err(|err| DbError::from_rusqlite_error("execute daily price upsert", err))?;
+        written += stmt
+            .execute(params![
+                id,
+                &row.asset_id,
+                row.quote_currency.code(),
+                price_time_utc,
+                date_text(row.date_utc),
+                price,
+                &row.provider_asset_id,
+                row.provider_quote_id.as_deref(),
+                &row.license_scope,
+                retrieved_at,
+                &now,
+                &now,
+            ])
+            .map_err(|err| DbError::from_rusqlite_error("execute daily price upsert", err))?;
     }
 
-    Ok(())
+    Ok(written)
 }
 
 pub(crate) fn latest_coingecko_catalog_retrieved_at(
@@ -1347,6 +1365,32 @@ mod tests {
     }
 
     #[test]
+    fn report_lookup_excludes_other_providers() {
+        let conn = migrated_memory_connection();
+        // Simulate a future schema that admits a second provider.
+        conn.execute_batch("PRAGMA ignore_check_constraints = ON")
+            .expect("allow fixture provider");
+        let at = utc("2025-01-02T00:00:00Z");
+        conn.execute(
+            "INSERT INTO price_points
+             (id, asset_id, quote_currency, price_time_utc, date_utc, price, provider,
+              provider_asset_id, granularity, price_kind, license_scope, retrieved_at, created_at, updated_at)
+             VALUES ('other', 'bitcoin', 'USD', ?1, ?2, '42', 'other', 'bitcoin',
+                     'daily', 'daily_point', 'public_keyless', ?1, ?1, ?1)",
+            params![at.to_rfc3339(), at.date_naive()],
+        ).expect("seed other provider");
+        let query = DailyPricePointQuery {
+            asset_id: "bitcoin".into(),
+            quote_currency: usd(),
+            date_utc: at.date_naive(),
+        };
+        assert_eq!(
+            lookup_daily_price_point(&conn, &query).expect("lookup"),
+            None
+        );
+    }
+
+    #[test]
     fn daily_price_point_order_prefers_coingecko() {
         let older = utc("2026-06-10T12:00:00Z");
         let newer = utc("2026-06-10T13:00:00Z");
@@ -1608,6 +1652,17 @@ mod tests {
     }
 
     #[test]
+    fn runtime_open_requires_an_existing_prices_database() {
+        let _runtime = crate::db::acquire_test_runtime().unwrap();
+        let path = super::get_price_database_path().unwrap();
+        assert!(super::open_migrated_prices_db().is_err());
+        assert!(!path.exists());
+        drop(super::initialize_prices_db().unwrap());
+        let conn = super::open_migrated_prices_db().unwrap();
+        assert!(object_exists(&conn, "table", "price_points"));
+    }
+
+    #[test]
     fn prices_db_reopen_is_idempotent() {
         let db_path =
             std::env::temp_dir().join(format!("bitgarth-prices-db-{}.sqlite3", ulid::Ulid::new()));
@@ -1624,7 +1679,7 @@ mod tests {
             })
             .expect("migration history count should load");
 
-        assert_eq!(migration_count, 3);
+        assert_eq!(migration_count, 6);
         drop(conn);
         cleanup_prices_db(&db_path);
     }
@@ -2093,6 +2148,105 @@ mod tests {
             dates,
             vec![NaiveDate::from_ymd_opt(2026, 6, 9).expect("test date")]
         );
+    }
+
+    #[test]
+    fn existing_pro_intraday_daily_point_survives_keyless_writer() {
+        let conn = migrated_memory_connection();
+        let retrieved_at = utc("2026-06-10T12:00:00Z");
+        let mut row = DailyPricePointUpsert {
+            asset_id: "bitcoin".to_owned(),
+            quote_currency: usd(),
+            price_time_utc: utc("2026-06-09T12:00:00Z"),
+            date_utc: utc("2026-06-09T12:00:00Z").date_naive(),
+            price: decimal("100.00"),
+            provider_asset_id: "bitcoin".into(),
+            provider_quote_id: None,
+            license_scope: "coingecko_pro_key".into(),
+            retrieved_at,
+        };
+        upsert_daily_price_points(&conn, std::slice::from_ref(&row)).unwrap();
+        row.license_scope = "public_keyless".into();
+        row.price = decimal("50");
+        row.price_time_utc = utc("2026-06-09T00:00:00Z");
+        upsert_daily_price_points(&conn, &[row]).unwrap();
+        let result: (i64, String, String) = conn
+            .query_row(
+                "SELECT COUNT(*),price,license_scope FROM price_points",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(result, (1, "100.00".into(), "coingecko_pro_key".into()));
+    }
+
+    #[test]
+    fn legacy_same_day_live_sample_yields_to_published_midnight_point() {
+        let conn = migrated_memory_connection();
+        let day = utc("2026-06-09T00:00:00Z").date_naive();
+        let mut row = DailyPricePointUpsert {
+            asset_id: "bitcoin".to_owned(),
+            quote_currency: usd(),
+            price_time_utc: utc("2026-06-09T14:00:00Z"),
+            date_utc: day,
+            price: decimal("70"),
+            provider_asset_id: "bitcoin".into(),
+            provider_quote_id: None,
+            license_scope: "public_keyless".into(),
+            retrieved_at: utc("2026-06-09T14:00:00Z"),
+        };
+        upsert_daily_price_points(&conn, std::slice::from_ref(&row)).unwrap();
+        let pair = shared_history::SharedPricePair {
+            asset_id: "bitcoin".into(),
+            provider_id: "bitcoin".into(),
+            currency: usd(),
+        };
+        assert!(
+            shared_history::covered_dates(&conn, &pair, day, day)
+                .unwrap()
+                .is_empty()
+        );
+
+        row.price = decimal("50");
+        row.price_time_utc = utc("2026-06-09T00:00:00Z");
+        row.retrieved_at = utc("2026-06-10T01:00:00Z");
+        upsert_daily_price_points(&conn, &[row]).unwrap();
+
+        assert_eq!(
+            shared_history::covered_dates(&conn, &pair, day, day).unwrap(),
+            vec![day]
+        );
+        let shown = history_view::load_daily_price_history(&conn, "bitcoin", usd(), day, day)
+            .unwrap()
+            .into_iter()
+            .map(|record| record.price.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(shown, vec!["50"]);
+    }
+
+    #[test]
+    fn daily_history_prefers_midnight_quote_over_later_same_day_sample() {
+        let conn = migrated_memory_connection();
+        let day = utc("2026-06-09T00:00:00Z").date_naive();
+        for (price, time, retrieved_at) in [
+            ("10", "2026-06-09T00:00:00Z", "2026-06-09T00:05:00Z"),
+            ("20", "2026-06-09T12:00:00Z", "2026-06-09T12:00:00Z"),
+        ] {
+            conn.execute(
+                "INSERT INTO price_points
+                 (id, asset_id, quote_currency, price_time_utc, date_utc, price, provider,
+                  provider_asset_id, granularity, price_kind, license_scope, retrieved_at,
+                  created_at, updated_at)
+                 VALUES (?1, 'bitcoin', 'USD', ?1, ?2, ?3, 'coingecko', 'bitcoin',
+                         'daily', 'daily_point', 'public_keyless', ?4, ?4, ?4)",
+                params![time, day, price, retrieved_at],
+            )
+            .expect("seed legacy daily rows");
+        }
+        let history = history_view::load_daily_price_history(&conn, "bitcoin", usd(), day, day)
+            .expect("load daily history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].price, decimal("10"));
     }
 
     #[test]

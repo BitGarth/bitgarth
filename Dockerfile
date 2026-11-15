@@ -17,6 +17,7 @@ WORKDIR /app
 # Copy Cargo.toml early so we can extract the dioxus version for the dx CLI download
 COPY Cargo.toml Cargo.lock ./
 COPY crates/bitgarth-cli/Cargo.toml crates/bitgarth-cli/Cargo.toml
+COPY crates/sqlcipher-src-compat/ crates/sqlcipher-src-compat/
 
 # Install prebuilt dioxus-cli binary (version read from Cargo.toml)
 RUN DX_VERSION="$(sed -n 's/^dioxus.*version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)" && \

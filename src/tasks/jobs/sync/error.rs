@@ -116,6 +116,22 @@ pub(crate) fn preserve_iteration_error(
 }
 
 impl UserTransactionMonitorError {
+    /// Production log fields may describe the failure class but never carry its payload.
+    pub(crate) fn log_category(&self) -> &'static str {
+        match self {
+            Self::Db(_) => "database",
+            Self::InvalidConfiguredBaseUrl(_)
+            | Self::InvalidDefaultBaseUrl(_)
+            | Self::MissingEtherscanApiKey
+            | Self::UnsupportedEthereumNetwork(_) => "configuration",
+            Self::Http(_) => "request",
+            Self::UpstreamStatus { .. } | Self::Etherscan(_) => "provider",
+            Self::RateLimited { .. } => "rate_limit",
+            Self::Parse(_) | Self::Deserialize { .. } => "invalid_data",
+            Self::CoverageInvalidation { error, .. } => error.log_category(),
+        }
+    }
+
     pub(crate) fn counts_as_address_failure(&self) -> bool {
         match self {
             Self::Db(_)
@@ -245,6 +261,52 @@ mod tests {
             error.to_string(),
             "Sync HTTP request failed: Etherscan HTTP error for https://api.etherscan.io/v2/api?apikey=***REDACTED***: timeout"
         );
+    }
+
+    #[test]
+    fn log_categories_exclude_provider_response_and_request_data() {
+        let error = UserTransactionMonitorError::UpstreamStatus {
+            url: "https://invalid.example/private-address?key=secret".into(),
+            status: 503,
+            body_snippet: "private response".into(),
+        };
+        assert_eq!(error.log_category(), "provider");
+        assert_eq!(
+            UserTransactionMonitorError::CoverageInvalidation {
+                error: Box::new(error),
+                targets: Box::default(),
+            }
+            .log_category(),
+            "provider"
+        );
+    }
+
+    #[test]
+    fn hosted_filter_excludes_detailed_wallet_errors_and_preserves_operational_events() {
+        // The public source export intentionally excludes this private deployment file.
+        let config = match std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/fly.toml"))
+        {
+            Ok(config) => config,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => panic!("could not read Fly log directives: {error}"),
+        };
+        let directives = config
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("RUST_LOG = '")?.strip_suffix('\''))
+            .expect("Fly configuration includes RUST_LOG");
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_new(directives).expect("valid Fly log filter"),
+            )
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(!tracing::enabled!(tracing::Level::ERROR));
+            assert!(
+                !tracing::enabled!(target: "bitgarth_app::tasks::jobs::sync::integrations::mempool", tracing::Level::WARN)
+            );
+            assert!(tracing::enabled!(target: "wallet_sync", tracing::Level::INFO));
+            assert!(tracing::enabled!(target: "wallet_sync", tracing::Level::ERROR));
+        });
     }
 
     #[test]

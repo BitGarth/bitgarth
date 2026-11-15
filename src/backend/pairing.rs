@@ -2,7 +2,9 @@ use super::ApiErrorEnvelope;
 #[cfg(feature = "server")]
 use super::ProxyHeaderTrust;
 #[cfg(feature = "server")]
-use crate::client_capabilities::{CapabilityId, ClientCapabilityRecord, ClientKeyVerifier};
+use crate::client_capabilities::{
+    CapabilityId, ClientCapabilityRecord, ClientKeyVerifier, ClientPermission,
+};
 #[cfg(feature = "server")]
 use crate::db::encryption::ClientKeyWrapper;
 #[cfg(feature = "server")]
@@ -357,6 +359,7 @@ where
         wrapped_dek: wrapper.as_ref().map(|value| value.ciphertext.clone()),
         wrap_nonce: wrapper.map(|value| value.nonce),
         permission: claim.permission,
+        permission_cap: None,
         created_at: now,
         expires_at: claim.active_expires_at,
         last_used_at: None,
@@ -526,6 +529,14 @@ pub(crate) struct RevokePairedClientRequest {
     pub(crate) capability_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LimitPairedClientRequest {
+    pub(crate) capability_id: String,
+    /// The lower access level to apply, e.g. `read` for a `full` client.
+    pub(crate) permission: String,
+}
+
 #[cfg(feature = "server")]
 fn pairing_store() -> Result<Arc<PairingStore>, ApiErrorEnvelope> {
     FullstackContext::current()
@@ -685,12 +696,15 @@ pub(crate) async fn approve_pairing(
             "Confirm that the browser code matches the CLI code",
         ));
     }
-    if request.permissions.as_slice() != ["balances_read"] {
+    let Some(reviewed_permission) = (match request.permissions.as_slice() {
+        [single] => ClientPermission::from_db(single).ok(),
+        _ => None,
+    }) else {
         return Err(validation_error(
             "permissions",
-            "Permissions must be exactly [\"balances_read\"]",
+            "Permissions must repeat the single permission shown for review",
         ));
-    }
+    };
     let now = Utc::now();
     let active_expires_at = parse_active_expiry(request.expires_at.as_deref(), now)?;
     let capability_id = crate::client_capabilities::CapabilityId::from_str(&request.pairing_id)
@@ -699,17 +713,24 @@ pub(crate) async fn approve_pairing(
     let session = initialized_session()?;
     let user_id = session.session.user_id;
     pairing_store()?
-        .approve(now, capability_id, &request.code, active_expires_at, || {
-            let lease = crate::auth::lifecycle::acquire_pending_pairing_lease(user_id)
-                .map_err(|_| ())?
-                .ok_or(())?;
-            let dek = crate::db::get_user_db_dek(&user_id).map_err(|_| ())?;
-            Ok::<_, ()>(ApprovedPairingBinding {
-                user_id,
-                dek,
-                lease,
-            })
-        })
+        .approve(
+            now,
+            capability_id,
+            &request.code,
+            active_expires_at,
+            reviewed_permission,
+            || {
+                let lease = crate::auth::lifecycle::acquire_pending_pairing_lease(user_id)
+                    .map_err(|_| ())?
+                    .ok_or(())?;
+                let dek = crate::db::get_user_db_dek(&user_id).map_err(|_| ())?;
+                Ok::<_, ()>(ApprovedPairingBinding {
+                    user_id,
+                    dek,
+                    lease,
+                })
+            },
+        )
         .map_err(transition_error)?;
     Ok(PairingActionResponse {
         status: "approved".to_owned(),
@@ -757,7 +778,7 @@ pub(crate) async fn list_paired_clients() -> Result<Vec<PairedClientView>, ApiEr
             Ok(PairedClientView {
                 capability_id: record.capability_id.to_string(),
                 name,
-                permission: record.permission.as_str().to_owned(),
+                permission: record.effective_permission().as_str().to_owned(),
                 created_at: format_expiry(record.created_at),
                 expires_at: record.expires_at.map(format_expiry),
                 last_used_at: record.last_used_at.map(format_expiry),
@@ -776,7 +797,9 @@ pub(crate) async fn revoke_paired_client(
     validate_csrf()?;
     let session = initialized_session()?;
     let user_id = session.session.user_id;
-    let shutdown = crate::auth::lifecycle::begin_capability_shutdown(user_id, capability_id)
+    drop(session);
+    let shutdown = crate::auth::lifecycle::begin_capability_shutdown_async(user_id, capability_id)
+        .await
         .map_err(|_| ApiErrorEnvelope::internal())?;
     match crate::db::revoke_client_capability(user_id, capability_id, Utc::now())
         .map_err(|_| ApiErrorEnvelope::internal())?
@@ -788,10 +811,54 @@ pub(crate) async fn revoke_paired_client(
         }
     }
     shutdown
-        .wait_for_requests()
+        .drain()
+        .await
         .map_err(|_| ApiErrorEnvelope::internal())?;
     Ok(PairingActionResponse {
         status: "revoked".to_owned(),
+    })
+}
+
+/// Lowers a Paired Client's access. Raising it needs a new pairing, because
+/// the granted permission is bound into the Client Key's wrapped DEK.
+#[post("/_app/pairings/limit")]
+pub(crate) async fn limit_paired_client(
+    request: LimitPairedClientRequest,
+) -> Result<PairingActionResponse, ApiErrorEnvelope> {
+    let capability_id = CapabilityId::from_str(&request.capability_id)
+        .map_err(|_| ApiErrorEnvelope::not_found("Paired Client not found"))?;
+    let cap = ClientPermission::from_db(&request.permission)
+        .map_err(|_| validation_error("permission", "Choose a known access level."))?;
+    validate_csrf()?;
+    let session = initialized_session()?;
+    let user_id = session.session.user_id;
+    // Block new requests and wait for in-flight ones, so nothing started under
+    // the old access level finishes after the change.
+    drop(session);
+    let shutdown = crate::auth::lifecycle::begin_capability_shutdown_async(user_id, capability_id)
+        .await
+        .map_err(|_| ApiErrorEnvelope::internal())?;
+    let current = crate::db::load_client_capability(capability_id)
+        .map_err(|_| ApiErrorEnvelope::internal())?
+        .filter(|record| record.user_id == user_id && record.revoked_at.is_none())
+        .ok_or_else(|| ApiErrorEnvelope::not_found("Paired Client not found"))?;
+    if cap >= current.effective_permission() {
+        return Err(validation_error(
+            "permission",
+            "Access can only be lowered. Pair the client again to raise it.",
+        ));
+    }
+    if !crate::db::limit_client_capability(user_id, capability_id, cap)
+        .map_err(|_| ApiErrorEnvelope::internal())?
+    {
+        return Err(ApiErrorEnvelope::not_found("Paired Client not found"));
+    }
+    shutdown
+        .drain()
+        .await
+        .map_err(|_| ApiErrorEnvelope::internal())?;
+    Ok(PairingActionResponse {
+        status: "limited".to_owned(),
     })
 }
 
@@ -956,6 +1023,7 @@ mod tests {
                 wrapped_dek: wrapped.then(|| vec![1, 2, 3]),
                 wrap_nonce: wrapped.then(|| vec![4_u8; 12]),
                 permission: ClientPermission::BalancesRead,
+                permission_cap: None,
                 created_at: now - Duration::minutes(2),
                 expires_at,
                 last_used_at: None,
@@ -1197,6 +1265,7 @@ mod tests {
                 started.capability_id,
                 &format_code(&started.code),
                 None,
+                crate::client_capabilities::ClientPermission::BalancesRead,
                 || {
                     Ok::<_, ()>(ApprovedPairingBinding {
                         user_id,

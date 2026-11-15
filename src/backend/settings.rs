@@ -54,6 +54,7 @@ pub(crate) type SettingsError = ApiErrorEnvelope;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct HledgerExportSettingsView {
+    pub(crate) transaction_count: u32,
     pub(crate) hledger_account_prefix: Option<HledgerAccountPrefix>,
     pub(crate) hledger_default_account_prefix: String,
 }
@@ -86,7 +87,7 @@ fn session_token_from_cookie(cookies: &CookieJar) -> Result<SessionToken, Settin
 }
 
 #[cfg(feature = "server")]
-fn load_username_for_hledger_export_settings(user_id: UserId) -> Result<String, SettingsError> {
+pub(crate) fn default_hledger_account_prefix(user_id: UserId) -> Result<String, SettingsError> {
     let username = with_db(|conn| {
         match conn.query_row(
             "SELECT username FROM users WHERE user_id = ?1",
@@ -103,12 +104,14 @@ fn load_username_for_hledger_export_settings(user_id: UserId) -> Result<String, 
     })
     .map_err(|err| internal_error("settings_db", err))?;
 
-    username.ok_or_else(|| {
+    let username = username.ok_or_else(|| {
         internal_error(
             "settings_db",
             format!("No username found for user {user_id} while loading hledger export settings"),
         )
-    })
+    })?;
+    let (_, owner_posting_segment) = hledger_owner_segments_from_username(&username);
+    Ok(format!("assets:{owner_posting_segment}"))
 }
 
 #[cfg(feature = "server")]
@@ -255,7 +258,13 @@ pub(crate) async fn get_settings() -> Result<UserSettings, SettingsError> {
         require_initialized_session("settings", &session_token, unauthorized_error, |_message| {
             SettingsError::internal()
         })?;
-    let user_id = initialized_session.session.user_id;
+    get_settings_for_user(initialized_session.session.user_id).await
+}
+
+#[cfg(feature = "server")]
+pub(crate) async fn get_settings_for_user(
+    user_id: crate::models::UserId,
+) -> Result<UserSettings, SettingsError> {
     let mut settings = db_load_settings(user_id).map_err(|e| internal_error("settings_db", e))?;
     // Expose whether the key is configured, but never return the actual key to clients.
     settings.has_etherscan_api_key = settings.etherscan_api_key.is_some();
@@ -278,10 +287,10 @@ pub(crate) async fn get_hledger_export_settings() -> Result<HledgerExportSetting
             SettingsError::internal()
         })?;
     let user_id = initialized_session.session.user_id;
-
     let settings = db_load_settings(user_id).map_err(|e| internal_error("settings_db", e))?;
-    let username = load_username_for_hledger_export_settings(user_id)?;
-    let (_, owner_posting_segment) = hledger_owner_segments_from_username(&username);
+    let hledger_default_account_prefix = default_hledger_account_prefix(user_id)?;
+    let transaction_count = crate::db::count_transactions_for_export(user_id)
+        .map_err(|e| internal_error("export_db", e))?;
 
     tracing::debug!(
         user_id = %user_id,
@@ -290,7 +299,8 @@ pub(crate) async fn get_hledger_export_settings() -> Result<HledgerExportSetting
 
     Ok(HledgerExportSettingsView {
         hledger_account_prefix: settings.hledger_account_prefix,
-        hledger_default_account_prefix: format!("assets:{owner_posting_segment}"),
+        hledger_default_account_prefix,
+        transaction_count,
     })
 }
 
@@ -323,10 +333,18 @@ pub(crate) async fn set_price_fetching_enabled(enabled: bool) -> Result<bool, Se
         require_initialized_session("settings", &session_token, unauthorized_error, |_message| {
             SettingsError::internal()
         })?;
-    let user_id = initialized_session.session.user_id;
+    set_price_fetching_enabled_for_user(initialized_session.session.user_id, enabled).await
+}
+
+#[cfg(feature = "server")]
+pub(crate) async fn set_price_fetching_enabled_for_user(
+    user_id: crate::models::UserId,
+    enabled: bool,
+) -> Result<bool, SettingsError> {
     let changed_to_enabled = db_set_price_fetching_enabled_with_transition(user_id, enabled)
         .map_err(|e| internal_error("settings_db", e))?;
     if enabled && changed_to_enabled {
+        let _ = crate::tasks::enqueue_shared_price_history().await;
         let enqueue_result = crate::tasks::enqueue_price_history_reconciliation(
             user_id,
             crate::tasks::PriceHistoryReconciliationReason::PriceFetchingEnabled,
@@ -387,7 +405,14 @@ pub(crate) async fn save_date_time_format(
         require_initialized_session("settings", &session_token, unauthorized_error, |_message| {
             SettingsError::internal()
         })?;
-    let user_id = initialized_session.session.user_id;
+    save_date_time_format_for_user(initialized_session.session.user_id, date_time_format).await
+}
+
+#[cfg(feature = "server")]
+pub(crate) async fn save_date_time_format_for_user(
+    user_id: crate::models::UserId,
+    date_time_format: DateTimeFormat,
+) -> Result<(), SettingsError> {
     db_save_date_time_format(user_id, date_time_format)
         .map_err(|e| internal_error("settings_db", e))?;
     tracing::debug!(
@@ -409,7 +434,14 @@ pub(crate) async fn save_number_format(number_format: NumberFormat) -> Result<()
         require_initialized_session("settings", &session_token, unauthorized_error, |_message| {
             SettingsError::internal()
         })?;
-    let user_id = initialized_session.session.user_id;
+    save_number_format_for_user(initialized_session.session.user_id, number_format).await
+}
+
+#[cfg(feature = "server")]
+pub(crate) async fn save_number_format_for_user(
+    user_id: crate::models::UserId,
+    number_format: NumberFormat,
+) -> Result<(), SettingsError> {
     db_save_number_format(user_id, number_format).map_err(|e| internal_error("settings_db", e))?;
     tracing::debug!(
         user_id = %user_id,
@@ -430,7 +462,14 @@ pub(crate) async fn save_currency(currency: CurrencyCode) -> Result<(), Settings
         require_initialized_session("settings", &session_token, unauthorized_error, |_message| {
             SettingsError::internal()
         })?;
-    let user_id = initialized_session.session.user_id;
+    save_currency_for_user(initialized_session.session.user_id, currency).await
+}
+
+#[cfg(feature = "server")]
+pub(crate) async fn save_currency_for_user(
+    user_id: crate::models::UserId,
+    currency: CurrencyCode,
+) -> Result<(), SettingsError> {
     db_save_currency(user_id, currency).map_err(|e| internal_error("settings_db", e))?;
     tracing::debug!(
         user_id = %user_id,
@@ -451,7 +490,14 @@ pub(crate) async fn save_timezone(timezone: UserTimezone) -> Result<(), Settings
         require_initialized_session("settings", &session_token, unauthorized_error, |_message| {
             SettingsError::internal()
         })?;
-    let user_id = initialized_session.session.user_id;
+    save_timezone_for_user(initialized_session.session.user_id, timezone).await
+}
+
+#[cfg(feature = "server")]
+pub(crate) async fn save_timezone_for_user(
+    user_id: crate::models::UserId,
+    timezone: UserTimezone,
+) -> Result<(), SettingsError> {
     db_save_timezone(user_id, timezone).map_err(|e| internal_error("settings_db", e))?;
     tracing::debug!(
         user_id = %user_id,
@@ -501,8 +547,14 @@ pub(crate) async fn save_mempool_base_url(
         require_initialized_session("settings", &session_token, unauthorized_error, |_message| {
             SettingsError::internal()
         })?;
-    let user_id = initialized_session.session.user_id;
+    save_mempool_base_url_for_user(initialized_session.session.user_id, mempool_base_url).await
+}
 
+#[cfg(feature = "server")]
+pub(crate) async fn save_mempool_base_url_for_user(
+    user_id: crate::models::UserId,
+    mempool_base_url: Option<RawMempoolBaseUrl>,
+) -> Result<Option<RawMempoolBaseUrl>, SettingsError> {
     let validated = RawSaveMempoolBaseUrlInput { mempool_base_url }.try_into_validated()?;
     db_save_mempool_base_url(user_id, validated.mempool_base_url.as_ref())
         .map_err(|e| internal_error("settings_db", e))?;
@@ -510,7 +562,6 @@ pub(crate) async fn save_mempool_base_url(
     tracing::debug!(
         user_id = %user_id,
         configured_override = validated.mempool_base_url.is_some(),
-        configured_base_url = ?validated.mempool_base_url.as_ref().map(MempoolBaseUrl::as_str),
         "settings: save_mempool_base_url succeeded"
     );
 
@@ -536,16 +587,32 @@ pub(crate) async fn save_etherscan_base_url(
         require_initialized_session("settings", &session_token, unauthorized_error, |_message| {
             SettingsError::internal()
         })?;
-    let user_id = initialized_session.session.user_id;
+    save_etherscan_base_url_for_user(
+        initialized_session.session.user_id,
+        etherscan_base_url,
+        |_| true,
+    )
+    .await
+}
 
+#[cfg(feature = "server")]
+pub(crate) async fn save_etherscan_base_url_for_user(
+    user_id: crate::models::UserId,
+    etherscan_base_url: Option<RawEtherscanBaseUrl>,
+    approve: impl FnOnce(Option<RawEtherscanBaseUrl>) -> bool,
+) -> Result<Option<RawEtherscanBaseUrl>, SettingsError> {
     let validated = RawSaveEtherscanBaseUrlInput { etherscan_base_url }.try_into_validated()?;
-    db_save_etherscan_base_url(user_id, validated.etherscan_base_url.as_ref())
+    let saved = db_save_etherscan_base_url(user_id, validated.etherscan_base_url.as_ref(), approve)
         .map_err(|e| internal_error("settings_db", e))?;
+    if !saved {
+        return Err(SettingsError::forbidden(
+            "Choose the Etherscan provider in the web app under Settings before using it from a paired client.",
+        ));
+    }
 
     tracing::debug!(
         user_id = %user_id,
         configured_override = validated.etherscan_base_url.is_some(),
-        configured_base_url = ?validated.etherscan_base_url.as_ref().map(EtherscanBaseUrl::as_str),
         "settings: save_etherscan_base_url succeeded"
     );
 
@@ -570,8 +637,18 @@ pub(crate) async fn save_hledger_account_prefix(
         require_initialized_session("settings", &session_token, unauthorized_error, |_message| {
             SettingsError::internal()
         })?;
-    let user_id = initialized_session.session.user_id;
+    save_hledger_account_prefix_for_user(
+        initialized_session.session.user_id,
+        hledger_account_prefix,
+    )
+    .await
+}
 
+#[cfg(feature = "server")]
+pub(crate) async fn save_hledger_account_prefix_for_user(
+    user_id: crate::models::UserId,
+    hledger_account_prefix: Option<String>,
+) -> Result<Option<HledgerAccountPrefix>, SettingsError> {
     let hledger_account_prefix = match hledger_account_prefix.as_deref().map(str::trim) {
         Some("") | None => None,
         Some(value) => Some(
@@ -608,8 +685,14 @@ pub(crate) async fn save_etherscan_api_key(
         require_initialized_session("settings", &session_token, unauthorized_error, |_message| {
             SettingsError::internal()
         })?;
-    let user_id = initialized_session.session.user_id;
+    save_etherscan_api_key_for_user(initialized_session.session.user_id, api_key).await
+}
 
+#[cfg(feature = "server")]
+pub(crate) async fn save_etherscan_api_key_for_user(
+    user_id: crate::models::UserId,
+    api_key: Option<RawEtherscanApiKey>,
+) -> Result<(), SettingsError> {
     let validated = RawSaveEtherscanApiKeyInput { api_key }.try_into_validated();
 
     if let Some(candidate) = validated.api_key.clone() {
@@ -657,8 +740,14 @@ pub(crate) async fn save_coingecko_api_key(
         require_initialized_session("settings", &session_token, unauthorized_error, |_message| {
             SettingsError::internal()
         })?;
-    let user_id = initialized_session.session.user_id;
+    save_coingecko_api_key_for_user(initialized_session.session.user_id, api_key).await
+}
 
+#[cfg(feature = "server")]
+pub(crate) async fn save_coingecko_api_key_for_user(
+    user_id: crate::models::UserId,
+    api_key: Option<SimpleApiKey>,
+) -> Result<(), SettingsError> {
     db_save_coingecko_api_key(user_id, api_key.as_ref())
         .map_err(|e| internal_error("settings_db", e))?;
 

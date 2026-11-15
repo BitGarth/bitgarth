@@ -8,11 +8,21 @@ import { createServer } from "node:http";
 // recent" is good enough for a showcase screenshot; freshness is not a goal.
 // Values are plausible mid-2026 quotes; the same numbers are returned for any
 // requested `vs_currencies` (only EUR is exercised by the screenshot run).
-const PRICES = {
+export const PRICES = {
   bitcoin: 92000,
   ethereum: 3200,
   monero: 280,
 };
+
+const DAY_MS = 86_400_000;
+
+// Deterministic daily close for `/coins/{id}/market_chart/range`: a gentle
+// drift around the spot price, keyed by UTC day so every run (and every
+// requested range) sees the same history.
+export function dailyPrice(spot, dayIndex) {
+  const wave = 0.06 * Math.sin(dayIndex / 11) + 0.025 * Math.sin(dayIndex / 3.3);
+  return Math.round(spot * (1 + wave) * 100) / 100;
+}
 
 export async function startMockCoingeckoServer({ port = 0 } = {}) {
   let requestCount = 0;
@@ -43,6 +53,19 @@ export async function startMockCoingeckoServer({ port = 0 } = {}) {
 
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(body));
+      return;
+    }
+
+    const chart = url.pathname.match(/^\/api\/v3\/coins\/([^/]+)\/market_chart\/range$/);
+    if (chart && chart[1] in PRICES) {
+      const from = Number(url.searchParams.get("from")) * 1000;
+      const to = Number(url.searchParams.get("to")) * 1000;
+      const prices = [];
+      for (let day = Math.ceil(from / DAY_MS); day * DAY_MS <= to; day += 1) {
+        prices.push([day * DAY_MS, dailyPrice(PRICES[chart[1]], day)]);
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ prices }));
       return;
     }
 
@@ -79,4 +102,8 @@ export async function startMockCoingeckoServer({ port = 0 } = {}) {
         });
       }),
   };
+}
+
+if (import.meta.main) {
+  await startMockCoingeckoServer({ port: Number(process.argv[2]) });
 }

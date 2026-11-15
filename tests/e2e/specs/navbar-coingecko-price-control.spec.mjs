@@ -37,7 +37,7 @@ test("navbar price control toggles, picks currency, and syncs with settings", as
 
   await expect(navControl).toHaveAttribute(
     "title",
-    "When enabled, BitGarth requests prices for your assets and selected currency.",
+    "While anyone here has CoinGecko syncing on, BitGarth updates daily prices for known assets and currencies even when everyone is signed out.",
   );
 
   await page.goto("/settings?section=regional");
@@ -46,7 +46,7 @@ test("navbar price control toggles, picks currency, and syncs with settings", as
   await page.goto("/settings?section=digital-assets");
   await expect(page.getByTestId("price-fetching-toggle")).toBeChecked();
   await expect(
-    page.getByText("When enabled, BitGarth requests prices for your assets and selected currency."),
+    page.getByText("While anyone here has CoinGecko syncing on, BitGarth updates daily prices for known assets and currencies even when everyone is signed out."),
   ).toBeVisible();
 
   await navSwitch.click();

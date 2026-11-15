@@ -4,9 +4,9 @@ use super::super::date_range_filter::{
 };
 use super::super::{
     AmountDisplayContext, DisplayAmount, DisplayAmountSign, ManualConversionQuote, convert_amount,
-    format_date_for_display,
+    format_date_for_display, format_number_for_display,
 };
-use crate::models::{DateTimeFormat, NumberFormat, UserTimezone};
+use crate::models::{CurrencyCode, DateTimeFormat, NumberFormat, UserTimezone};
 use crate::report_dates::{
     DateBoundaryKind, LocalReportDateRange, local_report_date_to_utc_boundary,
 };
@@ -18,48 +18,29 @@ use crate::wallets::{
     ManualAssetBalanceAssertionRowResponse, ManualAssetBalanceAssertionTableResponse,
     SyncedAssetId, TransactionSortDirection, WalletAccountHistoryResponse, WalletAccountId,
 };
-use crate::{AuthState, AuthStatus, BannerMessage, BannerState, Route};
+use crate::{AuthState, BannerState, Route};
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
-use dioxus::logger::tracing;
 use dioxus::prelude::*;
-
-pub(super) fn copy_to_clipboard(value: &str) {
-    let encoded_value = match serde_json::to_string(value) {
-        Ok(encoded) => encoded,
-        Err(err) => {
-            tracing::warn!(error = %err, "transactions ui: failed to encode copy text");
-            return;
-        }
-    };
-
-    let script = format!(
-        "const text = {encoded_value};
-if (navigator && navigator.clipboard && navigator.clipboard.writeText) {{
-  navigator.clipboard.writeText(text);
-}} else {{
-  const textarea = document.createElement('textarea');
-  textarea.value = text;
-  textarea.setAttribute('readonly', '');
-  textarea.style.position = 'fixed';
-  textarea.style.opacity = '0';
-  document.body.appendChild(textarea);
-  textarea.select();
-  try {{ document.execCommand('copy'); }} catch (e) {{}}
-  document.body.removeChild(textarea);
-}}"
-    );
-    let _ = dioxus::document::eval(script.as_str());
-}
 
 pub(super) fn status_label(status: ChainTransactionStatus) -> &'static str {
     status.as_db_value()
+}
+
+/// Visible, sentence-case label; `status_label` stays the CSS/compare key.
+pub(super) fn status_display_label(status: ChainTransactionStatus) -> &'static str {
+    match status {
+        ChainTransactionStatus::Pending => "Pending",
+        ChainTransactionStatus::Confirmed => "Confirmed",
+        ChainTransactionStatus::Dropped => "Dropped",
+        ChainTransactionStatus::Failed => "Failed",
+    }
 }
 
 pub(super) fn direction_label(direction: AccountTransactionDirection) -> &'static str {
     match direction {
         AccountTransactionDirection::Incoming => "Receive",
         AccountTransactionDirection::Outgoing => "Send",
-        AccountTransactionDirection::SelfTransfer => "Self Transfer",
+        AccountTransactionDirection::SelfTransfer => "Self transfer",
     }
 }
 
@@ -168,6 +149,62 @@ pub(super) fn format_fee_amount(
     }
 }
 
+/// A fiat amount at the currency's minor unit: "€11,483.40", or "-€11,483.40"
+/// for money leaving the account.
+pub(super) fn format_fiat_amount(
+    value: rust_decimal::Decimal,
+    sign: DisplayAmountSign,
+    currency: CurrencyCode,
+    number_format: NumberFormat,
+) -> String {
+    let decimals = currency.decimal_places();
+    // `{:.N}` truncates a Decimal, so round to the minor unit first.
+    let rounded = value.abs().round_dp_with_strategy(
+        u32::try_from(decimals).unwrap_or(2),
+        rust_decimal::RoundingStrategy::MidpointAwayFromZero,
+    );
+    let digits = format_number_for_display(&format!("{rounded:.decimals$}"), number_format);
+    let sign = match sign {
+        DisplayAmountSign::Hidden => "",
+        DisplayAmountSign::Negative => "-",
+    };
+    format!("{sign}{}{digits}", currency.symbol())
+}
+
+/// A transaction's fiat value, the price it was valued at, and its fee value.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct TransactionFiatDisplay {
+    pub(super) value: String,
+    pub(super) price: String,
+    pub(super) fee: Option<String>,
+}
+
+pub(super) fn transaction_fiat_display(
+    row: &crate::wallets::AccountTransactionRowResponse,
+    currency: Option<CurrencyCode>,
+    number_format: NumberFormat,
+) -> Option<TransactionFiatDisplay> {
+    let currency = currency?;
+    let fiat = row.fiat.as_ref()?;
+    Some(TransactionFiatDisplay {
+        value: format_fiat_amount(
+            fiat.value,
+            amount_sign(row.direction),
+            currency,
+            number_format,
+        ),
+        price: format_fiat_amount(
+            fiat.price,
+            DisplayAmountSign::Hidden,
+            currency,
+            number_format,
+        ),
+        fee: fiat.fee.map(|fee| {
+            format_fiat_amount(fee, DisplayAmountSign::Negative, currency, number_format)
+        }),
+    })
+}
+
 pub(super) fn format_closing_balance(
     amount: Option<&crate::backend::BalanceAmountView>,
     amount_context: &AmountDisplayContext,
@@ -182,6 +219,18 @@ pub(super) fn show_closing_balance_provisional(
     reliability: &crate::balance_reliability::BalanceReliability,
 ) -> bool {
     amount.is_some() && reliability.is_provisional()
+}
+
+/// True when the page has balances and every one of them is provisional.
+pub(super) fn all_balances_provisional(
+    rows: &[crate::wallets::AccountTransactionRowResponse],
+) -> bool {
+    let mut with_balance = rows
+        .iter()
+        .filter(|row| row.closing_balance.is_some())
+        .peekable();
+    with_balance.peek().is_some()
+        && with_balance.all(|row| row.balance_reliability.is_provisional())
 }
 
 pub(super) fn format_balance_date(date_str: &str, format: DateTimeFormat) -> String {
@@ -277,6 +326,19 @@ pub(super) fn manual_sync_outcome_message(
     )
 }
 
+/// Time of day for a card that already sits under its date header.
+pub(super) fn format_transaction_time(
+    occurred_at: &DateTime<Utc>,
+    tz: chrono_tz::Tz,
+    date_format: DateTimeFormat,
+) -> String {
+    let pattern = match date_format {
+        DateTimeFormat::MonthDayYear12 => "%-I:%M %p %Z",
+        DateTimeFormat::YearMonthDay24 | DateTimeFormat::DayMonthYear24 => "%H:%M %Z",
+    };
+    occurred_at.with_timezone(&tz).format(pattern).to_string()
+}
+
 pub(super) fn format_transaction_group_date(
     occurred_at: &str,
     tz: chrono_tz::Tz,
@@ -290,8 +352,17 @@ pub(super) fn format_transaction_group_date(
         .unwrap_or_else(|_| "Unknown Date".to_string())
 }
 
-pub(super) fn table_totals_text(table: &AccountTransactionTableResponse) -> String {
-    format!("{} - {} of {}", table.start, table.end, table.total)
+pub(super) fn table_totals_text(
+    table: &AccountTransactionTableResponse,
+    number_format: NumberFormat,
+) -> String {
+    let count = |value: u32| format_number_for_display(&value.to_string(), number_format);
+    format!(
+        "{} - {} of {}",
+        count(table.start),
+        count(table.end),
+        count(table.total)
+    )
 }
 
 pub(super) fn last_page(table: &AccountTransactionTableResponse) -> u32 {
@@ -323,28 +394,7 @@ pub(super) fn tx_explorer_url(
     .map_err(|err| format!("Explorer unavailable: {err}"))
 }
 
-pub(super) fn handle_session_expired(
-    mut auth_state: AuthState,
-    mut banner_state: BannerState,
-    context: &'static str,
-) {
-    let user_id = {
-        let auth_snapshot = auth_state.read();
-        match &*auth_snapshot {
-            AuthStatus::Authenticated(auth) => Some(auth.user.user_id),
-            _ => None,
-        }
-    };
-    tracing::debug!(
-        user_id = ?user_id,
-        context,
-        "transactions ui: session expired"
-    );
-    auth_state.set(AuthStatus::Unauthenticated);
-    if user_id.is_some() {
-        banner_state.set(Some(BannerMessage::SessionExpired));
-    }
-}
+pub(super) use crate::hooks::handle_session_expired;
 
 pub(super) fn route_for_account_transactions(
     account_id: WalletAccountId,
@@ -592,7 +642,60 @@ mod tests {
     use crate::backend::AccountBalanceStateView;
     use crate::report_dates::LocalReportDateRange;
     use crate::wallets::ManualAssetPrecisionStatus;
-    use chrono::NaiveDate;
+    use chrono::{NaiveDate, TimeZone};
+
+    #[test]
+    fn fiat_amount_rounds_rather_than_truncates() {
+        let eur = CurrencyCode::from_code("EUR").unwrap();
+        let price = "58339.305".parse::<rust_decimal::Decimal>().unwrap();
+        assert_eq!(
+            format_fiat_amount(
+                price,
+                DisplayAmountSign::Hidden,
+                eur,
+                NumberFormat::DotComma
+            ),
+            "€58,339.31"
+        );
+    }
+
+    #[test]
+    fn fiat_amount_keeps_currency_decimals_and_groups_digits() {
+        let eur = CurrencyCode::from_code("EUR").unwrap();
+        let value = "11483.4".parse::<rust_decimal::Decimal>().unwrap();
+        assert_eq!(
+            format_fiat_amount(
+                value,
+                DisplayAmountSign::Negative,
+                eur,
+                NumberFormat::DotComma
+            ),
+            "-€11,483.40"
+        );
+        assert_eq!(
+            format_fiat_amount(
+                value,
+                DisplayAmountSign::Hidden,
+                eur,
+                NumberFormat::CommaDot
+            ),
+            "€11.483,40"
+        );
+    }
+
+    #[test]
+    fn transaction_time_follows_the_clock_of_the_date_format() {
+        let at = Utc.with_ymd_and_hms(2025, 9, 22, 14, 5, 0).unwrap();
+        let berlin: chrono_tz::Tz = "Europe/Berlin".parse().unwrap();
+        assert_eq!(
+            format_transaction_time(&at, berlin, DateTimeFormat::MonthDayYear12),
+            "4:05 PM CEST"
+        );
+        assert_eq!(
+            format_transaction_time(&at, berlin, DateTimeFormat::DayMonthYear24),
+            "16:05 CEST"
+        );
+    }
 
     fn timezone(name: &str) -> UserTimezone {
         UserTimezone(name.parse().expect("valid timezone"))
@@ -656,6 +759,8 @@ mod tests {
             symbol: None,
             asset_name: None,
             network_name: None,
+            catalog_asset_key: crate::asset_views::CatalogAssetKey::try_new("cardano")
+                .expect("asset key"),
             opening_balance_state: AccountBalanceStateView::Unknown,
             opening_balance_date: None,
             closing_balance_state: AccountBalanceStateView::Unknown,
@@ -710,10 +815,13 @@ mod tests {
     #[test]
     fn table_totals_text_formats_range() {
         assert_eq!(
-            table_totals_text(&table(1, 50, 2458, 1, 50)),
-            "1 - 50 of 2458"
+            table_totals_text(&table(1, 50, 2458, 1, 50), NumberFormat::DotComma),
+            "1 - 50 of 2,458"
         );
-        assert_eq!(table_totals_text(&table(1, 50, 0, 0, 0)), "0 - 0 of 0");
+        assert_eq!(
+            table_totals_text(&table(1, 50, 0, 0, 0), NumberFormat::DotComma),
+            "0 - 0 of 0"
+        );
     }
 
     #[test]
@@ -941,7 +1049,7 @@ mod tests {
                 chrono_tz::UTC,
                 DateTimeFormat::MonthDayYear12
             ),
-            "Already up to date (checked Jul 11, 2026 05:51 PM UTC)"
+            "Already up to date (checked Jul 11, 2026 5:51 PM UTC)"
         );
     }
 
@@ -963,7 +1071,7 @@ mod tests {
                 chrono_tz::UTC,
                 DateTimeFormat::MonthDayYear12
             ),
-            "Balance refreshed (Jul 11, 2026 05:51 PM UTC)"
+            "Balance refreshed (Jul 11, 2026 5:51 PM UTC)"
         );
     }
 

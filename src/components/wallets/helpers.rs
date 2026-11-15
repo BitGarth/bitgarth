@@ -10,7 +10,7 @@ use crate::wallets::{
     AddressScheme, DEFAULT_ACCOUNT_ADDRESSES_PAGE_SIZE, GetAccountAddressesRequest, SyncedAssetId,
     WALLET_LABEL_MAX_LENGTH, WalletId, validate_extended_pubkey_format,
 };
-use crate::{AuthState, AuthStatus, BannerMessage, BannerState};
+use crate::{AuthState, BannerState};
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 
@@ -113,28 +113,7 @@ pub(super) fn prevalidate_xpub_input(input: &str) -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
-pub(super) fn handle_session_expired(
-    mut auth_state: AuthState,
-    mut banner_state: BannerState,
-    context: &'static str,
-) {
-    let user_id = {
-        let auth_snapshot = auth_state.read();
-        match &*auth_snapshot {
-            AuthStatus::Authenticated(auth) => Some(auth.user.user_id),
-            _ => None,
-        }
-    };
-    dioxus::logger::tracing::debug!(
-        user_id = ?user_id,
-        context,
-        "wallets ui: session expired"
-    );
-    auth_state.set(AuthStatus::Unauthenticated);
-    if user_id.is_some() {
-        banner_state.set(Some(BannerMessage::SessionExpired));
-    }
-}
+pub(super) use crate::hooks::handle_session_expired;
 
 #[cfg(any(target_arch = "wasm32", feature = "desktop"))]
 pub(super) fn trezor_error_text(kind: trezor::TrezorErrorKind) -> (String, String) {
@@ -633,33 +612,93 @@ pub(super) fn missing_supported_address_schemes(
         .collect()
 }
 
-pub(crate) fn copy_to_clipboard(value: &str) {
-    use dioxus::document::eval;
-    let encoded_value = match serde_json::to_string(value) {
-        Ok(encoded) => encoded,
-        Err(err) => {
-            dioxus::logger::tracing::warn!(error = %err, "wallets ui: failed to encode copy text");
+/// Starts the write now, inside the click, so browsers that require a user
+/// gesture (Safari, Firefox) still allow it; the future reports whether it worked.
+pub(crate) fn copy_to_clipboard(value: &str) -> impl std::future::Future<Output = bool> + 'static {
+    let eval = serde_json::to_string(value).ok().map(|text| {
+        dioxus::document::eval(&format!(
+            r#"
+        const text = {text};
+        let copied = false;
+        let textarea;
+        try {{
+            if (navigator.clipboard?.writeText) {{
+                await navigator.clipboard.writeText(text);
+                copied = true;
+            }} else {{
+                textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.readOnly = true;
+                textarea.style.position = 'fixed';
+                textarea.style.opacity = '0';
+                document.body.appendChild(textarea);
+                textarea.select();
+                copied = document.execCommand('copy');
+            }}
+        }} catch {{
+            copied = false;
+        }} finally {{
+            textarea?.remove();
+        }}
+        dioxus.send(copied);
+        "#
+        ))
+    });
+    async move {
+        match eval {
+            Some(mut eval) => eval.recv::<bool>().await.unwrap_or(false),
+            None => false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CopyFeedback {
+    Ready,
+    Writing,
+    Copied,
+    Failed,
+}
+
+impl CopyFeedback {
+    pub(crate) fn label<'a>(self, ready: &'a str, copied: &'a str) -> &'a str {
+        match self {
+            Self::Ready | Self::Writing => ready,
+            Self::Copied => copied,
+            Self::Failed => "Copy failed",
+        }
+    }
+}
+
+/// Show the latest click's outcome for the full interval, then return to ready.
+pub(crate) fn use_copy_feedback(duration_ms: u32) -> (CopyFeedback, Callback<String>) {
+    let mut feedback = use_signal(|| CopyFeedback::Ready);
+    let mut copy_generation = use_signal(|| 0_u32);
+    let copy = use_callback(move |value: String| {
+        if *feedback.peek() == CopyFeedback::Writing {
             return;
         }
-    };
-
-    let script = format!(
-        "const text = {encoded_value};
-if (navigator && navigator.clipboard && navigator.clipboard.writeText) {{
-  navigator.clipboard.writeText(text);
-}} else {{
-  const textarea = document.createElement('textarea');
-  textarea.value = text;
-  textarea.setAttribute('readonly', '');
-  textarea.style.position = 'fixed';
-  textarea.style.opacity = '0';
-  document.body.appendChild(textarea);
-  textarea.select();
-  try {{ document.execCommand('copy'); }} catch (e) {{}}
-  document.body.removeChild(textarea);
-}}"
-    );
-    let _ = eval(script.as_str());
+        feedback.set(CopyFeedback::Writing);
+        let write = copy_to_clipboard(&value);
+        spawn(async move {
+            let outcome = if write.await {
+                CopyFeedback::Copied
+            } else {
+                CopyFeedback::Failed
+            };
+            feedback.set(outcome);
+            let generation = copy_generation.peek().wrapping_add(1);
+            copy_generation.set(generation);
+            let mut timer = dioxus::document::eval(&format!(
+                "setTimeout(() => dioxus.send(true), {duration_ms});"
+            ));
+            let _ = timer.recv::<bool>().await;
+            if *copy_generation.peek() == generation && *feedback.peek() == outcome {
+                feedback.set(CopyFeedback::Ready);
+            }
+        });
+    });
+    (feedback(), copy)
 }
 
 pub(super) fn address_explorer_url(
@@ -1154,5 +1193,14 @@ mod tests {
             transaction_count_display(9, Some(8)),
             TxCountDisplay::Complete(9),
         );
+    }
+}
+
+/// Moves focus to a mounted element, e.g. the field whose error just appeared.
+pub(super) fn focus_mounted(element: Option<std::rc::Rc<MountedData>>) {
+    if let Some(element) = element {
+        spawn(async move {
+            let _ = element.set_focus(true).await;
+        });
     }
 }

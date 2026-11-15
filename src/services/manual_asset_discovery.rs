@@ -174,7 +174,7 @@ pub(crate) fn search_manual_asset_candidates(
         return Ok(results);
     }
 
-    let conn = match crate::db::initialize_prices_db() {
+    let conn = match crate::db::open_migrated_prices_db() {
         Ok(conn) => conn,
         Err(err) => {
             tracing::warn!(
@@ -283,7 +283,7 @@ pub(crate) fn match_total(query: &str) -> Result<usize, crate::db::DbError> {
 }
 
 fn open_prices_conn_or_warn() -> Option<rusqlite::Connection> {
-    match crate::db::initialize_prices_db() {
+    match crate::db::open_migrated_prices_db() {
         Ok(conn) => Some(conn),
         Err(err) => {
             tracing::warn!(
@@ -299,7 +299,7 @@ pub(crate) async fn refresh_coingecko_catalog_for_manual_asset_search(
     user_id: UserId,
     allow_remote_refresh: bool,
 ) {
-    let conn = match crate::db::initialize_prices_db() {
+    let conn = match crate::db::open_migrated_prices_db() {
         Ok(conn) => conn,
         Err(err) => {
             tracing::warn!(

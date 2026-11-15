@@ -9,7 +9,8 @@ const FRESHNESS_WINDOW_DAYS: i64 = 7;
 const SUCCESS_EMPTY_COOLDOWN_SECS: i64 = 24 * 60 * 60;
 const RATE_LIMIT_EVIDENCE_COOLDOWN_SECS: i64 = 15 * 60;
 const PUBLIC_KEYLESS_LICENSE_SCOPE: &str = "public_keyless";
-static PUBLIC_KEYLESS_HISTORY_REQUEST_LANE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(super) static PUBLIC_KEYLESS_HISTORY_REQUEST_LANE: std::sync::Mutex<()> =
+    std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PriceHistorySkipReason {
@@ -105,7 +106,6 @@ fn run_price_history_reconciliation_with_runtime<R: PriceHistoryReconciliationRu
         Ok(()) => {}
         Err(reason) => {
             tracing::debug!(
-                user_id = %user_id,
                 reason = ?reason,
                 trigger = ?params.reason,
                 "price history: reconciliation skipped"
@@ -117,7 +117,7 @@ fn run_price_history_reconciliation_with_runtime<R: PriceHistoryReconciliationRu
     let currency = runtime.load_currency(user_id)?;
     let work = runtime.load_work(user_id)?;
     runtime.run_backfill_for_work(user_id, currency, &work)?;
-    Ok(format!("processed {} asset(s)", work.len()))
+    Ok("completed".to_owned())
 }
 
 fn history_horizon_for_credential_mode(
@@ -142,8 +142,8 @@ fn run_backfill_for_work(
         return Ok(());
     }
 
-    let prices_conn =
-        crate::db::initialize_prices_db().map_err(|err| format!("open prices db failed: {err}"))?;
+    let prices_conn = crate::db::open_migrated_prices_db()
+        .map_err(|err| format!("open prices db failed: {err}"))?;
     let credential_mode = crate::services::current_prices::credential_mode_for_user(user_id)
         .map_err(|err| format!("load CoinGecko credential mode failed: {err}"))?;
     let horizon = history_horizon_for_credential_mode(&credential_mode);
@@ -163,8 +163,10 @@ fn run_backfill_for_work(
     let now = chrono::Utc::now();
     let today = now.date_naive();
     let mut deps = RealPriceHistoryBackfillDeps {
+        user_id,
         conn: &prices_conn,
         coingecko: &coingecko,
+        keyless_lane: &PUBLIC_KEYLESS_HISTORY_REQUEST_LANE,
     };
 
     run_backfill_for_work_with_deps(&mut deps, currency, work, today, horizon, now)
@@ -231,6 +233,8 @@ fn execute_fair_span_work_with_deps<D: PriceHistoryBackfillDeps>(
 
 trait PriceHistoryBackfillDeps {
     fn license_scope(&self) -> &str;
+    /// The lane that serializes keyless requests with the shared history job.
+    fn history_lane(&self) -> Option<&'static std::sync::Mutex<()>>;
     fn retrieved_at(&self) -> DateTime<Utc>;
     fn load_daily_price_dates(
         &mut self,
@@ -263,13 +267,19 @@ trait PriceHistoryBackfillDeps {
 }
 
 struct RealPriceHistoryBackfillDeps<'a> {
+    user_id: UserId,
     conn: &'a rusqlite::Connection,
     coingecko: &'a crate::integrations::coingecko::client::CoingeckoClient,
+    keyless_lane: &'static std::sync::Mutex<()>,
 }
 
 impl PriceHistoryBackfillDeps for RealPriceHistoryBackfillDeps<'_> {
     fn license_scope(&self) -> &str {
         self.coingecko.license_scope()
+    }
+
+    fn history_lane(&self) -> Option<&'static std::sync::Mutex<()>> {
+        (self.license_scope() == PUBLIC_KEYLESS_LICENSE_SCOPE).then_some(self.keyless_lane)
     }
 
     fn retrieved_at(&self) -> DateTime<Utc> {
@@ -280,8 +290,18 @@ impl PriceHistoryBackfillDeps for RealPriceHistoryBackfillDeps<'_> {
         &mut self,
         query: &crate::db::DailyPriceDateQuery,
     ) -> Result<Vec<chrono::NaiveDate>, String> {
-        crate::db::load_daily_price_dates(self.conn, query)
-            .map_err(|err| format!("load daily price dates failed: {err}"))
+        use crate::db::prices_db::shared_history::{SharedPricePair, covered_dates};
+        covered_dates(
+            self.conn,
+            &SharedPricePair {
+                asset_id: query.asset_id.clone(),
+                provider_id: query.provider_asset_id.clone(),
+                currency: query.quote_currency,
+            },
+            query.start,
+            query.end,
+        )
+        .map_err(|err| format!("load daily price dates failed: {err}"))
     }
 
     fn latest_historical_price_attempt(
@@ -308,6 +328,22 @@ impl PriceHistoryBackfillDeps for RealPriceHistoryBackfillDeps<'_> {
         to_unix_seconds: i64,
     ) -> Result<Vec<crate::integrations::coingecko::CoinGeckoDailyPrice>, PriceHistoryFetchError>
     {
+        use crate::db::prices_db::shared_history::{public_retry_at, set_public_retry_at};
+        let failed = |_: rusqlite::Error| PriceHistoryFetchError::Failed;
+        if !crate::db::get_price_fetching_enabled(self.user_id)
+            .map_err(|_| PriceHistoryFetchError::Failed)?
+        {
+            return Err(PriceHistoryFetchError::Failed);
+        }
+        let keyless = self.license_scope() == PUBLIC_KEYLESS_LICENSE_SCOPE;
+        if keyless {
+            let retry_at = public_retry_at(self.conn).map_err(failed)?;
+            if retry_at > Utc::now().timestamp() {
+                return Err(PriceHistoryFetchError::RateLimited {
+                    retry_at: Some(retry_at),
+                });
+            }
+        }
         self.coingecko
             .market_chart_range(
                 provider_asset_id,
@@ -315,9 +351,18 @@ impl PriceHistoryBackfillDeps for RealPriceHistoryBackfillDeps<'_> {
                 from_unix_seconds,
                 to_unix_seconds,
             )
-            .map_err(classify_coingecko_error)?
-            .into_daily_prices()
-            .map_err(PriceHistoryFetchError::Failed)
+            .map_err(|err| {
+                let now = Utc::now();
+                if keyless
+                    && let Some(retry) = err.history_retry_at(now)
+                    && let Err(db_error) = set_public_retry_at(self.conn, retry)
+                {
+                    return failed(db_error);
+                }
+                classify_coingecko_error(err, now)
+            })?
+            .into_daily_prices_at(Utc::now().date_naive())
+            .map_err(|_| PriceHistoryFetchError::Failed)
     }
 
     fn upsert_daily_price_points(
@@ -726,6 +771,11 @@ fn fetch_and_store_span_with_retries<D: PriceHistoryBackfillDeps>(
     let mut current_span = span;
     let mut deferred = Vec::new();
     loop {
+        let guard = deps
+            .history_lane()
+            .map(|lane| lane.lock())
+            .transpose()
+            .map_err(|_| "public price history lane poisoned".to_owned())?;
         let missing_spans = missing_spans_after_exact_recheck(deps, currency, item, current_span)?;
         if missing_spans.is_empty() {
             return Ok(FairSpanExecutionOutcome {
@@ -752,7 +802,9 @@ fn fetch_and_store_span_with_retries<D: PriceHistoryBackfillDeps>(
             continue;
         }
 
-        match fetch_and_store_span(deps, currency, item, current_span) {
+        let outcome = fetch_and_store_span(deps, currency, item, current_span);
+        drop(guard);
+        match outcome {
             Ok(()) => {
                 return Ok(FairSpanExecutionOutcome {
                     control: BackfillControl::Continue,
@@ -772,7 +824,7 @@ fn fetch_and_store_span_with_retries<D: PriceHistoryBackfillDeps>(
                     deferred: Vec::new(),
                 });
             }
-            Err(PriceHistoryFetchError::NotFound(message)) => {
+            Err(PriceHistoryFetchError::NotFound) => {
                 record_terminal_historical_attempt(
                     deps,
                     item,
@@ -780,34 +832,26 @@ fn fetch_and_store_span_with_retries<D: PriceHistoryBackfillDeps>(
                     crate::db::HistoricalPriceAttemptStatus::PermanentFailure,
                     "not_found",
                 );
-                tracing::warn!(
-                    asset_id = %item.asset_id,
-                    provider_asset_id = %item.provider_asset_id,
-                    error = %message,
-                    "price history: asset not found by provider"
-                );
+                tracing::warn!("price history: asset not found by provider");
                 return Ok(FairSpanExecutionOutcome {
                     control: BackfillControl::StopAsset,
                     deferred: Vec::new(),
                 });
             }
-            Err(PriceHistoryFetchError::RateLimited(message)) => {
-                if let Some(delay) = retry_delays.next() {
+            Err(PriceHistoryFetchError::RateLimited { retry_at }) => {
+                let now = deps.retrieved_at().timestamp();
+                let wait_secs = retry_at.unwrap_or(now).saturating_sub(now);
+                let provider_delay = Duration::from_secs(u64::try_from(wait_secs).unwrap_or(0));
+                let max_delay = retry_delays.as_slice().last().copied().unwrap_or_default();
+                if let Some(delay) = retry_delays.next().filter(|_| provider_delay <= max_delay) {
+                    let delay = (*delay).max(provider_delay);
                     tracing::debug!(
-                        asset_id = %item.asset_id,
-                        provider_asset_id = %item.provider_asset_id,
-                        error = %message,
                         delay_ms = delay.as_millis(),
                         "price history: rate limited; backing off before retry"
                     );
-                    deps.sleep_after_rate_limit(*delay);
+                    deps.sleep_after_rate_limit(delay);
                 } else {
-                    tracing::warn!(
-                        asset_id = %item.asset_id,
-                        provider_asset_id = %item.provider_asset_id,
-                        error = %message,
-                        "price history: rate limit persisted after retries"
-                    );
+                    tracing::warn!(retry_at, "price history: stopping run after rate limit");
                     record_terminal_historical_attempt(
                         deps,
                         item,
@@ -821,7 +865,7 @@ fn fetch_and_store_span_with_retries<D: PriceHistoryBackfillDeps>(
                     });
                 }
             }
-            Err(PriceHistoryFetchError::Failed(message)) => {
+            Err(PriceHistoryFetchError::Failed) => {
                 record_terminal_historical_attempt(
                     deps,
                     item,
@@ -829,12 +873,7 @@ fn fetch_and_store_span_with_retries<D: PriceHistoryBackfillDeps>(
                     crate::db::HistoricalPriceAttemptStatus::TransientFailure,
                     "transient_failure",
                 );
-                tracing::warn!(
-                    asset_id = %item.asset_id,
-                    provider_asset_id = %item.provider_asset_id,
-                    error = %message,
-                    "price history: asset span failed"
-                );
+                tracing::warn!("price history: asset span failed");
                 return Ok(FairSpanExecutionOutcome {
                     control: BackfillControl::Continue,
                     deferred,
@@ -860,13 +899,8 @@ fn record_terminal_historical_attempt<D: PriceHistoryBackfillDeps>(
         None,
         Some(error_code),
     );
-    if let Err(err) = deps.upsert_historical_price_attempt(row) {
-        tracing::warn!(
-            asset_id = %item.asset_id,
-            provider_asset_id = %item.provider_asset_id,
-            error = %err,
-            "price history: historical attempt upsert failed"
-        );
+    if deps.upsert_historical_price_attempt(row).is_err() {
+        tracing::warn!("price history: historical attempt upsert failed");
     }
 }
 
@@ -888,19 +922,23 @@ fn missing_spans_after_exact_recheck<D: PriceHistoryBackfillDeps>(
 
 fn classify_coingecko_error(
     err: crate::integrations::coingecko::client::CoingeckoError,
+    now: DateTime<Utc>,
 ) -> PriceHistoryFetchError {
+    let retry_at = err.explicit_history_retry_at(now);
     if err.is_history_limit() {
         PriceHistoryFetchError::HistoryLimit
-    } else if err.is_rate_limited() {
-        PriceHistoryFetchError::RateLimited(format!("CoinGecko rate limited: {err}"))
+    } else if err.is_rate_limited() || retry_at.is_some() {
+        PriceHistoryFetchError::RateLimited { retry_at }
     } else if is_coingecko_not_found(&err) {
-        PriceHistoryFetchError::NotFound(format!("CoinGecko asset not found: {err}"))
+        PriceHistoryFetchError::NotFound
     } else {
-        PriceHistoryFetchError::Failed(format!("CoinGecko request failed: {err}"))
+        PriceHistoryFetchError::Failed
     }
 }
 
-fn is_coingecko_not_found(err: &crate::integrations::coingecko::client::CoingeckoError) -> bool {
+pub(super) fn is_coingecko_not_found(
+    err: &crate::integrations::coingecko::client::CoingeckoError,
+) -> bool {
     matches!(
         err,
         crate::integrations::coingecko::client::CoingeckoError::Api {
@@ -924,9 +962,9 @@ fn missing_daily_spans_newest_first(
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PriceHistoryFetchError {
     HistoryLimit,
-    RateLimited(String),
-    NotFound(String),
-    Failed(String),
+    RateLimited { retry_at: Option<i64> },
+    NotFound,
+    Failed,
 }
 
 fn historical_attempt_upsert(
@@ -963,35 +1001,30 @@ fn fetch_and_store_span<D: PriceHistoryBackfillDeps>(
     item: &super::work_selection::PriceHistoryAssetWork,
     span: super::planner::DateSpan,
 ) -> Result<(), PriceHistoryFetchError> {
-    let from = unix_day_start(span.start).map_err(PriceHistoryFetchError::Failed)?;
+    let from = unix_day_start(span.start).map_err(|_| PriceHistoryFetchError::Failed)?;
     let to = unix_day_start(span.end + chrono::Duration::days(1))
-        .map_err(PriceHistoryFetchError::Failed)?;
+        .map_err(|_| PriceHistoryFetchError::Failed)?;
     let quote_currency = currency.code().to_ascii_lowercase();
     let retrieved_at = deps.retrieved_at();
-    let rows = fetch_daily_prices_with_request_lane(
-        deps,
-        &item.provider_asset_id,
-        quote_currency.as_str(),
-        from,
-        to,
-    )?
-    .into_iter()
-    .filter(|price| price.date_utc >= span.start && price.date_utc <= span.end)
-    .map(|price| crate::db::DailyPricePointUpsert {
-        asset_id: item.asset_id.clone(),
-        quote_currency: currency,
-        price_time_utc: price.price_time,
-        date_utc: price.date_utc,
-        price: price.price.as_decimal(),
-        provider_asset_id: item.provider_asset_id.clone(),
-        provider_quote_id: Some(quote_currency.clone()),
-        license_scope: deps.license_scope().to_string(),
-        retrieved_at,
-    })
-    .collect::<Vec<_>>();
+    let rows = deps
+        .fetch_daily_prices(&item.provider_asset_id, quote_currency.as_str(), from, to)?
+        .into_iter()
+        .filter(|price| price.date_utc >= span.start && price.date_utc <= span.end)
+        .map(|price| crate::db::DailyPricePointUpsert {
+            asset_id: item.asset_id.clone(),
+            quote_currency: currency,
+            price_time_utc: price.price_time,
+            date_utc: price.date_utc,
+            price: price.price.as_decimal(),
+            provider_asset_id: item.provider_asset_id.clone(),
+            provider_quote_id: Some(quote_currency.clone()),
+            license_scope: deps.license_scope().to_string(),
+            retrieved_at,
+        })
+        .collect::<Vec<_>>();
 
     deps.upsert_daily_price_points(&rows)
-        .map_err(PriceHistoryFetchError::Failed)?;
+        .map_err(|_| PriceHistoryFetchError::Failed)?;
 
     let status = if rows.is_empty() {
         crate::db::HistoricalPriceAttemptStatus::SuccessEmpty
@@ -1001,34 +1034,7 @@ fn fetch_and_store_span<D: PriceHistoryBackfillDeps>(
     let attempt =
         historical_attempt_upsert(item, span, status, rows.len(), retrieved_at, None, None);
     deps.upsert_historical_price_attempt(attempt)
-        .map_err(PriceHistoryFetchError::Failed)
-}
-
-fn fetch_daily_prices_with_request_lane<D: PriceHistoryBackfillDeps>(
-    deps: &mut D,
-    provider_asset_id: &str,
-    quote_currency: &str,
-    from_unix_seconds: i64,
-    to_unix_seconds: i64,
-) -> Result<Vec<crate::integrations::coingecko::CoinGeckoDailyPrice>, PriceHistoryFetchError> {
-    if deps.license_scope() != PUBLIC_KEYLESS_LICENSE_SCOPE {
-        return deps.fetch_daily_prices(
-            provider_asset_id,
-            quote_currency,
-            from_unix_seconds,
-            to_unix_seconds,
-        );
-    }
-
-    let _guard = PUBLIC_KEYLESS_HISTORY_REQUEST_LANE.lock().map_err(|err| {
-        PriceHistoryFetchError::Failed(format!("price history lane poisoned: {err}"))
-    })?;
-    deps.fetch_daily_prices(
-        provider_asset_id,
-        quote_currency,
-        from_unix_seconds,
-        to_unix_seconds,
-    )
+        .map_err(|_| PriceHistoryFetchError::Failed)
 }
 
 #[cfg(test)]
@@ -1185,6 +1191,17 @@ mod tests {
     }
 
     impl FakeBackfillDeps {
+        fn queue_rate_limit(&mut self, status_code: u16, retry_after: Option<&str>) {
+            let err = crate::integrations::coingecko::client::CoingeckoError::Api {
+                status_code,
+                error_code: 0,
+                error_message: "rate limited".into(),
+                retry_after: retry_after.map(str::to_owned),
+            };
+            self.fetch_results
+                .push_back(Err(classify_coingecko_error(err, self.retrieved_at)));
+        }
+
         fn seed_attempt(&mut self, record: crate::db::HistoricalPriceAttemptRecord) {
             self.attempt_results.insert(
                 attempt_lookup_key(
@@ -1220,6 +1237,10 @@ mod tests {
     impl PriceHistoryBackfillDeps for FakeBackfillDeps {
         fn license_scope(&self) -> &str {
             self.license_scope
+        }
+
+        fn history_lane(&self) -> Option<&'static std::sync::Mutex<()>> {
+            None
         }
 
         fn retrieved_at(&self) -> DateTime<Utc> {
@@ -1319,6 +1340,7 @@ mod tests {
 
     struct LaneProbeDeps {
         license_scope: &'static str,
+        lane: &'static std::sync::Mutex<()>,
         active_fetches: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         max_active_fetches: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
@@ -1326,6 +1348,10 @@ mod tests {
     impl PriceHistoryBackfillDeps for LaneProbeDeps {
         fn license_scope(&self) -> &str {
             self.license_scope
+        }
+
+        fn history_lane(&self) -> Option<&'static std::sync::Mutex<()>> {
+            (self.license_scope == PUBLIC_KEYLESS_LICENSE_SCOPE).then_some(self.lane)
         }
 
         fn retrieved_at(&self) -> DateTime<Utc> {
@@ -1411,6 +1437,8 @@ mod tests {
     fn public_keyless_fetches_are_serialized_across_threads() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::{Arc, Barrier};
+        // Private to this test, so no other test contends for it.
+        static LANE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
         let active_fetches = Arc::new(AtomicUsize::new(0));
         let max_active_fetches = Arc::new(AtomicUsize::new(0));
@@ -1423,11 +1451,21 @@ mod tests {
                 std::thread::spawn(move || {
                     let mut deps = LaneProbeDeps {
                         license_scope: PUBLIC_KEYLESS_LICENSE_SCOPE,
+                        lane: &LANE,
                         active_fetches,
                         max_active_fetches,
                     };
                     start.wait();
-                    fetch_daily_prices_with_request_lane(&mut deps, "bitcoin", "usd", 1, 2)
+                    let span = DateSpan {
+                        start: d("2026-01-01"),
+                        end: d("2026-01-01"),
+                    };
+                    let item = PriceHistoryAssetWork {
+                        asset_id: "bitcoin".into(),
+                        provider_asset_id: "bitcoin".into(),
+                        first_owned_date: span.start,
+                    };
+                    fetch_and_store_missing_span(&mut deps, usd(), &item, span)
                         .expect("lane fetch should succeed");
                 })
             })
@@ -1439,6 +1477,71 @@ mod tests {
         }
 
         assert_eq!(max_active_fetches.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "db-tests")]
+    #[test]
+    fn login_rechecks_days_committed_by_overlapping_shared_job() {
+        use super::super::shared_executor::{
+            run_batch,
+            tests::{open, series},
+        };
+        use crate::integrations::coingecko::{CoinGeckoCredentialMode, client::CoingeckoClient};
+        use crate::traces::client::{IntegrationLabel, TracedBlockingClient};
+        use std::sync::mpsc;
+        // Private to this test, so no other test contends for it.
+        static LANE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let path = std::env::temp_dir().join(format!("shared-login-{}.db", ulid::Ulid::new()));
+        let conn = open(&path);
+        let user_id = UserId::new();
+        let client =
+            TracedBlockingClient::builder(IntegrationLabel::new("login-overlap-test"), user_id)
+                .build()
+                .unwrap();
+        let api =
+            CoingeckoClient::from_credential_mode(client, CoinGeckoCredentialMode::PublicKeyless)
+                .unwrap();
+        let mut login = RealPriceHistoryBackfillDeps {
+            user_id,
+            conn: &conn,
+            coingecko: &api,
+            keyless_lane: &LANE,
+        };
+        let now = dt("2026-05-30T02:00:00Z");
+        let (started, waiting) = mpsc::channel();
+        let (release, proceed) = mpsc::channel();
+        let other_path = path.clone();
+        let handle = std::thread::spawn(move || {
+            let conn = rusqlite::Connection::open(other_path).unwrap();
+            let sent = std::cell::Cell::new(false);
+            run_batch(
+                &conn,
+                &LANE,
+                || false,
+                || now,
+                || Ok(!sent.get()),
+                |pair, span| {
+                    assert_eq!(pair.asset_id, "bitcoin");
+                    started.send(span).unwrap();
+                    proceed.recv_timeout(Duration::from_secs(10)).unwrap();
+                    sent.set(true);
+                    Ok(series(span))
+                },
+            )
+            .unwrap();
+        });
+        let span = waiting.recv_timeout(Duration::from_secs(10)).unwrap();
+        let item = PriceHistoryAssetWork {
+            asset_id: "bitcoin".into(),
+            provider_asset_id: "bitcoin".into(),
+            first_owned_date: span.start,
+        };
+        release.send(()).unwrap();
+        // This synthetic user has no opt-in. Reaching its network path would return an error.
+        fetch_and_store_missing_span(&mut login, usd(), &item, span).unwrap();
+        handle.join().unwrap();
+        drop(conn);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -1456,8 +1559,32 @@ mod tests {
         };
 
         assert!(matches!(
-            classify_coingecko_error(err),
-            PriceHistoryFetchError::NotFound(_)
+            classify_coingecko_error(err, dt("2026-01-10T00:00:00Z")),
+            PriceHistoryFetchError::NotFound
+        ));
+    }
+
+    #[test]
+    fn coingecko_503_classifies_as_rate_limited_only_with_retry_after() {
+        let unavailable = |retry_after: Option<&str>| {
+            crate::integrations::coingecko::client::CoingeckoError::Api {
+                status_code: 503,
+                error_code: 0,
+                error_message: "unavailable".to_string(),
+                retry_after: retry_after.map(str::to_string),
+            }
+        };
+
+        assert!(matches!(
+            classify_coingecko_error(unavailable(Some("60")), dt("2026-01-10T00:00:00Z")),
+            PriceHistoryFetchError::RateLimited {
+                retry_at: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            classify_coingecko_error(unavailable(None), dt("2026-01-10T00:00:00Z")),
+            PriceHistoryFetchError::Failed
         ));
     }
 
@@ -1471,7 +1598,7 @@ mod tests {
         };
 
         assert_eq!(
-            classify_coingecko_error(err),
+            classify_coingecko_error(err, dt("2026-01-10T00:00:00Z")),
             PriceHistoryFetchError::HistoryLimit
         );
     }
@@ -2621,22 +2748,54 @@ mod tests {
     }
 
     #[test]
+    fn long_retry_after_stops_run_without_an_inline_retry() {
+        let mut deps = FakeBackfillDeps::default();
+        deps.queue_rate_limit(503, Some("3600"));
+        let day = d("2026-01-01");
+        let outcome = fetch_and_store_span_with_retries(
+            &mut deps,
+            usd(),
+            &work(day),
+            DateSpan {
+                start: day,
+                end: day,
+            },
+        )
+        .expect("handle rate limit");
+        assert_eq!(outcome.control, BackfillControl::StopRun);
+        assert_eq!(deps.fetches.len(), 1);
+        assert!(deps.sleeps.is_empty());
+        assert_eq!(
+            deps.attempt_upserts,
+            vec![expected_attempt_upsert(
+                "bitcoin",
+                day,
+                day,
+                crate::db::HistoricalPriceAttemptStatus::RateLimited,
+                0,
+                Some("rate_limited"),
+            )]
+        );
+    }
+
+    #[test]
+    fn short_retry_after_delays_the_next_inline_fetch() {
+        let mut deps = FakeBackfillDeps::default();
+        deps.queue_rate_limit(429, Some("3"));
+        let day = d("2026-01-01");
+        run_fair_test_backfill(&mut deps, &[work(day)], day).expect("retry successfully");
+        assert_eq!(deps.sleeps, vec![Duration::from_secs(3)]);
+        assert_eq!(deps.fetches.len(), 2);
+    }
+
+    #[test]
     fn persistent_rate_limit_records_rate_limited_attempt() {
         let mut deps = FakeBackfillDeps::default();
         deps.load_results.push_back(Vec::new());
         deps.load_results.push_back(Vec::new());
-        deps.fetch_results
-            .push_back(Err(PriceHistoryFetchError::RateLimited(
-                "rate limited 1".to_string(),
-            )));
-        deps.fetch_results
-            .push_back(Err(PriceHistoryFetchError::RateLimited(
-                "rate limited 2".to_string(),
-            )));
-        deps.fetch_results
-            .push_back(Err(PriceHistoryFetchError::RateLimited(
-                "rate limited 3".to_string(),
-            )));
+        for _ in 0..3 {
+            deps.queue_rate_limit(429, None);
+        }
 
         let work_items = vec![
             asset_work("bitcoin", d("2026-01-01")),
@@ -2711,18 +2870,9 @@ mod tests {
             .push_back(Ok(vec![daily_price("2026-01-10", "10")]));
         deps.fetch_results
             .push_back(Ok(vec![daily_price("2026-01-10", "20")]));
-        deps.fetch_results
-            .push_back(Err(PriceHistoryFetchError::RateLimited(
-                "rate limited 1".to_string(),
-            )));
-        deps.fetch_results
-            .push_back(Err(PriceHistoryFetchError::RateLimited(
-                "rate limited 2".to_string(),
-            )));
-        deps.fetch_results
-            .push_back(Err(PriceHistoryFetchError::RateLimited(
-                "rate limited 3".to_string(),
-            )));
+        for _ in 0..3 {
+            deps.queue_rate_limit(429, None);
+        }
 
         let work_items = vec![
             asset_work("bitcoin", d("2026-01-01")),
@@ -2759,10 +2909,7 @@ mod tests {
             .push_back(vec![d("2026-01-04"), d("2026-01-05"), d("2026-01-06")]);
         deps.load_results.push_back(Vec::new());
         deps.load_results.push_back(Vec::new());
-        deps.fetch_results
-            .push_back(Err(PriceHistoryFetchError::RateLimited(
-                "rate limited".to_string(),
-            )));
+        deps.queue_rate_limit(429, None);
         deps.fetch_results
             .push_back(Ok(vec![daily_price("2026-01-10", "10")]));
         deps.fetch_results
@@ -2798,18 +2945,9 @@ mod tests {
         deps.load_results.push_back(Vec::new());
         deps.load_results.push_back(Vec::new());
         deps.load_results.push_back(Vec::new());
-        deps.fetch_results
-            .push_back(Err(PriceHistoryFetchError::RateLimited(
-                "parent rate limited".to_string(),
-            )));
-        deps.fetch_results
-            .push_back(Err(PriceHistoryFetchError::RateLimited(
-                "selected subspan rate limited 1".to_string(),
-            )));
-        deps.fetch_results
-            .push_back(Err(PriceHistoryFetchError::RateLimited(
-                "selected subspan rate limited 2".to_string(),
-            )));
+        for _ in 0..3 {
+            deps.queue_rate_limit(429, None);
+        }
         deps.fetch_results
             .push_back(Ok(vec![daily_price("2026-01-10", "10")]));
         deps.fetch_results
@@ -2876,10 +3014,7 @@ mod tests {
                 .map(|day| d(&format!("2026-01-{day:02}")))
                 .collect(),
         );
-        deps.fetch_results
-            .push_back(Err(PriceHistoryFetchError::RateLimited(
-                "rate limited".to_string(),
-            )));
+        deps.queue_rate_limit(429, None);
 
         run_fair_test_backfill(&mut deps, &[work(d("2026-01-01"))], d("2026-01-10"))
             .expect("backfill should succeed");
@@ -2904,9 +3039,7 @@ mod tests {
             .push_back(vec![d("2026-01-04"), d("2026-01-05"), d("2026-01-06")]);
         deps.load_results.push_back(Vec::new());
         deps.fetch_results
-            .push_back(Err(PriceHistoryFetchError::NotFound(
-                "not found".to_string(),
-            )));
+            .push_back(Err(PriceHistoryFetchError::NotFound));
 
         run_fair_test_backfill(&mut deps, &[work(d("2026-01-01"))], d("2026-01-10"))
             .expect("backfill should succeed");
@@ -2939,9 +3072,7 @@ mod tests {
         deps.load_results.push_back(Vec::new());
         deps.load_results.push_back(Vec::new());
         deps.fetch_results
-            .push_back(Err(PriceHistoryFetchError::Failed(
-                "provider response included raw details".to_string(),
-            )));
+            .push_back(Err(PriceHistoryFetchError::Failed));
 
         run_fair_test_backfill(&mut deps, &[work(d("2026-01-01"))], d("2026-01-10"))
             .expect("backfill should succeed");

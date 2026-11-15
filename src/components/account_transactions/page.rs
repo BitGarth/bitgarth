@@ -1,11 +1,12 @@
 use super::filters::TransactionStatusFilterRow;
+use super::flow_summary::AccountFlowSummary;
 use super::helpers::{
     AccountTransactionsLoader, ActiveFilters, ManualAssertionFormMode, ManualAssertionFormState,
     amount_context_for_custom_response, amount_context_for_response,
     build_transaction_filters_query, current_year_to_date_range, dispatch_date_range_filter_event,
-    format_balance_date, format_balance_reliability_display, format_custom_balance_state_display,
-    format_native_balance_state_display, handle_session_expired, history_pages, history_sort,
-    local_today_in_timezone, manual_assertion_precision_helper_text, manual_sync_outcome_message,
+    format_balance_date, format_custom_balance_state_display, format_native_balance_state_display,
+    handle_session_expired, history_pages, history_sort, local_today_in_timezone,
+    manual_assertion_precision_helper_text, manual_sync_outcome_message,
     route_for_account_transactions, should_sync_initial_account_response,
 };
 use super::identity::{AccountIdentity, AccountIdentitySection};
@@ -327,36 +328,6 @@ pub(crate) fn AccountTransactions(
                             let show_etherscan_notice =
                                 data.asset == SyncedAssetId::Ethereum && !has_etherscan_api_key;
                             let amount_context = amount_context_for_response(&data, number_format);
-                            let opening_balance_display = format_native_balance_state_display(
-                                &data.opening_balance_state,
-                                data.asset,
-                                &None,
-                                &amount_context,
-                                number_format,
-                            );
-                            let opening_balance_display = format_balance_reliability_display(
-                                opening_balance_display,
-                                &data.opening_balance_reliability,
-                            );
-                            let closing_balance_display = format_native_balance_state_display(
-                                &data.closing_balance_state,
-                                data.asset,
-                                &None,
-                                &amount_context,
-                                number_format,
-                            );
-                            let closing_balance_display = format_balance_reliability_display(
-                                closing_balance_display,
-                                &data.closing_balance_reliability,
-                            );
-                            let opening_date_display = data
-                                .opening_balance_date
-                                .as_deref()
-                                .map(|value| format_balance_date(value, date_format));
-                            let closing_date_display = data
-                                .closing_balance_date
-                                .as_deref()
-                                .map(|value| format_balance_date(value, date_format));
                             let current_balance_display = format_native_balance_state_display(
                                 &data.current_balance_state,
                                 data.asset,
@@ -408,7 +379,7 @@ pub(crate) fn AccountTransactions(
                                 title: None,
                             }];
                             kebab_items.push(KebabMenuItem {
-                                label: "Change Wallet".to_string(),
+                                label: "Change wallet".to_string(),
                                 test_id: None,
                                 on_click: EventHandler::new(move |_| {
                                     show_change_wallet.set(true);
@@ -467,14 +438,14 @@ pub(crate) fn AccountTransactions(
                                             }
                                         }
                                         AccountSyncStatusPill { account_id: native_account_id }
-                                        span { "data-testid": "account-mode",
+                                        span { class: "tx-header-meta", "data-testid": "account-mode",
                                             {data.account_mode.status_label(
                                                 data.transaction_sync_pause_reason
                                                     == Some(crate::account_mode::TransactionSyncPauseReason::TransactionThreshold),
                                             )}
                                         }
                                         if let Some(coverage @ crate::balance_reliability::BitcoinHistoryCoverageView::CompleteThrough { .. }) = data.bitcoin_history_coverage {
-                                            span { class: "tx-history-coverage", "data-testid": "bitcoin-history-coverage", "{coverage.label()}" }
+                                            span { class: "tx-header-meta tx-history-coverage", "data-testid": "bitcoin-history-coverage", "{coverage.label()}" }
                                         }
                                     }
                                     div { class: "tx-header-actions",
@@ -685,41 +656,11 @@ pub(crate) fn AccountTransactions(
                                         span { class: "tx-header-balance-value", "{current_balance_display}" }
                                     }
                                 } else {
-                                    p { class: "tx-header-balance tx-header-opening-balance",
-                                        if let Some(date_display) = opening_date_display {
-                                            span { class: "tx-header-balance-label",
-                                                "Opening balance on {date_display}: "
-                                            }
-                                        } else {
-                                            span { class: "tx-header-balance-label",
-                                                "Opening balance (Awaiting first sync): "
-                                            }
-                                        }
-                                        span { class: "tx-header-balance-value",
-                                            "{opening_balance_display}"
-                                        }
-                                        if matches!(
-                                            data.opening_balance_state,
-                                            crate::backend::NativeBalanceStateView::Unknown
-                                        ) {
-                                            span { class: "muted tx-header-balance-hint",
-                                                " (history not synced yet)"
-                                            }
-                                        }
-                                    }
-                                    p { class: "tx-header-balance tx-header-closing-balance",
-                                        if let Some(date_display) = closing_date_display {
-                                            span { class: "tx-header-balance-label",
-                                                "Closing balance on {date_display}: "
-                                            }
-                                        } else {
-                                            span { class: "tx-header-balance-label",
-                                                "Closing balance (Awaiting first sync): "
-                                            }
-                                        }
-                                        span { class: "tx-header-balance-value",
-                                            "{closing_balance_display}"
-                                        }
+                                    AccountFlowSummary {
+                                        data: data.clone(),
+                                        amount_context: amount_context.clone(),
+                                        number_format,
+                                        date_format,
                                     }
                                 }
                             }
@@ -834,6 +775,7 @@ pub(crate) fn AccountTransactions(
                             decimal_precision: data.decimal_precision,
                             asset_name: data.asset_name.clone(),
                             network_name: data.network_name.clone(),
+                            catalog_asset_key: data.catalog_asset_key.clone(),
                         },
                         None,
                     ),
@@ -1246,7 +1188,7 @@ pub(crate) fn AccountTransactions(
                                     asset: data.asset,
                                     network: data.network,
                                     amount_context: amount_context.clone(),
-                                    active_quote: None,
+                                    fiat_currency: data.fiat_currency,
                                     number_format,
                                     table: data.pending.clone(),
                                     loading: loading(),
@@ -1272,7 +1214,7 @@ pub(crate) fn AccountTransactions(
                                 asset: data.asset,
                                 network: data.network,
                                 amount_context,
-                                active_quote: None,
+                                fiat_currency: data.fiat_currency,
                                 number_format,
                                 table: data.confirmed.clone(),
                                 loading: loading(),

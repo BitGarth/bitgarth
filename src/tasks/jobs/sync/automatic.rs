@@ -552,7 +552,7 @@ pub(super) fn run_sync_cycle(
     }
 
     for mut bundle in hd_bundles {
-        tracing::info!(
+        tracing::debug!(
             user_id = %run.user_id,
             run_id = %run.run_id,
             account_id = %bundle.account_id,
@@ -678,12 +678,8 @@ pub(super) fn run_sync_cycle(
 fn user_has_unexpired_session(user_id: UserId, now: DateTime<Utc>) -> bool {
     match session::list_users_with_unexpired_sessions_at(now) {
         Ok(users) => users.contains(&user_id),
-        Err(err) => {
-            tracing::warn!(
-                user_id = %user_id,
-                error = %err,
-                "transactions sync: unable to resolve active sessions; skipping sync"
-            );
+        Err(_) => {
+            tracing::warn!(target: "wallet_sync", "transactions sync: unable to resolve active sessions; skipping sync");
             false
         }
     }
@@ -1052,7 +1048,7 @@ fn publish_and_log_sync_completed(
         ),
     );
 
-    tracing::info!(
+    tracing::debug!(
         user_id = %context.run.user_id,
         run_id = %context.run.run_id,
         source = ?context.source,
@@ -1116,9 +1112,25 @@ fn finish_automatic_run(
     source: TriggerSource,
     scope: TransactionSyncScope,
     result: Result<AutomaticRunSuccess, AutomaticRunFailure>,
-) -> Result<UserTransactionMonitorSummary, UserTransactionMonitorError> {
+) -> Result<(UserTransactionMonitorSummary, AggregateSyncResult), UserTransactionMonitorError> {
     match result {
         Ok(success) => {
+            let summary = &success.summary;
+            let failure_kind = if summary.addresses_failed.value() > 0 {
+                Some("work_item_failed")
+            } else if !summary.rate_limited.is_empty() {
+                Some("rate_limit")
+            } else {
+                None
+            };
+            tracing::info!(
+                target: "wallet_sync",
+                run_id = %run.run_id,
+                outcome = success.aggregate_result.as_db_value(),
+                duration_ms = (success.completed_at - run.started_at).num_milliseconds(),
+                failure_kind,
+                "sync_completed"
+            );
             publish_and_log_sync_completed(
                 SyncCompletionContext {
                     run,
@@ -1130,15 +1142,24 @@ fn finish_automatic_run(
                 },
                 &success.summary,
             );
-            Ok(success.summary)
+            Ok((success.summary, success.aggregate_result))
         }
         Err(failure) => {
+            let completed_at = run.clock.utc_now();
+            tracing::error!(
+                target: "wallet_sync",
+                run_id = %run.run_id,
+                outcome = "failure",
+                duration_ms = (completed_at - run.started_at).num_milliseconds(),
+                failure_kind = failure.error.log_category(),
+                "sync_completed"
+            );
             crate::db::debug_assert_user_db_unlocked(run.user_id, "parent sync failure publish");
             publish_transaction_sync_event(
                 run.user_id,
                 TransactionSyncEvent::sync_failed(
                     run.run_id,
-                    run.clock.utc_now(),
+                    completed_at,
                     failure.message,
                     failure.addresses_failed,
                 ),
@@ -1157,7 +1178,8 @@ fn run_started_automatic_with(
         TriggerSource,
         TransactionSyncScope,
     ) -> Result<AutomaticRunSuccess, AutomaticRunFailure>,
-) -> Result<UserTransactionMonitorSummary, UserTransactionMonitorError> {
+) -> Result<(UserTransactionMonitorSummary, AggregateSyncResult), UserTransactionMonitorError> {
+    tracing::info!(target: "wallet_sync", run_id = %run.run_id, "sync_started");
     crate::db::debug_assert_user_db_unlocked(run.user_id, "parent sync start publish");
     publish_transaction_sync_event(
         run.user_id,
@@ -1170,7 +1192,8 @@ pub(crate) fn run(
     user_id: UserId,
     source: TriggerSource,
     params: UserTransactionMonitorParams,
-) -> Result<UserTransactionMonitorSummary, UserTransactionMonitorError> {
+    paired: bool,
+) -> Result<(UserTransactionMonitorSummary, AggregateSyncResult), UserTransactionMonitorError> {
     let clock = SystemSyncClock;
     let run_id = params.run_id;
     let started_at = clock.utc_now();
@@ -1190,7 +1213,7 @@ pub(crate) fn run(
         "tasks: user transaction monitor started"
     );
 
-    if !user_has_unexpired_session(run.user_id, run.started_at) {
+    if !paired && !user_has_unexpired_session(run.user_id, run.started_at) {
         tracing::debug!(
             user_id = %run.user_id,
             run_id = %run.run_id,
@@ -1207,7 +1230,7 @@ pub(crate) fn run(
                 blocked_for: None,
             },
         );
-        return Ok(summary);
+        return Ok((summary, AggregateSyncResult::Success));
     }
 
     run_started_automatic_with(run, source, scope, run_automatic_inner)
@@ -1263,7 +1286,7 @@ fn run_automatic_inner_with_runner(
     let accounts_total = total_sync_account_count(&non_hd_addresses, &hd_bundles);
     let hd_accounts = u32::try_from(hd_bundles.len()).unwrap_or(u32::MAX);
 
-    tracing::info!(
+    tracing::debug!(
         user_id = %run.user_id,
         run_id = %run.run_id,
         source = ?source,
@@ -1422,7 +1445,7 @@ fn run_automatic_inner_with_runner(
     )?;
     let cleanup_stats = cleanup_report.deletion;
     let compaction_stats = cleanup_report.compaction;
-    tracing::info!(
+    tracing::debug!(
         user_id = %run.user_id,
         run_id = %run.run_id,
         retention_days = raw_sync_history_retention_days.value(),
@@ -1435,7 +1458,7 @@ fn run_automatic_inner_with_runner(
         deleted_raw_etherscan_internal_transaction_observations = cleanup_stats.deleted_raw_etherscan_internal_transaction_observations,
         "raw_sync_history_cleanup_completed"
     );
-    tracing::info!(
+    tracing::debug!(
         user_id = %run.user_id,
         run_id = %run.run_id,
         retention_days = raw_sync_history_retention_days.value(),
@@ -1454,7 +1477,7 @@ fn run_automatic_inner_with_runner(
     if matches!(aggregate_result, AggregateSyncResult::Failure)
         && summary.addresses_failed.value() > 0
     {
-        tracing::info!(
+        tracing::debug!(
             user_id = %run.user_id,
             run_id = %run.run_id,
             source = ?source,
@@ -2150,7 +2173,7 @@ mod tests {
         let summary = empty_sync_summary(run.run_id, 0);
         let expected_schedule_hint = summary.schedule_hint;
 
-        let returned = run_started_automatic_with(
+        let (returned, _) = run_started_automatic_with(
             run,
             TriggerSource::Schedule,
             TransactionSyncScope::User,
@@ -2637,7 +2660,7 @@ mod tests {
             let run = make_run_context(&clock);
             let mut receiver = crate::tasks::subscribe_transaction_sync_events(run.user_id)
                 .expect("sync event subscription should succeed");
-            let summary = run_started_automatic_with(
+            let (summary, _) = run_started_automatic_with(
                 run,
                 TriggerSource::Schedule,
                 TransactionSyncScope::User,

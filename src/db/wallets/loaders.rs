@@ -4,7 +4,7 @@ use super::parsers::{
     parse_summary_hd_key_row, parse_wallet_row,
 };
 use crate::account_model::AccountModel;
-use crate::asset_capabilities::account_model_for;
+use crate::asset_capabilities::{AssetId, account_model_for};
 use crate::balance_reliability::BalanceReliability;
 use crate::db::balance_reliability::load_account_balance_reliability_contexts;
 use crate::db::error::DbError;
@@ -612,6 +612,38 @@ fn load_manual_asset_accounts_batched(
     .collect()
 }
 
+/// Held asset IDs with their manual name snapshots, synced first (no name) and
+/// then the oldest manual name first, so callers keep the first name per asset.
+pub(crate) fn load_held_asset_names(
+    user_id: UserId,
+) -> Result<Vec<(AssetId, Option<String>)>, DbError> {
+    with_user_db(user_id, |conn| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT asset_id, NULL AS asset_name, NULL AS first_seen
+             FROM digital_asset_accounts WHERE wallet_id IS NOT NULL
+             UNION ALL
+             SELECT asset_id, asset_name, MIN(created_at) AS first_seen
+             FROM manual_asset_accounts GROUP BY asset_id, asset_name
+             ORDER BY first_seen, asset_id, asset_name",
+            )
+            .map_err(|err| DbError::from_rusqlite_error("prepare held assets", err))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(|err| DbError::from_rusqlite_error("query held assets", err))?;
+        rows.map(|row| {
+            let (raw_id, name) =
+                row.map_err(|err| DbError::from_rusqlite_error("read held asset", err))?;
+            let id = AssetId::owned(raw_id)
+                .map_err(|err| DbError::new(format!("Invalid held asset ID: {err}")))?;
+            Ok((id, name))
+        })
+        .collect()
+    })
+}
+
 pub(crate) fn load_wallet_summary_bundle(user_id: UserId) -> Result<WalletSummaryBundle, DbError> {
     with_user_db(user_id, |conn| {
         let wallets = load_wallets_with_details_batched(conn)?;
@@ -955,6 +987,47 @@ mod tests {
         let manual_ada = manual_ada.unwrap();
         assert_eq!(manual_ada.unit_code.as_str(), "ADA");
         assert_eq!(manual_ada.decimal_precision.as_u8(), 6);
+    }
+
+    #[test]
+    fn held_asset_names_list_synced_first_then_oldest_manual_name() {
+        let (user_id, wallet_id) = setup_user_with_wallet_manual_ada();
+        for (label, name, at) in [
+            ("Later ADA", "New ADA", (2026, 3, 1)),
+            ("Earlier ADA", "Old ADA", (2026, 1, 1)),
+        ] {
+            insert_manual_asset_account_row(
+                user_id,
+                wallet_id,
+                ManualAssetAccountFixture {
+                    asset_id: "cardano",
+                    network_id: "cardano-mainnet",
+                    unit_code: "ADA",
+                    asset_name: name,
+                    network_name: "Cardano",
+                    coingecko_id: "cardano",
+                    label,
+                },
+                chrono::Utc
+                    .with_ymd_and_hms(at.0, at.1, at.2, 12, 0, 0)
+                    .unwrap(),
+            );
+        }
+
+        let held = load_held_asset_names(user_id).expect("held assets should load");
+        let held: Vec<(&str, Option<&str>)> = held
+            .iter()
+            .map(|(id, name)| (id.as_str(), name.as_deref()))
+            .collect();
+        assert_eq!(
+            held,
+            vec![
+                ("ethereum", None),
+                ("cardano", Some("Old ADA")),
+                ("cardano", Some("Cardano")),
+                ("cardano", Some("New ADA")),
+            ]
+        );
     }
 
     #[test]

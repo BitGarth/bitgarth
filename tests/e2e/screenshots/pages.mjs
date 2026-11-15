@@ -8,10 +8,11 @@
 // If a setup function returns { path: "..." }, that path overrides the static path.
 
 import { TEST_ETH_ADDRESS, TEST_BTC_ADDRESS } from "../helpers/auth.mjs";
+import {
+  daysBeforeShowcase, OTHER_BTC_ADDRESS, SHOWCASE_BTC, SHOWCASE_USERNAME, SHOWCASE_ZONE,
+} from "./showcase.mjs";
 
 const SHOWCASE_WALLET_LABEL = "Garth's Main Wallet";
-export const HOLDINGS_REPORT_OTHER_BTC_ADDRESS =
-  "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa";
 const HOLDINGS_REPORT_OTHER_WALLET_LABEL = "Garth's Other Wallet";
 
 async function postOk(requestContext, path, body) {
@@ -74,6 +75,10 @@ async function ensurePopulatedWallet(requestContext, ctx) {
   // EUR + price fetching so balances convert and net worth shows.
   await postOk(requestContext, "/_app/user/settings/currency", {
     currency: "EUR",
+  });
+  // Report boundaries and transaction prices use the same local days as the UI.
+  await postOk(requestContext, "/_app/user/settings/timezone", {
+    timezone: SHOWCASE_ZONE,
   });
   await postOk(requestContext, "/_app/user/preferences/price_fetching", {
     enabled: true,
@@ -138,7 +143,7 @@ async function ensurePopulatedWallet(requestContext, ctx) {
 
   // Block until synced transaction history lands so the transactions page and
   // the report render real data.
-  await waitForConfirmedTransactions(requestContext, ctx.btcAccountId, 2, 30_000);
+  await waitForConfirmedTransactions(requestContext, ctx.btcAccountId, SHOWCASE_BTC.stats.tx_count, 30_000);
   await waitForConfirmedTransactions(requestContext, ctx.ethAccountId, 2, 30_000);
 
   // Net worth ≈ 0.30407540·92000 + 1.197007·3200 + 8.473921·280 ≈ €34,178.
@@ -158,7 +163,7 @@ async function ensureHoldingsReportOtherWallet(requestContext, ctx) {
 
   const btc = await postOk(requestContext, "/_app/user/wallets/bitcoin/add", {
     request: {
-      address: HOLDINGS_REPORT_OTHER_BTC_ADDRESS,
+      address: OTHER_BTC_ADDRESS,
       network: "mainnet",
       wallet_label: HOLDINGS_REPORT_OTHER_WALLET_LABEL,
     },
@@ -175,6 +180,107 @@ async function ensureHoldingsReportOtherWallet(requestContext, ctx) {
     ctx.holdingsReportOtherBtcAccountId,
     1,
     30_000,
+  );
+}
+
+// CoinGecko's keyless history reaches back one year, and the fixture's Bitcoin
+// history is older, so save the user's own price for each transaction day
+// (in the showcase timezone). Anchors are rough EUR prices, interpolated.
+const BTC_EUR_ANCHORS = [
+  ["2023-01-01", 15_500],
+  ["2024-01-01", 38_500],
+  ["2025-01-01", 90_000],
+  ["2026-01-01", 84_000],
+  ["2027-01-01", 92_000],
+];
+
+function demoBtcEurPrice(isoDate) {
+  const at = Date.parse(isoDate);
+  for (let index = 1; index < BTC_EUR_ANCHORS.length; index += 1) {
+    const [toDate, toPrice] = BTC_EUR_ANCHORS[index];
+    const [fromDate, fromPrice] = BTC_EUR_ANCHORS[index - 1];
+    if (at <= Date.parse(toDate)) {
+      const share = Math.max(0, at - Date.parse(fromDate)) / (Date.parse(toDate) - Date.parse(fromDate));
+      return (fromPrice + (toPrice - fromPrice) * share).toFixed(2);
+    }
+  }
+  return BTC_EUR_ANCHORS.at(-1)[1].toFixed(2);
+}
+
+async function ensureTransactionPrices(requestContext, ctx) {
+  if (ctx.transactionPricesReady) {
+    return;
+  }
+  await ensurePopulatedWallet(requestContext, ctx);
+  const response = await requestContext.get(
+    `/_app/user/account/${ctx.btcAccountId}/transactions?pending_page=1&confirmed_page=1`,
+  );
+  if (!response.ok()) {
+    throw new Error(`Failed to load BTC history: ${response.status()}`);
+  }
+  const body = await response.json();
+  const localDay = new Intl.DateTimeFormat("en-CA", { timeZone: SHOWCASE_ZONE });
+  const days = new Set(body.confirmed.rows.map((row) => localDay.format(new Date(row.occurred_at))));
+  for (const day of days) {
+    await postOk(requestContext, "/_app/user/prices/overrides", {
+      input: {
+        subject: { kind: "catalog_asset", id: "bitcoin" },
+        quote_currency: "EUR",
+        price_time_local: `${day}T00:00:00`,
+        price: demoBtcEurPrice(day),
+        source_note: "Exchange statement",
+      },
+    });
+  }
+  ctx.transactionPricesReady = true;
+}
+
+const PRICES_WINDOW_DAYS = 6;
+
+async function ensurePriceHistory(requestContext, ctx) {
+  if (ctx.priceHistoryReady) {
+    return;
+  }
+  await ensurePopulatedWallet(requestContext, ctx);
+
+  const daysAgo = ctx.seededPrices ? daysBeforeShowcase : (days) =>
+    new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+  ctx.pricesWindow = { from: daysAgo(PRICES_WINDOW_DAYS), to: daysAgo(1) };
+  // Backfill runs on login and when price fetching turns on; both happened
+  // before the wallet existed, so turn it off and on again now there is work.
+  if (!ctx.seededPrices) {
+    for (const enabled of [false, true]) {
+      await postOk(requestContext, "/_app/user/preferences/price_fetching", { enabled });
+    }
+  }
+
+  await postOk(requestContext, "/_app/user/prices/overrides", {
+    input: {
+      subject: { kind: "catalog_asset", id: "bitcoin" },
+      quote_currency: "EUR",
+      price_time_local: `${daysAgo(3)}T14:30:00`,
+      price: "91850.00",
+      source_note: "OTC desk fill",
+    },
+  });
+
+  const query = `asset=bitcoin&from=${ctx.pricesWindow.from}&to=${ctx.pricesWindow.to}&source=CoinGecko`;
+  const deadline = Date.now() + 30_000;
+  let daily = 0;
+  while (Date.now() < deadline) {
+    const response = await requestContext.get(`/_app/user/prices/history?${query}`);
+    if (response.ok()) {
+      const body = await response.json();
+      daily = body.entries.filter((entry) => "Daily" in entry).length;
+      if (daily >= PRICES_WINDOW_DAYS) {
+        ctx.priceHistoryReady = true;
+        return;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(
+    `Timed out waiting for ${PRICES_WINDOW_DAYS} daily BTC prices; last count=${daily}`,
   );
 }
 
@@ -272,20 +378,19 @@ function boundaryTimeLocal(report, boundary, useNextDayForClosing = false) {
   return `${date}T00:00:00`;
 }
 
-async function fetchMissingResolvedPrices(requestContext, walletId, report) {
+async function fetchUnseededReportPrices(requestContext, walletId, report) {
   const response = await requestContext.get(
-    `/_app/user/wallets/${walletId}/report/resolved-prices?from=${report.from}&to=${report.to}&timezone=UTC`,
+    `/_app/user/wallets/${walletId}/report/resolved-prices?from=${report.from}&to=${report.to}&timezone=${encodeURIComponent(SHOWCASE_ZONE)}`,
   );
   if (!response.ok()) {
     throw new Error(`resolved-prices fetch failed: ${response.status()}`);
   }
   const views = await response.json();
-  return views.filter((view) => view.price === null);
+  return views.filter((view) => view.source?.kind !== "user_override");
 }
 
-// Seed user price overrides for every report boundary that lacks a price so the
-// wallet report's price section collapses and the main report renders. Throws
-// if a boundary remains unpriced after seeding (with a closing-day fallback).
+// Pin each report boundary to a fixture price even if the rolling provider
+// cache already covers it. Retry exclusive closing boundaries on the next day.
 async function seedReportPrices(requestContext, ctx, reportKey) {
   const seededKey = `reportPricesSeeded${reportKey}`;
   if (ctx[seededKey]) {
@@ -306,17 +411,17 @@ async function seedReportPrices(requestContext, ctx, reportKey) {
     });
   };
 
-  for (const view of await fetchMissingResolvedPrices(requestContext, ctx.walletId, report)) {
+  for (const view of await fetchUnseededReportPrices(requestContext, ctx.walletId, report)) {
     await seed(view, false);
   }
 
   // Closing boundary day can be exclusive; retry any remainder on the next day.
-  let remaining = await fetchMissingResolvedPrices(requestContext, ctx.walletId, report);
+  let remaining = await fetchUnseededReportPrices(requestContext, ctx.walletId, report);
   for (const view of remaining) {
     await seed(view, true);
   }
 
-  remaining = await fetchMissingResolvedPrices(requestContext, ctx.walletId, report);
+  remaining = await fetchUnseededReportPrices(requestContext, ctx.walletId, report);
   if (remaining.length > 0) {
     throw new Error(
       `report prices still missing after seeding: ${JSON.stringify(remaining)}`,
@@ -340,6 +445,10 @@ export const pages = [
     auth: false,
     setup: null,
     waitFor: "#password",
+    interact: async (page) => {
+      await page.locator("#username").fill(SHOWCASE_USERNAME);
+      await page.locator("#username").blur();
+    },
   },
   {
     name: "wallets-empty",
@@ -419,6 +528,24 @@ export const pages = [
     waitFor: ".wr-prices-section",
   },
   {
+    // The report's price panel, where a user sets their own boundary prices.
+    name: "wallet-report-2024-prices",
+    path: "/wallets",
+    auth: true,
+    setup: async (requestContext, _mockServers, ctx) => {
+      await ensurePopulatedWallet(requestContext, ctx);
+      await seedReportPrices(requestContext, ctx, "2024");
+      return {
+        path: `/wallets/${ctx.walletId}?start=${REPORTS["2024"].from}&end=${REPORTS["2024"].to}`,
+      };
+    },
+    waitFor: ".wr-prices-section",
+    interact: async (page) => {
+      await page.locator(".wr-prices-strip").click();
+      await page.locator(".wr-prices-strip[aria-expanded='true']").waitFor({ timeout: 5000 });
+    },
+  },
+  {
     name: "wallet-report-2025",
     path: "/wallets",
     auth: true,
@@ -446,13 +573,30 @@ export const pages = [
     waitFor: ".wr-desktop-view:visible, .wr-mobile-view:visible",
   },
   {
+    name: "prices",
+    path: "/prices",
+    auth: true,
+    setup: async (requestContext, _mockServers, ctx) => {
+      await ensurePriceHistory(requestContext, ctx);
+      return {
+        path: `/prices?asset=bitcoin&start=${ctx.pricesWindow.from}&end=${ctx.pricesWindow.to}`,
+      };
+    },
+    waitFor: ".prices-table",
+  },
+  {
     name: "account-transactions",
     path: "/wallets",
     auth: true,
     setup: async (requestContext, _mockServers, ctx) => {
-      await ensurePopulatedWallet(requestContext, ctx);
-      return { path: `/wallets/account/${ctx.btcAccountId}/transactions` };
+      await ensureTransactionPrices(requestContext, ctx);
+      return { path: `/wallets/account/${ctx.btcAccountId}/transactions?start=2023-08-01&end=${daysBeforeShowcase(0)}` };
     },
     waitFor: ".transactions-list",
+    frameMarketing: async (page) => {
+      const history = page.locator(".transactions-table-section").filter({ has: page.locator(".tx-sort-toggle") });
+      await history.getByTitle("Table view").click();
+      await history.locator(".transactions-table-view").waitFor();
+    },
   },
 ];
